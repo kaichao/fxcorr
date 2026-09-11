@@ -120,6 +120,16 @@ for subint in batch:
 - **积分边界**：`subintsthisintegration = intTime*1e9/subintNS`（visibility.cpp:96）；batch 时长 = intTime 整数倍（data-spec 12 节）保证跨 batch 追加不碎片化。
 - **结果数组布局**：`threadresultfreqoffset / threadresultbaselineoffset / completestridelength` 预算全部沿用 configuration.cpp:2429-2453——x 侧不重造索引体系，只替换"数据来源"（MPI 消息 → .sp 文件）。
 
+**实施记录（2026-09-11 完成，与计划偏差见下）**：
+
+- **文件划分**：spreader.{h,cpp}（.sp 读取，每站每 band 一个 SpReader，顺序 fseek 读 subint）、xmac.{h,cpp}（XMAC 批循环 + baselineweight + uvshiftAndAverage 简化版，照 core.cpp:814-1052、1005-1052、1431-1938 删 pulsar/多相位中心/锁/线程切分）、integrate.{h,cpp}（单 Visibility 管理 + autocorr.bin 累加，替代 FxManager 的环形缓冲+写线程）、main.cpp（batch.json、逐 subint 驱动）。
+- **单 Visibility 零改造**：构造照 fxmanager.cpp:177（numvis=1）；todiskbuffer 预算照 fxmanager.cpp:114-133；写盘时序 = addData 满 intTime → writedata → increment；可见度/自相关校准与 SWIN 落盘全部复用（writedata 内从 floatresults 现算 baselineweights/autocorrweights）。
+- **自相关批次化（关键修正）**：mpifxcorr 的自相关按 maxacblocks 批次（core.cpp:993-1003）平均并累加，而非每 subint 一次——原计划"每 subint 一条 autocorr"与上游节奏不等价。改为 autocorr.bin 每 subint 存 ac_batches = ceil(blockspersend/maxacblocks) 条记录（header 增加 ac_batches 字段），f 侧每批次 averageFrequency+落盘+zeroAutocorrelations，x 侧逐条累加（integrate.cpp）。
+- **fxcorr-f weights 槽语义 bug（本阶段修复）**：`Mode::getDataWeight(band, slot)` 的 slot 是 NUM BUFFERED FFTS 缓冲槽且仅在 process 后有效，fxcorr-f 原实现按全局 FFT 序在 process 前写盘（越界读+时点错误）→ 改为 writeSpectra 时按槽收集、subint 尾 flushWeights() fseek 回填占位区（.sp 布局不变）。
+- **V1 边界（main 启动检查）**：intTime 为 subintNS 整数倍（offsetnsperintegration==0，dump 网格 = subint 网格）；单相位中心；maxproducts≤2（无 cross-polar autocorr）；无 pulsar/phased array。
+- **验收 1、2 达成（2026-09-11）**：2 站 4 秒小实验（vex2difx+difxcalc → fxcorr-f → fxcorr-x → difx2fits 出 FITS）。对拍：同数据同配置 mpifxcorr，SWIN 前 6 条记录（2 个完整积分）逐记录全等——头字段全等、可见度相对误差 <1e-6、weight 精确一致（0.9892578125 逐位吻合）。对拍工具 `fxcorr/test/cmp_swin.py`。
+- **mpifxcorr mux 滞后（对拍发现，非 fxcorr 错误）**：mpifxcorr 的 vdifmux 流式管线存在确定性可见滞后（读线程+mux 与 main 竞争），数据后段边界 subint 被标 invalid（本次实验 subint 5 只 50/512 块有效、subint 7 208 块，两次运行完全可复现）；fxcorr 的 fseek 直读无此滞后。对拍应在数据完整覆盖的积分段进行（batch 时长 ≤ 数据时长 − 一个 subint 余量）。
+
 ### 2.4 fxcorr/（bash 编排）
 
 `run_batch.sh`：校验 batch 对齐 → 逐站调 fxcorr-f → 调 fxcorr-x → 更新 `meta/batches.index`。

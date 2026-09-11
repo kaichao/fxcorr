@@ -1,0 +1,197 @@
+#include "integrate.h"
+
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <iostream>
+
+#include <fxcorrcommon/visibility.h>
+
+using namespace std;
+
+static const string CIRCULAR_POL_NAMES[4] = {"RR", "LL", "RL", "LR"};
+static const string LL_CIRCULAR_POL_NAMES[4] = {"LL", "RR", "LR", "RL"};
+static const string LINEAR_POL_NAMES[4] = {"XX", "YY", "XY", "YX"};
+
+// autocorr.bin header layout (FEngineWriter::writeAutocorrHeader):
+// "FXCAC\0" + u32 version + u32 nsub + u32 nbands + per band (u32 bandindex, u32 nchan)
+
+Integrator::Integrator(Configuration *conf, int cindex, const string &difxdir, int eseconds,
+	int scan, int startsec, int startns) :
+	config(conf), configindex(cindex), vis_(0), todiskbuffer_(0)
+{
+	// todiskbuffer sizing follows fxmanager.cpp:114-133
+	int resultlength = config->getMaxCoreResultLength();
+	int todiskbufferlen = resultlength*8;
+	for(int i=0;i<config->getNumConfigs();i++)
+	{
+		int confresultbytes = config->getCoreResultLength(i)*8;
+		int minchans = 999999;
+		for(int j=0;j<config->getFreqTableLength();j++)
+		{
+			if(config->isFrequencyOutput(i, j) && config->getFNumChannels(j)/config->getFChannelsToAverage(j) < minchans)
+				minchans = config->getFNumChannels(j)/config->getFChannelsToAverage(j);
+		}
+		double headerbloatfactor = 1.0 + ((double)(Visibility::HEADER_BYTES))/(minchans*8);
+		if(confresultbytes*headerbloatfactor > todiskbufferlen)
+			todiskbufferlen = int(1.02*confresultbytes*headerbloatfactor); //a little extra margin to be sure
+	}
+
+	todiskbuffer_ = (char*)vectorAlloc_u8(todiskbufferlen);
+	if(!todiskbuffer_)
+	{
+		cerr << "Failed to allocate " << todiskbufferlen << " bytes for the SWIN output buffer" << endl;
+		exit(EXIT_FAILURE);
+	}
+
+	// writeSWIN appends into the .difx dir, so it must exist beforehand
+	if(system(("mkdir -p " + difxdir).c_str()) != 0)
+	{
+		cerr << "Failed to create output directory " << difxdir << endl;
+		exit(EXIT_FAILURE);
+	}
+
+	// polarisation names as in fxmanager.cpp:171-174
+	const string *polnames;
+	if(config->circularPolarisations())
+		polnames = ((config->getMaxProducts() == 1)&&(config->getDRecordedBandPol(0, 0, 0) == 'L'))?LL_CIRCULAR_POL_NAMES:CIRCULAR_POL_NAMES;
+	else
+		polnames = LINEAR_POL_NAMES;
+
+	vis_ = new Visibility(config, 0, 1, todiskbuffer_, todiskbufferlen, eseconds, scan, startsec, startns, polnames);
+	if(!vis_->configuredOK())
+	{
+		cerr << "Visibility configuration failed" << endl;
+		exit(EXIT_FAILURE);
+	}
+}
+
+Integrator::~Integrator()
+{
+	delete vis_;
+	vectorFree(todiskbuffer_);
+}
+
+bool Integrator::addSubint(cf32 *subintresults)
+{
+	bool done = vis_->addData(subintresults);
+	if(done)
+	{
+		vis_->writedata();
+		vis_->increment();
+	}
+	return done;
+}
+
+void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, cf32 *subintresults)
+{
+	f32 *floatresults = (f32*)subintresults;
+	int numdatastreams = config->getNumDataStreams();
+
+	for(int ds=0;ds<numdatastreams;ds++)
+	{
+		FILE *file = fopen(autocorrFiles[ds].c_str(), "rb");
+		if(file == NULL)
+		{
+			cerr << "addAutocorrs: cannot open " << autocorrFiles[ds] << endl;
+			continue;
+		}
+
+		// header: magic + version + nsub + acbatches + nbands + per-band (bandindex, nchan)
+		char magic[6];
+		u32 version, nsub, acbatches, nbands;
+		if(fread(magic, 1, 6, file) != 6 || memcmp(magic, "FXCAC\0", 6) != 0 ||
+		   fread(&version, 4, 1, file) != 1 || version != 1 ||
+		   fread(&nsub, 4, 1, file) != 1 ||
+		   fread(&acbatches, 4, 1, file) != 1 ||
+		   fread(&nbands, 4, 1, file) != 1)
+		{
+			cerr << "addAutocorrs: bad header in " << autocorrFiles[ds] << endl;
+			fclose(file);
+			continue;
+		}
+		if((int)nbands != config->getDNumRecordedBands(configindex, ds))
+		{
+			cerr << "addAutocorrs: " << autocorrFiles[ds] << " has " << nbands << " bands, config expects " << config->getDNumRecordedBands(configindex, ds) << endl;
+			fclose(file);
+			continue;
+		}
+
+		// per-band channel counts; each ac batch record is sum over bands of (nchan*8 + 4) bytes
+		int *bandnchan = new int[nbands];
+		long long recordsize = 0;
+		for(int k=0;k<(int)nbands;k++)
+		{
+			u32 bandindex, nchan;
+			if(fread(&bandindex, 4, 1, file) != 1 || fread(&nchan, 4, 1, file) != 1)
+			{
+				cerr << "addAutocorrs: short header in " << autocorrFiles[ds] << endl;
+				delete [] bandnchan;
+				fclose(file);
+				continue;
+			}
+			bandnchan[k] = (int)nchan;
+			recordsize += (long long)nchan*8 + 4;
+		}
+
+		long long headeroffset = 6 + 4 + 4 + 4 + 4 + (long long)nbands*8;
+		if(subint < 0 || (u32)subint >= nsub)
+		{
+			cerr << "addAutocorrs: subint " << subint << " out of range (nsub=" << nsub << ")" << endl;
+			delete [] bandnchan;
+			fclose(file);
+			continue;
+		}
+		if(fseeko(file, headeroffset + (long long)subint*(long long)acbatches*recordsize, SEEK_SET) != 0)
+		{
+			cerr << "addAutocorrs: seek failed in " << autocorrFiles[ds] << endl;
+			delete [] bandnchan;
+			fclose(file);
+			continue;
+		}
+
+		// core.cpp:1273-1302 / 1314-1339 with zoom-band-free V1 assumption:
+		// every ac batch record of this subint is accumulated
+		cf32 *acbuf = new cf32[config->getFNumChannels(config->getDRecordedFreqIndex(configindex, ds, 0))];
+		for(u32 rec=0;rec<acbatches;rec++)
+		{
+			int resultindex = config->getCoreResultAutocorrOffset(configindex, ds);
+			int weightindex = config->getCoreResultACWeightOffset(configindex, ds)*2;
+			for(int k=0;k<(int)nbands;k++)
+			{
+				int freqindex = config->getDRecordedFreqIndex(configindex, ds, k);
+				int freqchannels = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
+				if((int)bandnchan[k] != freqchannels)
+				{
+					cerr << "addAutocorrs: " << autocorrFiles[ds] << " band " << k << " has " << bandnchan[k] << " channels, config expects " << freqchannels << endl;
+					resultindex += freqchannels;
+					weightindex++;
+					continue;
+				}
+
+				if(fread(acbuf, sizeof(cf32), freqchannels, file) != (size_t)freqchannels)
+				{
+					cerr << "addAutocorrs: short record in " << autocorrFiles[ds] << endl;
+					break;
+				}
+				f32 acweight = 0.0f;
+				if(fread(&acweight, 4, 1, file) != 1)
+				{
+					cerr << "addAutocorrs: short weight in " << autocorrFiles[ds] << endl;
+					break;
+				}
+
+				if(config->isFrequencyUsed(configindex, freqindex) || config->isEquivalentFrequencyUsed(configindex, freqindex))
+				{
+					vectorAdd_cf32_I(acbuf, &subintresults[resultindex], freqchannels);
+					floatresults[weightindex] += acweight;
+				}
+				resultindex += freqchannels;
+				weightindex++;
+			}
+		}
+		delete [] acbuf;
+		delete [] bandnchan;
+		fclose(file);
+	}
+}

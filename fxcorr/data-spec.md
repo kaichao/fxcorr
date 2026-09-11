@@ -191,7 +191,7 @@ Header（定长 256 字节）：
   i32       sec（offsetseconds，相对 scan 起点的秒）
   i32       ns（offsetns）
   u32[flag_words_per_subint]  valid_flags（每 30 位对应一个 FFT 块，位=1 有效）
-  f32[blocks_per_send]        weights（每 FFT 块的 dataWeight，0.0~1.0；per-band：各 .sp 文件只存本 band 的权重）
+  f32[blocks_per_send]        weights（每 FFT 块的 dataWeight，0.0~1.0；per-band：各 .sp 文件只存本 band 的权重；槽式更新：写盘时按槽收集后回填，见 fxcorr-f 的 FEngineWriter::flushWeights）
   cf32[blocks_per_send × num_channels]  spectra（subloop 序，每 subloop num_channels 个复数）
 ```
 
@@ -214,20 +214,21 @@ Header：
 每 subint：cf32[n_tones]（各 band tone 依序排列）
 ```
 
-**autocorr.bin**（每 subint 已按 maxacblocks 频率平均后的自相关）：
+**autocorr.bin**（每 subint 按 maxacblocks 批次频率平均后的自相关）：
 
 ```
 Header：
   char[6]   magic = "FXCAC\0"
   u32       version = 1
   u32       n_subints
+  u32       ac_batches（每 subint 的 AC 平均批次记录数 = ceil(blocks_per_send/maxacblocks)）
   u32       n_bands
   每 band：u32 band_index；u32 num_channels
-每 subint：
-  每 band：cf32[num_channels]（自相关复数谱）+ f32 weight（累积权重）
+每 subint（ac_batches 条记录，按 fftloop 批序）：
+  每 band：cf32[num_channels]（自相关复数谱）+ f32 weight（本批次累积权重）
 ```
 
-自相关在 f 侧由 `Mode::process` 累积、`averageFrequency()` 平均；x 侧负责将其写入 SWIN 自相关段（基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。
+自相关在 f 侧由 `Mode::process` 累积，每 maxacblocks 个 FFT（与 core.cpp:993-1003 同节奏）`averageFrequency()` 平均后落一条记录、随即 `zeroAutocorrelations()`；x 侧把该 subint 的全部记录逐条累加进 SWIN 自相关段（`vectorAdd`，基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。maxacblocks 由 .calc 的 AC AVG INTERVAL 与 subint 结构共同决定（公式同 core.cpp:778-783）。
 
 ### 5.4 X-Engine 输出（vis/，SWIN）
 

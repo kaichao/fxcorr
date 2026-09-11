@@ -12,9 +12,9 @@ using namespace std;
 // .sp / pcal.bin / autocorr.bin file layouts follow fxcorr/data-spec.md 5.3
 // (host byte order; single-machine in V1)
 
-FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int confindex, int ds, int nsubs) :
+FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int confindex, int ds, int nsubs, int acb) :
 	config(conf), configindex(confindex), dsindex(ds), nsubints(nsubs),
-	nrecordedbands(0), blockspersend(0), flagwords(0), autocorrchannels(0),
+	nrecordedbands(0), blockspersend(0), flagwords(0), acblocks(acb), autocorrchannels(0),
 	haspcal(false), pcalfile(0), autocorrfile(0)
 {
 	nrecordedbands = config->getDNumRecordedBands(configindex, dsindex);
@@ -34,6 +34,8 @@ FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int conf
 	// one .sp file per recorded band
 	spfiles.resize(nrecordedbands);
 	spnames.resize(nrecordedbands);
+	weightaccum.resize(nrecordedbands);
+	weightoffsets.resize(nrecordedbands);
 	for(int j=0;j<nrecordedbands;j++)
 	{
 		char filename[32];
@@ -46,6 +48,8 @@ FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int conf
 			exit(EXIT_FAILURE);
 		}
 		writeSpHeader(j);
+		weightaccum[j] = new f32[blockspersend];
+		weightoffsets[j] = 0;
 	}
 
 	if(haspcal)
@@ -71,8 +75,11 @@ FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int conf
 FEngineWriter::~FEngineWriter()
 {
 	for(int j=0;j<nrecordedbands;j++)
+	{
 		if(spfiles[j] != NULL)
 			fclose(spfiles[j]);
+		delete [] weightaccum[j];
+	}
 	if(pcalfile != NULL)
 		fclose(pcalfile);
 	if(autocorrfile != NULL)
@@ -142,6 +149,8 @@ void FEngineWriter::writeAutocorrHeader()
 	fwrite("FXCAC\0", 1, 6, autocorrfile);
 	u32 version = 1;  fwrite(&version, 1, 4, autocorrfile);
 	u32 nsub = nsubints;  fwrite(&nsub, 1, 4, autocorrfile);
+	// number of AC averaging-batch records per subint (= ceil(blockspersend/acblocks))
+	u32 acb = (blockspersend + acblocks - 1)/acblocks;  fwrite(&acb, 1, 4, autocorrfile);
 	u32 nbands = nrecordedbands;  fwrite(&nbands, 1, 4, autocorrfile);
 	for(int j=0;j<nrecordedbands;j++)
 	{
@@ -162,10 +171,14 @@ void FEngineWriter::writeSubintHeader(int scan, int sec, int ns, Mode *mode, con
 		// valid flags, one bit per FFT block
 		fwrite(validflags, 1, sizeof(u32)*flagwords, spfiles[j]);
 
-		// per-band data weights (getDataWeight: perbandweights or plain dataweight)
+		// per-FFT data weights: written as a zero placeholder here and
+		// back-filled by flushWeights() at the end of the subint, because
+		// Mode::getDataWeight(band, slot) is only valid after process() has
+		// filled the corresponding buffered slot (slot-indexed, not FFT-indexed)
+		weightoffsets[j] = ftello(spfiles[j]);
 		for(int b=0;b<blockspersend;b++)
 		{
-			f32 w = mode->getDataWeight(j, b);
+			f32 w = 0.0f;
 			fwrite(&w, 1, 4, spfiles[j]);
 		}
 	}
@@ -187,7 +200,22 @@ void FEngineWriter::writeSpectra(int fftloop, Mode *mode)
 		{
 			const cf32 *spec = mode->getFreqs(j, b);
 			fwrite(spec, sizeof(cf32), nchan, spfiles[j]);
+			// b is the buffered slot just filled by process(fftloop*numBufferedFFTs+b, b)
+			weightaccum[j][fftloop*config->getNumBufferedFFTs(configindex) + b] = mode->getDataWeight(j, b);
 		}
+	}
+}
+
+void FEngineWriter::flushWeights()
+{
+	for(int j=0;j<nrecordedbands;j++)
+	{
+		if(weightoffsets[j] == 0)
+			continue;
+		fseeko(spfiles[j], weightoffsets[j], SEEK_SET);
+		fwrite(weightaccum[j], 1, sizeof(f32)*blockspersend, spfiles[j]);
+		fseeko(spfiles[j], 0, SEEK_END); // resume appending spectra/subint records
+		weightoffsets[j] = 0;
 	}
 }
 
@@ -210,9 +238,10 @@ void FEngineWriter::writePcal(Mode *mode)
 	}
 }
 
-void FEngineWriter::writeAutocorrelation(Mode *mode)
+void FEngineWriter::writeAutocorrelationBatch(Mode *mode)
 {
-	// same order as Core::averageAndSendAutocorrs: average first, then copy out
+	// same order as Core::averageAndSendAutocorrs: average first, then copy out;
+	// one record per maxacblocks batch, the caller zeroes autocorrelations after
 	mode->averageFrequency();
 	for(int j=0;j<nrecordedbands;j++)
 	{

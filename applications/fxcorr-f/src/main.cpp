@@ -125,6 +125,17 @@ int main(int argc, char **argv)
 	}
 	DataReader reader(&config, 0, dsindex, model);
 
+	// autocorrelation averaging batch, same formula as core.cpp:769-783
+	int numbufferedffts = config.getNumBufferedFFTs(0);
+	double blockns = (double)config.getSubintNS(0)/(double)reader.getBlocksPerSend();
+	int maxacblocks = (int)(model->getMaxNSBetweenACAvg(0)/blockns);
+	maxacblocks -= maxacblocks%numbufferedffts;
+	if(maxacblocks == 0)
+	{
+		maxacblocks = numbufferedffts;
+		cerr << "fxcorr-f: requested autocorrelation shift/average time of " << model->getMaxNSBetweenACAvg(0) << " ns cannot be met with " << numbufferedffts << " FFTs being buffered; the time resolution which will be attained is " << maxacblocks*blockns << " ns" << endl;
+	}
+
 	string outdir = workdir + "/fengine/" + batchid + "/" + station;
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
@@ -132,7 +143,7 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-f: cannot create " << outdir << endl;
 		return EXIT_FAILURE;
 	}
-	FEngineWriter writer(outdir, &config, 0, dsindex, nsubints);
+	FEngineWriter writer(outdir, &config, 0, dsindex, nsubints, maxacblocks);
 
 	int sendbytes = reader.getSendBytes();
 	u8 *databuf = new u8[sendbytes];
@@ -188,10 +199,14 @@ int main(int argc, char **argv)
 		writer.writeSubintHeader(scan, offsetsec, offsetns, mode, validflags);
 
 		// same loop structure as core.cpp:786-801: buffered slot reuse over fftloops
-		int numbufferedffts = config.getNumBufferedFFTs(0);
 		int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
+		int acblockcount = 0;
 		for(int fftloop=0;fftloop<fftloops;fftloop++)
 		{
+			int numffts = blockspersend - fftloop*numbufferedffts;
+			if(numffts > numbufferedffts)
+				numffts = numbufferedffts;
+
 			for(int b=0;b<numbufferedffts;b++)
 			{
 				int i = fftloop*numbufferedffts + b;
@@ -200,10 +215,24 @@ int main(int argc, char **argv)
 				mode->process(i, b);
 			}
 			writer.writeSpectra(fftloop, mode);
+
+			// autocorrelation averaging batches, core.cpp:993-1003
+			acblockcount += numffts;
+			if(acblockcount == maxacblocks)
+			{
+				writer.writeAutocorrelationBatch(mode);
+				mode->zeroAutocorrelations();
+				acblockcount = 0;
+			}
+		}
+		if(acblockcount != 0)
+		{
+			writer.writeAutocorrelationBatch(mode);
+			mode->zeroAutocorrelations();
 		}
 
 		writer.writePcal(mode);
-		writer.writeAutocorrelation(mode);
+		writer.flushWeights();
 	}
 
 	delete [] databuf;

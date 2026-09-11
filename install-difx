@@ -106,7 +106,7 @@ The install-difx options are:
                    ["perl", "difxio", "difxmessage", "mark5access", "vdifio",
                     "calcif2", "difx2profile", "misc","vis2screen",
                     "calcserver", "difx2fits", "vex2difx", "difx2mark4",
-                    "mpifxcorr", "fxcorrcommon", "fxcorr-f", "difxfilterbank", "hops", "m6support",
+                    "mpifxcorr", "fxcorrcommon", "fxcorr-f", "fxcorr-x", "difxfilterbank", "hops", "m6support",
                     "polconvert", "guiServer", "mk5daemon", "difx_monitor",
                     "datasim", "difxcalc11", "mark6sg", "mark6meta", "espresso"]
    --skip='...'    Does a normal build, but skips components in a comma
@@ -229,6 +229,7 @@ components = {"perl"          :False,
               "mpifxcorr"     :True,
               "fxcorrcommon"  :True,
               "fxcorr-f"      :True,
+              "fxcorr-x"      :True,
               "mark6sg"       :False,
               "difxfilterbank":False,
               "hops"          :False,
@@ -264,6 +265,7 @@ def setNormalComponentsFalse():
 	components["mpifxcorr"]= False
 	components["fxcorrcommon"]= False
 	components["fxcorr-f"]= False
+	components["fxcorr-x"]= False
 	components["mark6sg"]= False
 	components["python"]= False
 	components["espresso"]= False
@@ -511,6 +513,8 @@ if components["difx2mark4"]:
     apptargets.append(["difx2mark4", difx_version, True,True,True,False])
 if components["fxcorr-f"]:
     apptargets.append(["fxcorr-f", difx_version, True,False,False,True])
+if components["fxcorr-x"]:
+    apptargets.append(["fxcorr-x", difx_version, True,False,False,True])
 if components["difxfilterbank"]:
     apptargets.append(["difxfilterbank", difx_version, True,False,False,True])
 if components["hops"]:
