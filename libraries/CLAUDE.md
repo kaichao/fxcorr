@@ -1,12 +1,13 @@
 # libraries 目录说明
 
-13 个共享库，每个都是独立 autotools + libtool 包，通过 pkg-config 相互发现（无统一根构建）。fxcorrcommon 将来在此新建。
+14 个共享库，每个都是独立 autotools + libtool 包，通过 pkg-config 相互发现（无统一根构建）。fxcorrcommon 已建成。
 
 ## 库一览
 
 | 目录 | 版本 | 作用 |
 |---|---|---|
 | difxio | 3.8.1 | 解析/生成 DiFX 配置与模型文件（.input/.im/.calc/.flag/.threads），核心结构 DifxInput |
+| fxcorrcommon | 0.1 | 去 MPI 相关核心（station-based 算法 + 配置/模型 + SWIN 写盘），mpifxcorr libfxcorr.a 的共享库版，见下节 |
 | difxmessage | 2.9.0 | 组播状态/告警/参数消息收发；内含 mark5ipc 子库（Mark5 锁） |
 | mark5access | 1.7 | 原始基带解包：mark5_stream 两段式 API，支持 Mark4/Mark5B/VLBA/VDIF/CODIF 等 |
 | vdifio | 1.6 | VDIF 帧头、vdifmux 多线程合流、corner-turner、vdifreader |
@@ -38,9 +39,10 @@ libraries/<name>/
 
 要点：`LIBRARY_VERSION` 必须 `AC_SUBST`；`AC_CONFIG_FILES` 漏列子目录 Makefile 会报 "cannot find Makefile"；若用 AX_OPENMP 需在 `m4/` 放 `openmp.m4`（参考 vdifio/m4/）。
 
-## fxcorrcommon 规划
+## fxcorrcommon（已建成）
 
-- 起步清单 = mpifxcorr 的 `libfxcorr_a_SOURCES`（configuration/pcal/mathutil/sysutil/mode/mk5mode/polyco/visibility/model/datamuxer/alert），见 `mpifxcorr/CLAUDE.md`。
-- 依赖建议：difxmessage、mark5access、vdifio（可选）；是否引入 difxio 是决策点。
-- **命名注意**：`mpifxcorr/fxcorr.pc.in` 已占用 `fxcorr.pc` 这个名字（"不含 MPI 的对象库"），新库用 `fxcorrcommon.pc` 避免冲突。
-- 新库注册点：改 `install-difx` 的 4 处（见根 CLAUDE.md）。
+- 源 = mpifxcorr 的 `libfxcorr_a_SOURCES` 11 文件（configuration/pcal/mathutil/sysutil/mode/mk5mode/polyco/visibility/model/datamuxer/alert）+ 公共头 architecture.h/mpifxcorr.h/fraction.h（去 MPI 改动见 `mpifxcorr/CLAUDE.md` 与 fxcorr/impl-plan 2.1）。
+- 依赖（configure.ac 探测）：difxmessage >= 2.9.0、mark5access >= 1.7、vdifio >= 1.6、codifio >= 0.2（CODIF_HEADER_BYTES 必需）；IPP 可选否则 fftw3+fftw3f；mark6sg/mark5ipc/dirlist 零引用不探测。
+- 头装 `$(includedir)/fxcorrcommon/` 子目录（避免与 mpifxcorr 同名头冲突）；**pcal.h 引用 fraction.h，fraction.h 必须进安装头清单**（曾误归 internal 导致 fxcorr-f 编译失败）。
+- 实用工厂：`Configuration::getMode(configindex, dsindex)`（各 Mode 子类创建，fxcorr-f 直接用，无需暴露 clock offsets 等内部 getter）。
+- `fxcorr.pc` 名字被 mpifxcorr 占用（"不含 MPI 的对象库"），本库用 `fxcorrcommon.pc`。

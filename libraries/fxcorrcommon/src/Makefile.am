@@ -16,11 +16,11 @@ h_sources = \
 	datamuxer.h \
 	alert.h \
 	architecture.h \
+	fraction.h \
 	mpifxcorr.h
 
 internal_h_sources = \
-	pcal_impl.h \
-	fraction.h
+	pcal_impl.h
 
 cpp_sources = \
 	configuration.cpp \

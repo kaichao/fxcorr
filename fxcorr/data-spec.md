@@ -191,11 +191,12 @@ Header（定长 256 字节）：
   i32       sec（offsetseconds，相对 scan 起点的秒）
   i32       ns（offsetns）
   u32[flag_words_per_subint]  valid_flags（每 30 位对应一个 FFT 块，位=1 有效）
-  f32[blocks_per_send]        weights（每 FFT 块 dataWeight，0.0~1.0）
+  f32[blocks_per_send]        weights（每 FFT 块的 dataWeight，0.0~1.0；per-band：各 .sp 文件只存本 band 的权重）
   cf32[blocks_per_send × num_channels]  spectra（subloop 序，每 subloop num_channels 个复数）
 ```
 
 - cf32 = `struct { float re; float im; }`（与 mpifxcorr 的 `cf32` 定义一致）
+- weights 语义：对应 `Mode::getDataWeight(band, subloop)`（Mk5Mode 启用 perbandweights 时按 band 取，否则退化为 dataweight[subloop]）；fxcorr-x 侧 baselineweight 还原为两站对应 band 权重之积（mode.cpp 的 weights 累加语义）
 - spectra 语义：已完成解包、延迟对齐（整数+分数采样校正）、条纹旋转、FFT 的结果；**不存共轭副本**，fxcorr-x 侧按需对整段做逐元素共轭（等价于原 `getConjugatedFreqs()`）
 - 通道→频率映射约定见第 8 节；无效 subloop（valid=0 或 dataWeight=0）的频谱块为全零
 - zoom band 不单独落盘（zoom band 在现实现中是父 band 数组的切片，V1 由 x 侧按 .input 的 zoom 定义从对应 recorded band 切片，或 V1 暂不支持 zoom）
@@ -399,7 +400,7 @@ D7（原始基带）  ≫  D8（频域谱）  ≫  D10（可见度）  ≈  D11/
 
 ## 12. 切批与重跑约束
 
-- **对齐**：batch 起点必须落在 subint 边界（MJD 秒是 subintNS/1e9 的整数倍），batch 时长 = `intTime` 整数倍。保证 SWIN integration 跨 batch 完整、追加不碎片化。
+- **对齐**：batch 起点必须落在 subint 边界（MJD 秒是 subintNS/1e9 的整数倍），batch 时长 = `intTime` 整数倍。保证 SWIN integration 跨 batch 完整、追加不碎片化。**fxcorr-f 启动时校验**：batch 起点非 subint 边界则报错退出（容差 1µs，吸收 start_mjd 的 f64 表示误差；batch.json 的 start_mjd 建议写精确 repr，如 58948.291666666664）。
 - **SWIN 追加**：同一实验所有 batch 写同一 `vis/<experiment>.difx/`；重跑整个实验需清空该目录，重跑单个 batch 需按 subint 范围从对应文件裁掉再追加（V1 不实现单 batch 回滚，重跑 = 全实验重跑）。
 - **fengine 覆盖**：重跑某 batch 时，fxcorr-f 覆盖写 `fengine/<batch_id>/` 下文件；fxcorr-x 以 batch.json 的 `status=done` 判定是否需要重跑。
 - **work/**：临时文件（如中间缓冲），进程结束后可安全清理，不进 git。

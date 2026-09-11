@@ -1,6 +1,6 @@
 # fxcorr 改造工作区
 
-本目录是 fxcorr 改造的工作区：文档 + bash 编排脚本（**脚本直接放本目录，与 README / data-spec 平级，不再设 scripts/ 子目录**）。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，共享代码见 `libraries/fxcorrcommon`。
+本目录是 fxcorr 改造的工作区：文档 + bash 编排脚本（**脚本直接放本目录，与 README / data-spec 平级，不再设 scripts/ 子目录**）+ test/ 测试资产。算法实现见 `applications/fxcorr-f`（已建成，见其 CLAUDE.md）、`applications/fxcorr-x`（待建，impl-plan 2.3），共享代码见 `libraries/fxcorrcommon`（已建成）。
 
 ## 文档分工
 
@@ -16,7 +16,7 @@
 - **数据流**：vex2difx + difxcalc（实验级一次）→ fxcorr-f × 各站（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。
 - **三个敲定决策**：UVW 由 fxcorr-x 读 .calc/.im 求值（D1）；可见度直出 SWIN、difx2fits 零改造（D2）；偏振是 band 属性、偏振组合在 x 侧按 BASELINE TABLE 选（D3）。V1 边界与实施步骤见 impl-plan.md。
 
-## 本目录脚本（规划）
+## 本目录脚本（规划，未实现）
 
 | 脚本 | 作用 |
 |---|---|
@@ -28,6 +28,16 @@
 ```bash
 ./fxcorr/run_batch.sh 60512_45000 STA1,STA2,STA3
 ```
+
+## test/ 测试资产
+
+| 文件 | 作用 |
+|---|---|
+| `test.vex` | 上游 `tests/Synthetic/test-usb.vex` 原版（2 站 T1/T2、单 band 4MHz USB、2bit、2020y100d07h00m00s） |
+| `test.v2d` | 配套 vex2difx 配置（antennas=T1,T2，tInt=1，nChan=4096） |
+| `gen_test_vdif.py` | 生成 2bit 单 band VDIF 测试数据（datasim 因上游 IPP 依赖无法 --noipp 构建，此脚本替代；**低位先打包**对齐 mark5access 位序） |
+
+测试流程（测试机 /root/fxcortest/）：`vex2difx test.v2d` → `difxcalc test.calc`（出 .input/.calc/.im）→ `gen_test_vdif.py TEST1.vdif 4 1.5 8`（tone 1.5/1.0MHz、8Ms/s、4 秒）→ 写 `fengine/<batch_id>/batch.json`（start_mjd 用精确 repr，否则 fxcorr-f 对齐校验报错）→ `fxcorr-f <batch_id> T1` / `T2`。已验证 tone 峰落 1.5/1.0MHz 通道。
 
 ## 相关指引
 

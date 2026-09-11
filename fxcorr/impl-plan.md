@@ -76,6 +76,14 @@ for subint in batch:
 - **Mode 改造**（在 fxcorrcommon 的 mode.cpp 内）：`process()` 不变，新增/调整落盘接口：f 侧每 subloop 从 `fftoutputs[band][subloop]` 拷出 `recordedbandchannels` 个 cf32 写出；x 侧读回后按需 `vectorConj_cf32` 得到共轭（.sp 不存共轭副本）。
 - valid flags 位域（30 位/字）与 dataWeight 语义完全沿用现实现（mode.cpp:656-669、mode.h:158）。
 
+**实施记录（2026-09-11 完成，与计划偏差见下）**：
+
+- **Mode 零改造**：`Configuration::getMode()` 工厂与 `getFreqs`/`getPcal`/`getAutocorrelation`/`getDataWeight` 均现成 public，fxcorrcommon 的 mode 未做任何落盘改造。
+- **process 槽复用**：`process(i, subloop)` 的 subloop 是 NUM BUFFERED FFTS 缓冲槽而非 FFT 序号，主循环必须照 core.cpp:786-801 双循环（fftloop × numBufferedFFTs），每 fftloop 结束立即写盘该批槽（槽会被下一批覆盖）；fenginewriter 因此拆为 `writeSubintHeader`（scan/sec/ns + flags + weights）+ 每 fftloop 一次 `writeSpectra`。
+- **datareader V1 边界**：本地 VDIF、单 mux thread、无 fanout、帧粒度 1、文件序号=scan（单 scan 实验）；sendbytes 直接用 `getDataBytes`（已帧对齐含 guard）；定位公式照 datastream.cpp:381-394 + vdiffile.cpp:417-444（framesin = 延迟校正采样偏移/payloadbytes 向下取整，文件偏移 = framesin×framebytes）。
+- **对齐校验**：batch 起点必须落在 subint 边界（容差 1µs，吸收 start_mjd 的 f64 表示误差），非对齐报错退出（验收标准 4）。
+- 验收标准 1 的 f 侧已达成（2 站 4 秒数据 7 subint 跑通，tone 峰位置正确）；对拍（验收 2）待 fxcorr-x。
+
 ### 2.3 applications/fxcorr-x（新 C++ 应用）
 
 模板同上。**核心计算从 `Core::processdata()` 拆出**（core.cpp）：
@@ -122,8 +130,8 @@ for subint in batch:
 ## 3. 关键改造点清单（按依赖序）
 
 1. **fxcorrcommon 建库**：11 源文件拷贝 + architecture.h.in/mpifxcorr.h 头 + mark6meta 式 4 手写构建文件；configuration.cpp 删 MPI 构造与 MPI_Bcast 分支；mode/mk5mode/visibility 删 `#include <mpi.h>`；另删 3 个遗留 include（visibility.{h,cpp} 的 datastream.h、visibility.cpp 的 core.h、mk5mode.cpp 的 mk5.h），补显式 include（visibility.h→configuration.h；visibility.cpp→mode.h+cassert）。
-2. **fxcorr-f datareader**：移植 datastream.cpp 的延迟/切块公式（对照 :745-756 sendbytes、采样时间 500.0/bandwidth µs），实现本地文件顺序读。
-3. **fxcorr-f fenginewriter**：按 data-spec 5.3 的 .sp/pcal.bin/autocorr.bin 布局实现写盘与 header 填充。
+2. **fxcorr-f datareader**：移植 datastream.cpp 的延迟/切块公式（对照 :745-756 sendbytes、采样时间 500.0/bandwidth µs），实现本地文件顺序读。**（已完成，见 2.2 实施记录）**
+3. **fxcorr-f fenginewriter**：按 data-spec 5.3 的 .sp/pcal.bin/autocorr.bin 布局实现写盘与 header 填充。**（已完成，见 2.2 实施记录）**
 4. **fxcorr-x xmac.cpp/integrate.cpp**：从 core.cpp 拷贝段改造——删 MPI 收发（core.cpp:596/302）、删 pulsarbin 分支（binloop=1）、删多线程切分（startblock=0, numblocks=blockspersend）、uvshiftAndAverage 取单相位中心路径。
 5. **install-difx 注册**：components 字典 + setNormalComponentsFalse + libtargets（fxcorrcommon）+ apptargets（fxcorr-f、fxcorr-x）+ --doonly 帮助文本（4 处，见根 CLAUDE.md）。
 6. **fxcorr/CLAUDE.md 同步**：核心约定节按 data-spec v1.1 更新（vis 布局、pcal/autocorr 文件）。
