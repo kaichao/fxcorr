@@ -448,3 +448,10 @@ inc/
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+/tmp/
+.DS_Store
+/Makefile
+
+# fxcorr 工作区的工作流 Makefile（make sync），非 autotools 生成物
+!fxcorr/Makefile
