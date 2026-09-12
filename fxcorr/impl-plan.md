@@ -176,6 +176,13 @@ for subint in batch:
 
 步骤：① 读 `batches/<batch_id>.json` + .input，前置校验对齐（batch 起点 subint 边界、时长 intTime 整数倍，容差同 fxcorr-f；不通过则报错退出，不依赖 fxcorr-f 兜底）；② 置 status=running（batch.json status 字段，无独立 status.txt）；③ 逐站 `fxcorr-f <batch_id> <station> <workdir>`，任一失败 → status=failed、非 0 退出，不跑后续站；④ mkdir .input OUTPUT FILENAME 所在目录；⑤ `fxcorr-x <batch_id> <workdir>`，失败同 ③；⑥ 成功 → status=done，追加 `meta/batches.index` 一行 `<batch_id>,done,<时间戳>`。
 
+**run_batch.sh 实施记录（2026-09-12 完成，fxcorr/run_batch.sh）**：
+
+- 规格 6 步照做，两个实现偏差：① **DATA TABLE 软链每次重指本 batch 的 VDIF**（make_testdata.sh 多 batch 时软链停在最后 batch、其注释承诺由本脚本重做，规格未列但多 batch 正确性必需；raw 数据不存在即报错，跑 fxcorr-f 前就挡）；② 前置校验在规格两条之外加一条 **INT TIME 为 subint 整数倍**（fxcorr-x 的 offsetnsperintegration==0 硬校验，脚本端提前挡）。站列表取 batch.json stations（缺失时从 .input DATASTREAM 解析）。
+- 前置校验实现与程序内校验同语义：batch 起点 subint 边界 1µs 容差照 fxcorr-f main.cpp:175-182（`floor(initsec×1e9+0.5) % subintns` 距 0/subintns ≤ 1000ns）；batch 时长为 intTime 整数倍照 run_bench.sh 公式。
+- status 流转：running→done/failed 写回 batch.json（json.dump 保字段序与 make_testdata.sh 一致）；done 时追加 `meta/batches.index` 一行 `<batch_id>,done,<UTC 时间戳>`（追加语义，每次成功一行）。
+- 验收（测试机 mktd5，全部通过）：正常路径 status running→done、两站 fxcorr-f、fxcorr-x 2 积分、batches.index 追加；失败路径①坏 start_mjd 前置校验报错退出非 0（偏移 7167726 ns 被检出）；失败路径②假 fxcorr-f（stub exit 1）→ status=failed、exit=1、不跑后续站；重跑恢复流转 failed→done。**闭环对拍**：run_bench.sh 基准 vs run_batch.sh 产出 SWIN 前 6 条 cmp_swin **全等**（fxcorr-x 追加写盘语义，重跑同 batch 记录累积，对拍取前 N 条或清 OUTPUT 目录）。
+
 `watch_and_dispatch.sh` **砍掉**：V1 数据集为静态构建，无"轮询 raw/ 发现新数据"场景；流式监视与多节点调度推迟到 V2 由 scalebox 承担（届时 run_batch.sh 的调用改由编排器发出，脚本本身不变）。
 
 **仿真数据生成器 fxcorr-sim**（`applications/fxcorr-sim`，独立 C++ 串行应用；上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建，此为其替身）：
@@ -212,7 +219,7 @@ for subint in batch:
 
 1. **跑通**：小实验（2 站、单 band、单偏振、≥2 个 intTime 时长）单 batch 全流程：vex2difx+difxcalc → fxcorr-f → fxcorr-x → difx2fits 出 FITS，无崩溃、batch.json 状态正确。
 2. **对拍**：同配置同数据跑原 mpifxcorr，SWIN 文件逐记录比较（header 字段全等；可见度复数与 weight 相对误差 < 1e-6，容浮点运算顺序差异）。
-3. **回归**：`pcal.cpp` 的 -DUNIT_TEST 独立测试通过（模式样板）；`libraries/` 其他库不受影响（install-difx 常规构建全绿）。
+3. **回归**：`pcal.cpp` 的 -DUNIT_TEST 独立测试通过（模式样板）；`libraries/` 其他库不受影响（install-difx 常规构建全绿）。**（✓ 已执行 2026-09-12：① pcal UNIT_TEST——`g++ -DUNIT_TEST -DPCAL_DEBUG -I. -I$DIFXROOT/include pcal.cpp mathutil.cpp -lfftw3f -lfftw3 -lpthread -lm` 编译通过，`pcaltest auto` 108 正向用例全过、2 个 failed 用例为上游设计的负向测试（注释 "ought to fail"：offset=0 强制 implicit extractor，预期提取失败），exit=0；② install-difx --noipp 常规构建全绿——默认组件 8 库（difxio/codifio/difxmessage/dirlist/mark5access/vdifio/python/fxcorrcommon）+ mpifxcorr + 10 应用全部构建安装（39 次 make install，日志无 error/failed/Traceback，Done 正常打印；doxygen 缺失被优雅跳过仅影响文档生成；difxcalc11 安装名为 difxcalc；默认 False 组件 datasim/mark6sg 等不在常规构建范围））**
 4. **对齐校验**：batch 起点非 subint 边界时 fxcorr-f 明确报错退出（防御 data-spec 12 节）。
 
 ---

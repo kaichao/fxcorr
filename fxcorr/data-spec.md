@@ -416,9 +416,33 @@ D11 (.FITS) 或 D12 (Mark4)
 ## 11. 数据量级关系（典型）
 
 ```
-D7（原始基带）  ≫  D8（频域谱）  ≫  D10（可见度）  ≈  D11/D12（科学产品）
+D8（频域谱）  ≈  16×D7（原始基带，2bit 记录）  ≫  D10（可见度，单基线）
+D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学产品）≈ D10 量级
 配置类（D1～D6、D9、D13）体积很小（KB～MB）
 ```
+
+注意：D8 **大于** D7——.sp 是全精度复数落盘（每采样 0.5 个 8 字节 cf32 = 4B/采样），而 2bit 原始数据只有 0.25B/采样。mpifxcorr 的 F 数据流式不落盘，落盘体量此前不可见；"频谱域压缩"实际发生在 D8→D10 的积分折叠。
+
+**通用公式**（单站、单 pol；D7/D8/D10 可精确估算，D11/D12 仅量级）：
+
+| 数据 | 公式 | 说明 |
+|---|---|---|
+| D7 | `fs × b/8 × nband` | fs = 采样率（样本/s，= 2×band 带宽，见 5.2 节帧结构反推）；b = 记录位宽（1/2/8bit） |
+| D8 | `(nchan/fftchannels) × fs × 8B × nband` | cf32 = 8B/复数；fftchannels = 2×nchan（50% 重叠）时 = **4×fs×nband**，与 nchan 无关（nchan 增大 → 每 FFT 块采样同比增大 → 块数反比减少，两者抵消）；pcal.bin / autocorr.bin 体积可忽略 |
+| D10 | `(74 + 8×nchan) B × nband/intTime × nbaseline` | 每基线每 band 每积分一条 74B 头 + nchan 个 cf32 记录（SWIN 布局见 5.3）；nbaseline = N(N−1)/2 |
+| D11（FITS-IDI） | ≈ 1~2×D10 | difx2fits 把 SWIN 复制进 FITS UV DATA 加表头，同量级、稍大 |
+| D12（Mark4） | ≈ D10 | 同量级复制 |
+
+**D7/D8 比例**（50% 重叠 + cf32 前提下，与 nchan、fs 均无关）：`D8/D7 = 32/b`——2bit → 16 倍；1bit → 32 倍；8bit → 4 倍。只有 ≥32bit 浮点记录（不常用）D7 才反超 D8。
+
+**实例**：
+
+| 场景 | D7 | D8 | D10 |
+|---|---|---|---|
+| test 配置（1×4MHz band、2bit、8Ms/s、nchan=4096、intTime 1.048576s） | 2 MB/s/站 | 32 MB/s/站（16×） | 31 KB/s（1 基线）→ 2.7 GB/天 |
+| 大阵（N=20、8×32MHz band、2bit、64Ms/s、nchan=2048、intTime 2s） | 128 MB/s/站 → 11 TB/天 | 2 GB/s/站（16×）→ 177 TB/天/站 | 12.5 MB/s（190 基线）→ 1.1 TB/天 |
+
+**含义**：① fengine/ 中间数据是 D7 的 16 倍，须按生命周期尽快清理（batch 的 x 完成后即可删，见 12 节）；② D10 才是真正的"小"数据：单基线时 ≈ D7 的 1/64，但随基线数平方增长，大阵可反超 D7。
 
 ---
 
@@ -427,6 +451,8 @@ D7（原始基带）  ≫  D8（频域谱）  ≫  D10（可见度）  ≈  D11/
 - **对齐**：batch 起点必须落在 subint 边界（MJD 秒是 subintNS/1e9 的整数倍），batch 时长 = `intTime` 整数倍。保证 SWIN integration 跨 batch 完整、追加不碎片化。该约束由 fxcorr-sim 前置保证（5.2 节），**fxcorr-f 启动时校验**是最后防线：batch 起点非 subint 边界则报错退出（容差 1µs，吸收 start_mjd 的 f64 表示误差；batch.json 的 start_mjd 建议写精确 repr，如 58948.291666666664）。
 - **SWIN 追加**：同一实验所有 batch 写同一 `vis/<experiment>.difx/`；重跑整个实验需清空该目录，重跑单个 batch 需按 subint 范围从对应文件裁掉再追加（V1 不实现单 batch 回滚，重跑 = 全实验重跑）。
 - **fengine 覆盖**：重跑某 batch 时，fxcorr-f 覆盖写 `fengine/<batch_id>/` 下文件；fxcorr-x 以 batch.json 的 `status=done` 判定是否需要重跑。
+- **batch duration 选择**：硬约束 = intTime 整数倍 + 起点 subint 边界（上文）+ batch_id 秒唯一（时长 ≥1s）。之上权衡：① **调度并行度**——batch 是并行/调度单元（V2 scalebox task），batch 数越多多节点并行越好；② **内存**——x 侧 .sp 整 batch 常驻（V1），duration × 站数 × D8 数据率须在节点内存内；③ **重试成本**——失败重跑整个 batch（V1 无 batch 内回滚）；④ **吞吐 vs 延迟**——启动开销（配置读入、目录、SWIN 头）摊销想大，首个结果的可见延迟与 fengine/ 存储峰值想小。**大 duration 不利**：x 侧内存线性涨（OOM 风险）、失败重算面大、并行度下降（batch 少 → 节点闲置）、端到端延迟高、fengine/ 中间数据峰值大（D8 ≈ 16×D7，见 11 节）。
+- **站间时间同步**：per-station 串行架构下站间不靠 MPI 屏障同步，同步信息全在数据时间戳（VDIF 帧 epoch/帧号、.sp header 的 scan/sec/ns）+ .im/.calc 的时钟与几何延迟模型；fxcorr-f 的粗延迟（采样级移位）+ 条纹旋转/小数采样即"把两站拉到同一时刻"。站间残余延迟误差 Δτ 的后果按量级分档：**< 1 采样** → 被小数采样校正吸收；**1 采样～亚 subint** → 带宽 smearing 去相关（幅度 ×sinc(Δτ·Δν)，4MHz 带宽 1 采样误差即 -36%）+ 跨频相位斜坡 2πΔf·Δτ；**帧级（4ms）** → 两站乘不同时刻信号，完全去相关、weight 崩；**subint 级** → .sp 时间戳错位，错位相乘、静默错数据。注意：fxcorr-x 按 .sp header 时间对齐、**不校验站间一致性**（站间错位不报错、静默产出低质量数据，与 mpifxcorr 行为一致）；真实观测的站钟漂移靠 .im 时钟多项式补偿，模型不准的残余误差随时间演化。
 - **多 x 子集并行（V2）**：x 任务按站组对切分并行时，各子集写独立子目录 `vis/<experiment>.difx/<subset_id>/`（SWIN 文件名规则不变），difx2fits 前合并到同一目录。V1 单子集（全基线一个任务）无此问题。
 - **work/**：临时文件（如中间缓冲），进程结束后可安全清理，不进 git。
 
