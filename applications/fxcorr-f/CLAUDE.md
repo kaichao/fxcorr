@@ -8,7 +8,7 @@ station-based 相关器前端（F-Engine）：无 MPI 串行程序，逐站处�
 fxcorr-f <batch_id> <station> [workdir]
 ```
 
-- 读 `workdir/fengine/<batch_id>/batch.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file。
+- 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file。
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），Model 由 .calc 内建（无 .im 依赖）。
 - 输出目录 `workdir/fengine/<batch_id>/<station>/`（自动创建）。
 - 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd）。
@@ -35,6 +35,7 @@ fxcorr-f <batch_id> <station> [workdir]
 - 输入格式：本地 **VDIF**（VDIF/VDIFL），datasim 风格帧；其他格式（Mark5B 等）直接报错退出。
 - **单 mux thread**（nummuxthreads=1）、无 fanout、帧粒度 1；vdifmux/corner-turner 不做（V2）。
 - **单 scan**、文件序号 = scan 序号（每个数据文件一个 scan，从 scan 起点开始连续记录）。
+- **数据文件起点 = batch 起点**（data-spec 5.2 file-per-batch 布局）：datareader 构造接收 batch 起点的绝对 sec/ns（main.cpp 由 batchstartjob 换算），locate 的字节偏移相对 batch 起点计算（batch 起点 = scan 起点时退化为原语义）。**数据块时间（*sec/*ns）须保持 scan 相对系**（Mode::setData 与 setOffsets 同系）；换算注意 batchstartabsns 是当日秒系、currentscanstartsec 是 scan 相对系（曾混用导致 nearestsample 越界、weight 全 0，2026-09-12 修复并回归对拍 6/6）。
 - zoom band 不落盘；多相位中心/脉冲星 binning 不涉及（f 侧本就没有）。
 
 ## 构建与注册

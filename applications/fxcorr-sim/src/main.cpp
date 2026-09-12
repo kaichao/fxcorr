@@ -83,8 +83,8 @@ int main(int argc, char **argv)
 	if(const char *sd = getenv("FXSIM_SEED"))
 		seed = strtoul(sd, 0, 10);
 
-	// batch.json is pre-written by make_testdata.sh (fengine/<batch_id>/batch.json)
-	string batchjsonpath = workdir + "/fengine/" + batchid + "/batch.json";
+	// batch.json is pre-written by make_testdata.sh (batches/<batch_id>.json)
+	string batchjsonpath = workdir + "/batches/" + batchid + ".json";
 	ifstream jf(batchjsonpath.c_str());
 	if(!jf.is_open())
 	{
@@ -204,30 +204,37 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// the VDIF frame counter starts at 0 for every whole second, so the batch
-	// must start on a frame boundary of a whole second -- split points
-	// elsewhere would break the global frame numbering required by
-	// data-spec 5.2 for distributed runs
+	// VDIF frame numbers wrap at each whole second (0..fps-1); the batch may
+	// start at any frame boundary within a second.  Global frame numbering
+	// (data-spec 5.2, distributed-generation requirement) holds as long as
+	// the start lies on a frame boundary and the duration is an integer
+	// number of frames (checked below).  The tolerance absorbs the f64
+	// representation error of start_mjd (same reasoning as the subint check
+	// above, ~100s of ns at these epoch values).
 	long long startns = (long long)((startmjd - VDIF_EPOCH_MJD) * 86400.0 * 1.0e9 + 0.5);
+	long long startsec = startns / 1000000000LL;
+	long long secns = startns - startsec * 1000000000LL;
 	{
-		// snap to the whole second (1 us tolerance), then require frame alignment
-		long long rem = startns % 1000000000LL;
-		if(rem < 1000)
-			startns -= rem;
-		else if(1000000000LL - rem < 1000)
-			startns += 1000000000LL - rem;
-		else
+		// a start within 1 us of a whole second snaps to the whole second,
+		// keeping frame numbering from 0 there (the historical behaviour the
+		// byte-comparison tests rely on); anything else must be on a frame
+		// boundary
+		if(secns < 1000)
+			secns = 0;
+		else if(1000000000LL - secns < 1000)
 		{
-			cerr << "fxcorr-sim: batch start must lie on a whole second" << endl;
-			return EXIT_FAILURE;
+			secns = 0;
+			startsec += 1;
 		}
-		if(startns % framens != 0)
+		long long rem = secns % framens;
+		if(rem > 1000 && framens - rem > 1000)
 		{
 			cerr << "fxcorr-sim: batch start is not on a frame boundary" << endl;
 			return EXIT_FAILURE;
 		}
+		secns -= rem;                      // snap to the frame boundary
 	}
-	long long startsec = startns / 1000000000LL;
+	long long framestart = secns / framens;
 	if(durationns % framens != 0)
 	{
 		cerr << "fxcorr-sim: batch duration " << durationns << " ns is not an integer number of frames" << endl;
@@ -287,7 +294,7 @@ int main(int argc, char **argv)
 	SignalGen gen;
 	vector<double> ratehzvec(nbands, (double)ratehz);
 	gen.init(ratehzvec, tonehz, pcalhz, noisesigma, seed);
-	VDIFWriter writer(outpath, startsec, ratehz, nbands, bytesperbandframe);
+	VDIFWriter writer(outpath, startsec, framestart, ratehz, nbands, bytesperbandframe);
 	if(!writer.isOpen())
 		return EXIT_FAILURE;
 

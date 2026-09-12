@@ -1,6 +1,6 @@
 # fxcorr 仓库说明
 
-DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆分相关器"改造。改造需求与架构见 `fxcorr/README.md`，数据规范见 `fxcorr/data-spec.md`。改造代码前先读对应子目录的 CLAUDE.md。
+DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆分相关器"改造。改造需求与架构见 `fxcorr/README.md`，数据规范见 `fxcorr/data-spec.md`，工具命令行见 `fxcorr/usage.md`，构建见 `fxcorr/build.md`。改造代码前先读对应子目录的 CLAUDE.md。
 
 ## 目录地图
 
@@ -19,6 +19,7 @@ DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆�
 - `setup.bash` 设置 `DIFXROOT=/usr/local/difx`、`PKG_CONFIG_PATH=$DIFXROOT/lib/pkgconfig` 等。
 - 每个库/应用是独立 autotools 包，相互之间只通过 pkg-config 发现，无跨目录统一构建。
 - `install-difx` 支持 `--doonly=` / `--skip=` / `--also=` / `--pristine`。
+- 完整构建流程（集成/独立两条路径、依赖、测试机工作流）见 `fxcorr/build.md`。
 
 ## 新增组件要改的注册点（都在 install-difx）
 

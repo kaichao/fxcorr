@@ -21,7 +21,11 @@
  */
 class DataReader {
 public:
-	DataReader(Configuration *config, int configindex, int dsindex, Model *model);
+	// batchstartsec/batchstartns: absolute (seconds, ns) of the batch start --
+	// the raw file holds this batch's data starting at that time (data-spec 5.2
+	// file-per-batch layout), so all byte offsets are relative to it
+	DataReader(Configuration *config, int configindex, int dsindex, Model *model,
+	           long long batchstartsec, int batchstartns);
 	~DataReader();
 
 	inline int getBlocksPerSend() const { return blockspersend; }
@@ -64,6 +68,7 @@ private:
 	std::ifstream input;
 	long long currentscanstartsec;	// absolute second of the scan this file holds
 	int currentscan;
+	long long batchstartabsns;	// absolute ns of the batch start (file origin)
 };
 
 #endif

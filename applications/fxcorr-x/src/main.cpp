@@ -66,8 +66,8 @@ int main(int argc, char **argv)
 	string batchid = argv[1];
 	string workdir = (argc > 2) ? argv[2] : ".";
 
-	// batch.json is pre-written by run_batch.sh (vis/<batch_id>/batch.json)
-	string batchjsonpath = workdir + "/vis/" + batchid + "/batch.json";
+	// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
+	string batchjsonpath = workdir + "/batches/" + batchid + ".json";
 	ifstream jf(batchjsonpath.c_str());
 	if(!jf.is_open())
 	{
@@ -217,7 +217,12 @@ int main(int argc, char **argv)
 		initns -= 1000000000;
 	}
 
-	int executeseconds = (int)((double)nsubints*(double)subintns/1.0e9 + 0.5);
+	// Visibility::writedata stops when currentstartseconds + scanstartsec >=
+	// executeseconds, i.e. executeseconds is measured from the scan start
+	// (mpifxcorr EXECUTE TIME semantics); a batch starting initsec into the
+	// scan must shift the limit by that offset (+1 so the last integration
+	// always clears it)
+	int executeseconds = (int)((double)nsubints*(double)subintns/1.0e9 + 0.5) + initsec + 1;
 	Integrator integrator(&config, configindex, workdir + "/" + difxdir, executeseconds, scan, initsec, initns);
 
 	int coreresultlength = config.getCoreResultLength(configindex);

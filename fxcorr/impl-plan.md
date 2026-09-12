@@ -135,13 +135,38 @@ for subint in batch:
 
 ### 2.4 fxcorr/（bash 编排与仿真数据）
 
-**编排三脚本**（本目录，配套 data-spec 目录布局）：
+**编排三脚本**（本目录，配套 data-spec 目录布局；规格细化如下，实现时照此做）：
 
-| 脚本 | 作用 |
-|---|---|
-| `make_testdata.sh` | 构建 data-spec 布局的标准测试数据：vex2difx + difxcalc（前处理）→ fxcorr-sim 仿真数据生成（已建成）→ 写 f/vis 两版 batch.json。支持多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节约束） |
-| `run_bench.sh` | difx 原命令基准：mpifxcorr 流程固化（EXECUTE TIME 截断到完整覆盖段，避开 mux 滞后），产出基准 SWIN 供 cmp_swin.py 对拍。定位是对拍基准生成器，不是独立产品线 |
-| `run_batch.sh` | fxcorr 流水线：校验 batch 对齐 → 写 batch.json → 逐站 fxcorr-f → fxcorr-x → 更新 `meta/batches.index` |
+**make_testdata.sh** —— 构建 data-spec 布局的标准测试数据。
+
+```
+./make_testdata.sh [workdir] [tone_mhz ...]     # 环境变量 FXSIM_NOISE / FXSIM_SEED 透传
+```
+
+步骤：① config/ 的 .vex/.v2d → `vex2difx` → `difxcalc` 出 .input/.calc/.im（产物已存在则跳过，幂等）；② 从 .input 推导 batch 参数（START MJD/SECONDS、subintNS），`batch_id = MJD_秒`（START 秒向下取整）；③ 写 `batches/<batch_id>.json`（全字段一次写全：时间/结构 + stations + 可选 station_groups + baselines/integration_sec/n_channels/polarizations/difx_dir，start_mjd 写精确 repr）；④ 逐站 `fxcorr-sim <batch_id> <station> <workdir> [tone_mhz...]` 生成 raw VDIF；⑤ 软链 `raw/<station>/<station>_<batch_id>.vdif` 到 .input DATA TABLE 文件名；⑥ stdout 打印 batch_id。多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节）用 `-n N` 选项生成连续 N 个 batch 的 batch.json，数据生成逐 batch 重复 ④。
+
+**make_testdata.sh 实施记录（2026-09-12 完成，fxcorr/make_testdata.sh）**：
+
+- 实现偏差与决策：① config 资产缺才从 `fxcorr/test/` 复制（test.vex/test.v2d），vex2difx/difxcalc 在 config/ 内跑（vex= 路径相对 cwd）；**difxcalc 产物 sed 出 test-sim.input 变体**（SUBINT 524288000→128000000、INT TIME 1.048576→0.256）——默认 SUBINT 非 VDIF 帧网格整数倍（131.072 帧），fxcorr-sim 帧长整除校验要求变体（v2d 的 subintNS/tInt 无法直接指定：vex2difx 不认 subintNS 关键字、tInt 会被 difxcalc nudge）。② 幂等：前处理产物存在跳过、VDIF 存在跳过；前处理工具输出重定向 stderr（stdout 只留 batch_id）。③ `-n N`：batch_i 起点 = scan 起点 + i×duration，n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒 floor 唯一）；软链指向最后 batch 并提示。④ batch.json 的 calc_file/im_file 从 .input 的 CALC FILENAME 推导（sed 变体不改它）。
+- 实现 -n 多 batch 时发现并修复的三个既有 bug：**fxcorr-sim 整秒 snap 放宽**为帧边界整除（vdifwriter 帧号从秒内偏移起算，1µs 内近整秒仍归整秒——simcmp BYTE-IDENTICAL 回归通过）；**fxcorr-f 数据文件起点 = batch 起点**（原按 scan 起点定位，多 batch 偏移后读错位置；修复后 batch 1 对拍回归 6/6）；**fxcorr-x executeseconds 加 initsec 偏移**（原停写判定按 scan 起点基准，batch 起点偏移时静默不写盘）。
+- 实测踩坑（均写入 applications/*/CLAUDE.md 或 memory）：**mpifxcorr vdifmux 读不了带噪 2bit 数据**（FXSIM_NOISE>0 时 databytesperpacket 错乱、0 积分输出，NOISE=0 正常）——对拍数据须 `FXSIM_NOISE=0` 生成；f 数据块时间与 batch 起点换算的坐标系混用（当日秒系 vs scan 相对系）曾导致 .sp weight 全 0。
+- 验收（测试机，全部通过）：全新目录跑通单 batch 全流程（config/raw/batches/软链/batch.json 字段全对）；`-n 2` 两个 batch.json 时间连续（start_mjd 差 1.024s）、n_subints 自动 8、软链指最后 batch；batch 2（起点 scan+1.024s）f/x 全链路 4 积分 12 条；NOISE=0 数据 test.input 配置与 mpifxcorr cmp_swin **6/6 全等**；fxcorr-sim simcmp 位序 BYTE-IDENTICAL 回归。
+
+**run_bench.sh** —— mpifxcorr 基准（对拍基准生成器，不是独立产品线）。
+
+```
+./run_bench.sh [workdir]
+```
+
+步骤：① 复制 `config/<exp>.input` → `bench/`，EXECUTE TIME 截断为完整覆盖段（≤ 数据时长 − 1 subint，避开 mpifxcorr vdifmux 滞后，见 fxcorr-f CLAUDE.md）；② `mpirun --allow-run-as-root -np 4 mpifxcorr bench/<exp>.input`；③ 基准 SWIN 落 `bench/<experiment>.difx/`；④ 打印对拍提示（`cmp_swin.py` 用法）。
+
+**run_batch.sh** —— fxcorr 流水线（V1 静态数据集，手工/编排器均可调）。
+
+```
+./run_batch.sh <batch_id> [workdir]             # station 列表自动取 .input 全部 datastream
+```
+
+步骤：① 读 `batches/<batch_id>.json` + .input，前置校验对齐（batch 起点 subint 边界、时长 intTime 整数倍，容差同 fxcorr-f；不通过则报错退出，不依赖 fxcorr-f 兜底）；② 置 status=running（batch.json status 字段，无独立 status.txt）；③ 逐站 `fxcorr-f <batch_id> <station> <workdir>`，任一失败 → status=failed、非 0 退出，不跑后续站；④ mkdir .input OUTPUT FILENAME 所在目录；⑤ `fxcorr-x <batch_id> <workdir>`，失败同 ③；⑥ 成功 → status=done，追加 `meta/batches.index` 一行 `<batch_id>,done,<时间戳>`。
 
 `watch_and_dispatch.sh` **砍掉**：V1 数据集为静态构建，无"轮询 raw/ 发现新数据"场景；流式监视与多节点调度推迟到 V2 由 scalebox 承担（届时 run_batch.sh 的调用改由编排器发出，脚本本身不变）。
 

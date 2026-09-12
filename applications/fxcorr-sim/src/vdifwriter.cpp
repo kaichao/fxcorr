@@ -5,10 +5,10 @@
 
 using namespace std;
 
-VDIFWriter::VDIFWriter(const string &outpath, long long startsec_,
+VDIFWriter::VDIFWriter(const string &outpath, long long startsec_, long long framestart_,
                        long long ratehz_, int nbands, int bytesperbandframe)
-	: f(0), startsec(startsec_), ratehz(ratehz_), nsampframe(bytesperbandframe * 4),
-	  log2nchan(0), framelength8(0), nframes(0)
+	: f(0), startsec(startsec_), framestart(framestart_), ratehz(ratehz_),
+	  nsampframe(bytesperbandframe * 4), log2nchan(0), framelength8(0), nframes(0)
 {
 	// VDIF word3 nchan field is log2 of the channel (band) count
 	if(nbands <= 0 || (nbands & (nbands - 1)) != 0 || nbands > 32)
@@ -51,8 +51,8 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 
 	// same header words as gen_test_vdif.py; frame number wraps at the
 	// frames-per-second boundary, seconds advance every framespersecond frames
-	long long sec = startsec + nframes * (long long)nsampframe / ratehz;
-	int frame = (int)(nframes % framespersecond);
+	long long sec = startsec + (framestart + nframes) * (long long)nsampframe / ratehz;
+	int frame = (int)((framestart + nframes) % framespersecond);
 
 	unsigned int header[8];
 	header[0] = (unsigned int)(sec & 0x3FFFFFFF) | (1u << 30);

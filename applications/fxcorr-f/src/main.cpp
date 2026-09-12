@@ -66,8 +66,8 @@ int main(int argc, char **argv)
 	string station = argv[2];
 	string workdir = (argc > 3) ? argv[3] : ".";
 
-	// batch.json is pre-written by run_batch.sh (fengine/<batch_id>/batch.json)
-	string batchjsonpath = workdir + "/fengine/" + batchid + "/batch.json";
+	// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
+	string batchjsonpath = workdir + "/batches/" + batchid + ".json";
 	ifstream jf(batchjsonpath.c_str());
 	if(!jf.is_open())
 	{
@@ -123,7 +123,23 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-f: mode initialisation failed for station " << station << endl;
 		return EXIT_FAILURE;
 	}
-	DataReader reader(&config, 0, dsindex, model);
+
+	// batch start expressed as job-relative seconds; the raw file holds this
+	// batch's data starting at that time (data-spec 5.2 file-per-batch), so
+	// DataReader byte offsets are relative to the batch start
+	int scan = 0;
+	long long scanstartsec = (long long)model->getScanStartSec(scan, config.getStartMJD(), config.getStartSeconds());
+	double jobstart = (double)config.getStartMJD() + (double)config.getStartSeconds()/86400.0;
+	double batchstartjob = (startmjd - jobstart)*86400.0;
+	long long batchstartsec = (long long)config.getStartSeconds() + (long long)floor(batchstartjob);
+	int batchstartns = (int)((batchstartjob - (double)floor(batchstartjob))*1.0e9 + 0.5);
+	if(batchstartns >= 1000000000)
+	{
+		batchstartsec++;
+		batchstartns -= 1000000000;
+	}
+
+	DataReader reader(&config, 0, dsindex, model, batchstartsec, batchstartns);
 
 	// autocorrelation averaging batch, same formula as core.cpp:769-783
 	int numbufferedffts = config.getNumBufferedFFTs(0);
@@ -153,12 +169,6 @@ int main(int argc, char **argv)
 
 	bool haspcal = (config.getDPhaseCalIntervalHz(0, dsindex) > 0);
 	int subintns = config.getSubintNS(0);
-
-	// batch start expressed as job-relative seconds, then per-subint offsets
-	int scan = 0;
-	long long scanstartsec = (long long)model->getScanStartSec(scan, config.getStartMJD(), config.getStartSeconds());
-	double jobstart = (double)config.getStartMJD() + (double)config.getStartSeconds()/86400.0;
-	double batchstartjob = (startmjd - jobstart)*86400.0;
 
 	// data-spec section 12: the batch start must lie on a subint boundary;
 	// tolerance absorbs the f64 representation error of start_mjd (~1 us)

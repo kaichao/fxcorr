@@ -23,7 +23,9 @@ class Integrator {
 public:
 	/**
 	 * @param configindex configuration index of the batch's scan
-	 * @param difxdir  vis/<experiment>.difx/ (created if missing; writeSWIN appends there)
+	 * @param difxdir  vis/<experiment>.difx/ from batch.json, metadata only;
+	 *                 SWIN writes go to the .input OUTPUT FILENAME directory
+	 *                 (created if missing)
 	 * @param eseconds total correlation length of this batch, seconds
 	 * @param scan     0 in V1 (single scan)
 	 * @param startsec seconds of the batch start relative to the scan start

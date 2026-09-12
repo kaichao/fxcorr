@@ -28,6 +28,12 @@
 - **D2**：可见度输出 SWIN 格式（复用 mpifxcorr 的 visibility.cpp 写盘，difx2fits 零改造）
 - **D3**：fxcorr-f 按 recorded band 落盘复数频谱，偏振是 band 属性（`recordedbandpols`），偏振组合（RR/LL/RL/LR）由 fxcorr-x 按 .input 的 BASELINE TABLE 选取
 
+分布部署原则（V2 多节点预留；V1 单机同机无差别，不冲突）：
+
+- **计算本地化**：f/x 都在节点本地计算，充分利用本地 CPU——f 任务（batch×站）调度到该站 raw 数据所在节点；x 任务（batch×站组对）优先调度到输入谱数据所在节点。
+- **共享存储主数据流**：配置与元数据（config/、batches/、meta/、product/）及跨 batch 追加的 SWIN（vis/）放共享存储，全部节点一致可见；大批量数据（raw/、fengine/）可放本地存储，目录逻辑集中、物理分布（每节点只持有自己写的部分，见第 2 节存储归属表）。
+- **网络/计算/存储权衡**：必要时以**重复计算**（同一数据各节点各算一份，省网络传输、费 CPU）或**网络传输**（拉数到计算节点，省 CPU、费网络）为调节手段，在三者复用上取平衡；实现不应做死"必须本地"或"必须共享"的假设。
+
 ---
 
 ## 2. 顶层目录结构
@@ -35,6 +41,7 @@
 ```
 project/                          # 项目根目录（可自定义）
 ├── config/                       # 配置与模型文件
+├── batches/                      # 批量元数据（batch.json，D9）
 ├── raw/                          # 原始基带数据
 ├── fengine/                      # fxcorr-f 输出（频域谱）
 ├── vis/                          # fxcorr-x 输出（SWIN 可见度）
@@ -42,6 +49,16 @@ project/                          # 项目根目录（可自定义）
 ├── meta/                         # 全局索引与日志
 └── work/                         # 临时工作区（可选，不进 git）
 ```
+
+多节点部署的存储归属（V2 预留；V1 单机同机，无差别）：
+
+| 目录 | 归属 | 说明 |
+|---|---|---|
+| `config/` `batches/` `meta/` `product/` | 共享存储 | 配置、元数据、索引、产品；量小，全部节点须一致可见 |
+| `vis/` | 共享存储 | SWIN 跨 batch 追加、difx2fits 直读；多 x 子集并行时按 subset 子目录分写（第 12 节） |
+| `raw/` | 本地存储 | TB 级原始基带；各站数据在各记录节点 |
+| `fengine/` | 本地存储 | 各站 f 输出在计算节点；目录逻辑集中、物理分布（每节点只持有自己写的站） |
+| `work/` | 本地存储 | 临时文件，进程结束可清理 |
 
 ---
 
@@ -122,6 +139,7 @@ raw/
 - 命名建议：`<station>_<batch_id>.<suffix>` 或保持原始记录名
 - 数据量：TB 级
 - 约束：一个 raw 文件的时间范围须覆盖完整 batch；切批见第 12 节
+- **文件起点语义**：file-per-batch 布局下 raw 文件的时间起点 = batch 起点（fxcorr-f 的字节偏移按 batch 起点定位，非 scan 起点；batch 起点 = scan 起点时两者一致）。batch.json 的 start_mjd 是该起点的精确表示。
 - 仿真数据（测试替身，由 fxcorr-sim 生成）约束：batch 时间窗须与 subint 网格对齐（fxcorr-sim 读 .input 的 subint 结构保证，见第 12 节）；多节点分布生成时各分片的 VDIF 帧时间戳/帧号须全局连续（程序内校验点）；最小数据集可入仓库（`fxcorr/test/`，附 sha256），不受"运行时数据不进 git"约束
 
 ### 5.3 F-Engine 输出（fengine/）
@@ -129,8 +147,6 @@ raw/
 ```
 fengine/
 ├── 60512_45000/                      # batch_id
-│   ├── batch.json                    # D9（f 版）
-│   ├── status.txt                    # 状态：running / done / failed
 │   ├── STA1/
 │   │   ├── band_00.sp                # D8：recorded band 频谱
 │   │   ├── band_01.sp
@@ -146,7 +162,7 @@ fengine/
 └── ...
 ```
 
-**batch.json 示例**（D9，f 版）：
+**batch.json 示例**（D9，全字段单文件）：
 
 ```json
 {
@@ -155,16 +171,36 @@ fengine/
   "start_time": "2026-09-08T12:30:00",
   "duration_sec": 30.0,
   "stations": ["STA1", "STA2", "STA3"],
+  "station_groups": [["STA1", "STA2"], ["STA3"]],
+  "baselines": ["STA1-STA2", "STA1-STA3", "STA2-STA3"],
   "config_file": "config/experiment.input",
   "calc_file": "config/experiment.calc",
   "im_file": "config/experiment.im",
   "n_subints": 30,
   "subint_ns": 1000000000,
+  "integration_sec": 1.0,
+  "n_channels": 256,
+  "polarizations": ["RR", "LL", "RL", "LR"],
+  "difx_dir": "vis/experiment.difx",
   "created_at": "2026-09-08T12:35:12Z",
   "status": "done",
-  "fxcorr_f_version": "0.1.0"
+  "fxcorr_f_version": "0.1.0",
+  "fxcorr_x_version": "0.1.0"
 }
 ```
+
+字段说明：
+
+- 时间与结构：`batch_id` / `start_mjd` / `start_time` / `duration_sec` / `n_subints` / `subint_ns`——fxcorr-sim 与 fxcorr-f 读（start_mjd 建议写精确 repr，如 58948.291666666664）。
+- `config_file` / `calc_file` / `im_file`：三工具读 .input（config_file）；calc/im 为元数据。
+- `stations`：全部参与站。`station_groups`（可选）：空间切分组，缺省 = 全部站一组 = 全基线；任务集推导见第 6 节。
+- `baselines` / `integration_sec` / `n_channels` / `polarizations` / `difx_dir`：可见度输出元数据，均可由 .input 提前推导（baselines = 全部基线组合，polarizations 由 BASELINE TABLE 定）；fxcorr-x 读 `difx_dir` 作元数据，实际输出目录以 .input 的 OUTPUT FILENAME 为准。
+- `status`：running / done / failed，编排脚本更新。
+
+**batch.json 位置语义**（D9，谁写谁读）：
+
+- 位于 `batches/<batch_id>.json`（共享存储），**单文件全字段**：由编排脚本（make_testdata.sh / run_batch.sh）或调度器**一次写全**（x 阶段字段由 .input 提前推导，无需分阶段追加）；fxcorr-sim / fxcorr-f / fxcorr-x 各取所需，均**只读、不回写**；status 字段由编排脚本更新（无独立 status.txt）。
+- 各工具命令行用法见 `fxcorr/usage.md`（本规范不覆盖命令行接口）。
 
 **band_XX.sp 二进制格式**（host 字节序，V1 单机；`XX` = recorded band 序号）：
 
@@ -235,16 +271,13 @@ Header：
 
 ```
 vis/
-├── experiment.difx/                  # SWIN 文件集（跨 batch 追加）
-│   ├── DIFX_60512_45000.s0000.b0000  # 文件名 = DIFX_<MJD>_<实验开始秒>.s<相位中心>.b<脉冲星bin>
-│   ├── DIFX_60512_45000.s0000.b0001
-│   └── ...
-├── 60512_45000/
-│   ├── batch.json                    # D9（x 版）
-│   └── status.txt
-└── 60512_45030/
+└── experiment.difx/                  # SWIN 文件集（跨 batch 追加）
+    ├── DIFX_60512_45000.s0000.b0000  # 文件名 = DIFX_<MJD>_<实验开始秒>.s<相位中心>.b<脉冲星bin>
+    ├── DIFX_60512_45000.s0000.b0001
     └── ...
 ```
+
+（batch.json 已集中到 `batches/`，见 5.3 节）
 
 - **D10 = SWIN 二进制**：每记录 74 字节头（sync 0xFF00FF00、version、baselinenum、dumpmjd、dumpseconds、configindex、sourceindex、freqindex、polpair(2B)、pulsarbin、weight(double)、uvw[3×double]）+ `freqchannels` 个 cf32 可见度。与 mpifxcorr 的 `Visibility::writeSWIN` 逐字节一致，difx2fits / difx2mark4 零改造直读。
 - SWIN 文件名用**实验级** MJD+开始秒（.input 的 START MJD/SECONDS），**不含 batch_id**——同一实验的所有 batch 追加写入同一组文件（batch 边界与 intTime 对齐保证不碎片化，见第 12 节）。
@@ -252,19 +285,7 @@ vis/
 - 脉冲校准数据由 f 落盘（5.3 节 pcal.bin）；`PCAL_*.pcal` 文件生成（每实验每站一个，追加式）列入 V2。
 - 自相关以基线号 `257*(telescope_index+1)` 写入 `s0000.b0000` 文件。
 
-**batch.json**（D9，x 版）在 f 版基础上增加：
-
-```json
-{
-  ...
-  "baselines": ["STA1-STA2", "STA1-STA3", "STA2-STA3"],
-  "integration_sec": 1.0,
-  "n_channels": 256,
-  "polarizations": ["RR", "LL", "RL", "LR"],
-  "difx_dir": "vis/experiment.difx",
-  "fxcorr_x_version": "0.1.0"
-}
-```
+batch.json（D9）已并入 `batches/<batch_id>.json` 单文件全字段，见 5.3 节。
 
 ### 5.5 最终科学产品（product/）
 
@@ -309,6 +330,7 @@ meta/
 - 可按字符串排序即时间顺序
 - 同一批量在 `fengine/` 与 `vis/` 下使用相同 `batch_id`
 - batch 时长必须是 `intTime`（.input）的整数倍；batch 起点与 subint 边界对齐（第 12 节）
+- **空间维度不进 batch_id**（batch_id 只回答"哪个时间段"，排序语义不被破坏）：f 任务 = (batch_id, station)，x 任务 = (batch_id, 站组对)；任务集由调度器从 batch.json 的 `stations` / `station_groups` 推导（station_groups 缺省 = 全站一组 = 全基线；组对取三角部分含 (G,G) 组内）
 
 ---
 
@@ -385,7 +407,7 @@ D11 (.FITS) 或 D12 (Mark4)
 | F pcal 文件 | D8 | `pcal.bin` | `pcal.bin` |
 | F 自相关文件 | D8 | `autocorr.bin` | `autocorr.bin` |
 | 可见度文件 | D10 | `DIFX_<MJD>_<sec>.s<XX>.b<XX>` | `DIFX_60512_45000.s0000.b0000` |
-| 批量元数据 | D9 | `batch.json` | `batch.json` |
+| 批量元数据 | D9 | `batches/<batch_id>.json` | `batches/60512_45000.json` |
 | 状态文件 | - | `status.txt` | `status.txt` |
 | FITS 产品 | D11 | `<exp>_<batch_id>.FITS` | `exp_60512_45000.FITS` |
 
@@ -405,6 +427,7 @@ D7（原始基带）  ≫  D8（频域谱）  ≫  D10（可见度）  ≈  D11/
 - **对齐**：batch 起点必须落在 subint 边界（MJD 秒是 subintNS/1e9 的整数倍），batch 时长 = `intTime` 整数倍。保证 SWIN integration 跨 batch 完整、追加不碎片化。该约束由 fxcorr-sim 前置保证（5.2 节），**fxcorr-f 启动时校验**是最后防线：batch 起点非 subint 边界则报错退出（容差 1µs，吸收 start_mjd 的 f64 表示误差；batch.json 的 start_mjd 建议写精确 repr，如 58948.291666666664）。
 - **SWIN 追加**：同一实验所有 batch 写同一 `vis/<experiment>.difx/`；重跑整个实验需清空该目录，重跑单个 batch 需按 subint 范围从对应文件裁掉再追加（V1 不实现单 batch 回滚，重跑 = 全实验重跑）。
 - **fengine 覆盖**：重跑某 batch 时，fxcorr-f 覆盖写 `fengine/<batch_id>/` 下文件；fxcorr-x 以 batch.json 的 `status=done` 判定是否需要重跑。
+- **多 x 子集并行（V2）**：x 任务按站组对切分并行时，各子集写独立子目录 `vis/<experiment>.difx/<subset_id>/`（SWIN 文件名规则不变），difx2fits 前合并到同一目录。V1 单子集（全基线一个任务）无此问题。
 - **work/**：临时文件（如中间缓冲），进程结束后可安全清理，不进 git。
 
 ---

@@ -44,10 +44,11 @@ Integrator::Integrator(Configuration *conf, int cindex, const string &difxdir, i
 		exit(EXIT_FAILURE);
 	}
 
-	// writeSWIN appends into the .difx dir, so it must exist beforehand
-	if(system(("mkdir -p " + difxdir).c_str()) != 0)
+	// writeSWIN appends into the .input OUTPUT FILENAME directory, so it must
+	// exist beforehand (difx_dir in batch.json is metadata only)
+	if(system(("mkdir -p " + config->getOutputFilename()).c_str()) != 0)
 	{
-		cerr << "Failed to create output directory " << difxdir << endl;
+		cerr << "Failed to create output directory " << config->getOutputFilename() << endl;
 		exit(EXIT_FAILURE);
 	}
 

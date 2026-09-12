@@ -1,6 +1,6 @@
 # fxcorr 脚本与改造概要
 
-本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，共享代码见 `libraries/fxcorrcommon`。
+本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` / `fxcorr-sim` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，仿真数据生成器见 `applications/fxcorr-sim`，共享代码见 `libraries/fxcorrcommon`。
 
 ---
 
@@ -69,7 +69,7 @@ vex2difx / difxcalc     （实验级，一次）
 | bash 集成 | `fxcorr/`（本目录） |
 | 原 MPI 核心 | `mpifxcorr/`（保留） |
 
-运行时数据（通常不进 git）：`config/`、`raw/`、`fengine/`、`vis/`、`product/`、`meta/`。
+运行时数据（通常不进 git）：`config/`、`batches/`（批量元数据，D9）、`raw/`、`fengine/`、`vis/`、`product/`、`meta/`。
 
 ---
 
@@ -87,7 +87,7 @@ vex2difx / difxcalc     （实验级，一次）
 
 | 脚本 | 作用 |
 |------|------|
-| `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + 两版 batch.json） |
+| `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + batch.json） |
 | `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供对拍 |
 | `run_batch.sh` | 对单个 batch_id：写 batch.json → 依次调用各站 `fxcorr-f` → 调用 `fxcorr-x` |
 

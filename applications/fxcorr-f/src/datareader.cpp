@@ -8,11 +8,13 @@
 
 using namespace std;
 
-DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl) :
+DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
+                       long long batchstartsec, int batchstartns) :
 	config(conf), model(mdl), configindex(confindex), dsindex(ds),
 	framebytes(0), payloadbytes(0), framespersecond(0), sendbytes(0),
 	blockspersend(0), intclockseconds(0), numfiles(0), datafilenames(0),
-	currentfile(-1), currentscanstartsec(0), currentscan(0)
+	currentfile(-1), currentscanstartsec(0), currentscan(0),
+	batchstartabsns(batchstartsec*1000000000LL + (long long)batchstartns)
 {
 	// V1 restriction: local VDIF files only (datasim output), one mux thread
 	Configuration::dataformat format = config->getDataFormat(configindex, dsindex);
@@ -90,16 +92,26 @@ bool DataReader::locate(int scan, int offsetsec, int offsetns, int *sec, int *ns
 	// delay-corrected start relative to the scan start, in ns
 	long long relstartns = (long long)offsetsec*1000000000LL + firstoffsetns;
 
+	// byte offsets are relative to the batch start, not the scan start: the
+	// file holds this batch's data (data-spec 5.2 file-per-batch layout).
+	// batchstartabsns is in day-seconds (config->getStartSeconds() frame); the
+	// scan-relative frame here is offset by experseconds + scanstartsec.
+	long long batchrelscan = batchstartabsns
+	                       - (config->getStartSeconds() + currentscanstartsec)*1000000000LL;
+	long long batchrel = relstartns - batchrelscan;
+
 	// frame-aligned start (vdiffile.cpp:429-444; V1 frame granularity is 1)
-	double framed = (double)relstartns*framespersecond/1.0e9;
+	double framed = (double)batchrel*framespersecond/1.0e9;
 	long long framesin = (long long)floor(framed);
 	if(framesin < 0)
-		framesin = 0;	// start slightly before the scan start: begin at the first frame
+		framesin = 0;	// start slightly before the batch start: begin at the first frame
 
 	*fileoffset = framesin*(long long)framebytes;
 
-	// data block start time as (absolute sec, ns), like DataStream's controlbuffer
-	double abstime = (double)currentscanstartsec + (double)framesin/framespersecond;
+	// data block start time in the same frame of reference as offsetsec/offsetns
+	// (seconds relative to the scan start, what DataStream's controlbuffer
+	// carries): batch start relative to the scan start + in-batch frame offset
+	double abstime = (double)batchrelscan/1000000000.0 + (double)framesin/framespersecond;
 	long long abssec = (long long)floor(abstime);
 	*sec = (int)abssec;
 	*ns = (int)((abstime - (double)abssec)*1.0e9 + 0.5);
