@@ -122,6 +122,7 @@ raw/
 - 命名建议：`<station>_<batch_id>.<suffix>` 或保持原始记录名
 - 数据量：TB 级
 - 约束：一个 raw 文件的时间范围须覆盖完整 batch；切批见第 12 节
+- 仿真数据（测试替身，由 fxcorr-sim 生成）约束：batch 时间窗须与 subint 网格对齐（fxcorr-sim 读 .input 的 subint 结构保证，见第 12 节）；多节点分布生成时各分片的 VDIF 帧时间戳/帧号须全局连续（程序内校验点）；最小数据集可入仓库（`fxcorr/test/`，附 sha256），不受"运行时数据不进 git"约束
 
 ### 5.3 F-Engine 输出（fengine/）
 
@@ -356,7 +357,7 @@ D3 (.input) + D4 (.calc) + D5 (.flag)
         ↓
 D6 (.im)
         ↓
-D3 + D4 + D6 + D7 (raw)
+D3 + D4 + D6 + D7 (raw)     （D7 为真实观测数据或仿真数据生成器产出）
         ↓
    [fxcorr-f]          ← 按台站、按批量
         ↓
@@ -401,7 +402,7 @@ D7（原始基带）  ≫  D8（频域谱）  ≫  D10（可见度）  ≈  D11/
 
 ## 12. 切批与重跑约束
 
-- **对齐**：batch 起点必须落在 subint 边界（MJD 秒是 subintNS/1e9 的整数倍），batch 时长 = `intTime` 整数倍。保证 SWIN integration 跨 batch 完整、追加不碎片化。**fxcorr-f 启动时校验**：batch 起点非 subint 边界则报错退出（容差 1µs，吸收 start_mjd 的 f64 表示误差；batch.json 的 start_mjd 建议写精确 repr，如 58948.291666666664）。
+- **对齐**：batch 起点必须落在 subint 边界（MJD 秒是 subintNS/1e9 的整数倍），batch 时长 = `intTime` 整数倍。保证 SWIN integration 跨 batch 完整、追加不碎片化。该约束由 fxcorr-sim 前置保证（5.2 节），**fxcorr-f 启动时校验**是最后防线：batch 起点非 subint 边界则报错退出（容差 1µs，吸收 start_mjd 的 f64 表示误差；batch.json 的 start_mjd 建议写精确 repr，如 58948.291666666664）。
 - **SWIN 追加**：同一实验所有 batch 写同一 `vis/<experiment>.difx/`；重跑整个实验需清空该目录，重跑单个 batch 需按 subint 范围从对应文件裁掉再追加（V1 不实现单 batch 回滚，重跑 = 全实验重跑）。
 - **fengine 覆盖**：重跑某 batch 时，fxcorr-f 覆盖写 `fengine/<batch_id>/` 下文件；fxcorr-x 以 batch.json 的 `status=done` 判定是否需要重跑。
 - **work/**：临时文件（如中间缓冲），进程结束后可安全清理，不进 git。

@@ -38,15 +38,16 @@
 
 ```
 vex2difx / difxcalc     （实验级，一次）
+  仿真数据生成器        （测试数据替身，串行）
         ↓
   config: .input .im
-  raw/<station>/        （外部持续写入）
+  raw/<station>/<station>_<batch_id>.vdif
         ↓
-  [fxcorr：切批 + run_batch]
+  [run_batch.sh：batch.json → fxcorr-f → fxcorr-x]
         ↓
-  fxcorr-f × stations   →  fengine/<batch_id>/<station>/
+  fengine/<batch_id>/<station>/
         ↓
-  fxcorr-x              →  vis/<batch_id>/
+  vis/<experiment>.difx/（SWIN，跨 batch 追加）
         ↓
   difx2fits 等（按需）
 ```
@@ -63,6 +64,7 @@ vex2difx / difxcalc     （实验级，一次）
 |------|------|
 | fxcorr-f | `applications/fxcorr-f` |
 | fxcorr-x | `applications/fxcorr-x` |
+| fxcorr-sim（仿真数据生成器） | `applications/fxcorr-sim`（已建成） |
 | 共享库 | `libraries/fxcorrcommon` |
 | bash 集成 | `fxcorr/`（本目录） |
 | 原 MPI 核心 | `mpifxcorr/`（保留） |
@@ -77,7 +79,7 @@ vex2difx / difxcalc     （实验级，一次）
 - **每 batch**：只跑 f（各站）+ x；不跑 vex2difx / difxcalc。
 - **预处理**：配置或观测范围变化时再跑。
 
-流式场景下：外部程序持续写入 `raw/` → 监视脚本定期生成 batch_id → 调用 `run_batch.sh`。
+流式/多节点调度（V2+）：由 scalebox 编排承担——batch_id 生成与 `run_batch.sh` 的调用改由编排器发出，脚本本身不变。
 
 ---
 
@@ -85,16 +87,17 @@ vex2difx / difxcalc     （实验级，一次）
 
 | 脚本 | 作用 |
 |------|------|
-| `run_batch.sh` | 对单个 batch_id 依次调用各站 `fxcorr-f`，再调用 `fxcorr-x` |
-| `watch_and_dispatch.sh` | 长驻或轮询：发现齐套时间窗后生成 batch_id 并调用 `run_batch.sh` |
+| `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + 两版 batch.json） |
+| `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供对拍 |
+| `run_batch.sh` | 对单个 batch_id：写 batch.json → 依次调用各站 `fxcorr-f` → 调用 `fxcorr-x` |
+
+`watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度 V2 由 scalebox 承担，容器化同列 V2（scalebox Module 需容器镜像）。
 
 示例（接口以实际实现为准）：
 
 ```bash
-# 实验开始时一次
-# vex2difx config/experiment.v2d
-# difxcalc config/experiment.calc
-
+./fxcorr/make_testdata.sh                 # 一次性：前处理 + 仿真数据 + batch.json
+./fxcorr/run_bench.sh                     # 对拍基准（difx 原命令）
 ./fxcorr/run_batch.sh 60512_45000 STA1,STA2,STA3
 ```
 
@@ -105,7 +108,7 @@ vex2difx / difxcalc     （实验级，一次）
 | 阶段 | 内容 |
 |------|------|
 | V1 | 两程序串行 + 目录接口 + bash 跑通单 batch |
-| V2 | 脚本监视 raw、多 batch；可选容器镜像 |
+| V2 | 多 batch 流水线；容器镜像；scalebox 编排（含仿真数据分布式生成） |
 | V3 | 模块级 OpenMP；按需 GPU |
 | 可选 | 输出与 difx2fits 更好衔接 |
 

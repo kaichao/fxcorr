@@ -35,6 +35,7 @@ def main():
     nsamp_per_frame = payload_bytes * 4
     nframes = int(duration * rate_mhz * 1e6 / nsamp_per_frame)
     nsamp_total = nframes * nsamp_per_frame
+    fps = int(rate_mhz * 1e6) // nsamp_per_frame   # frames per second
 
     # 2-bit quantised single tone, samples packed low bits first
     # (matches mark5access format_vdif.c lut2bit: sample i of a byte at bits 2*i..2*i+1)
@@ -52,7 +53,7 @@ def main():
     with open(outname, "wb") as f:
         for n in range(nframes):
             sec = start_sec + n * nsamp_per_frame // int(rate_mhz * 1e6)
-            frame = n % int(rate_mhz * 1e6) // nsamp_per_frame
+            frame = n % fps   # frame number within the second (VDIF word2)
             header = struct.pack(
                 "<IIIIIIII",
                 (sec & 0x3FFFFFFF) | (1 << 30),        # word0: seconds low 30 bits, sync=1, valid

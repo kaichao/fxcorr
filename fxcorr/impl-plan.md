@@ -15,6 +15,9 @@
 - 多线程（numprocessthreads=1）、网络输入、数据流化
 - `PCAL_*.pcal` 文件生成（pcal 数据由 f 落盘 pcal.bin，文件生成留 V2）
 - ASCII 输出（只 SWIN）；difxmessage 状态/STA 消息（组播可留 V2，写盘主路径不含）
+- 容器化与 scalebox 编排（V2：scalebox 的 Module 需容器镜像，镜像制作是接编排的前提；上游 docker/ 为 EOL CentOS8，不沿用）
+- 仿真数据分布式生成与流水线组装（V2：串行生成器 + scalebox 按（站, batch）分片调度）
+- 流式监视（原计划 watch_and_dispatch.sh 砍掉，流式场景推迟到 V2 由 scalebox 承担）
 
 ---
 
@@ -130,10 +133,34 @@ for subint in batch:
 - **验收 1、2 达成（2026-09-11）**：2 站 4 秒小实验（vex2difx+difxcalc → fxcorr-f → fxcorr-x → difx2fits 出 FITS）。对拍：同数据同配置 mpifxcorr，SWIN 前 6 条记录（2 个完整积分）逐记录全等——头字段全等、可见度相对误差 <1e-6、weight 精确一致（0.9892578125 逐位吻合）。对拍工具 `fxcorr/test/cmp_swin.py`。
 - **mpifxcorr mux 滞后（对拍发现，非 fxcorr 错误）**：mpifxcorr 的 vdifmux 流式管线存在确定性可见滞后（读线程+mux 与 main 竞争），数据后段边界 subint 被标 invalid（本次实验 subint 5 只 50/512 块有效、subint 7 208 块，两次运行完全可复现）；fxcorr 的 fseek 直读无此滞后。对拍应在数据完整覆盖的积分段进行（batch 时长 ≤ 数据时长 − 一个 subint 余量）。
 
-### 2.4 fxcorr/（bash 编排）
+### 2.4 fxcorr/（bash 编排与仿真数据）
 
-`run_batch.sh`：校验 batch 对齐 → 逐站调 fxcorr-f → 调 fxcorr-x → 更新 `meta/batches.index`。
-`watch_and_dispatch.sh`：轮询 raw/，齐套时间窗后生成 batch_id（MJD_秒，对齐 subint）→ 调 run_batch.sh。
+**编排三脚本**（本目录，配套 data-spec 目录布局）：
+
+| 脚本 | 作用 |
+|---|---|
+| `make_testdata.sh` | 构建 data-spec 布局的标准测试数据：vex2difx + difxcalc（前处理）→ fxcorr-sim 仿真数据生成（已建成）→ 写 f/vis 两版 batch.json。支持多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节约束） |
+| `run_bench.sh` | difx 原命令基准：mpifxcorr 流程固化（EXECUTE TIME 截断到完整覆盖段，避开 mux 滞后），产出基准 SWIN 供 cmp_swin.py 对拍。定位是对拍基准生成器，不是独立产品线 |
+| `run_batch.sh` | fxcorr 流水线：校验 batch 对齐 → 写 batch.json → 逐站 fxcorr-f → fxcorr-x → 更新 `meta/batches.index` |
+
+`watch_and_dispatch.sh` **砍掉**：V1 数据集为静态构建，无"轮询 raw/ 发现新数据"场景；流式监视与多节点调度推迟到 V2 由 scalebox 承担（届时 run_batch.sh 的调用改由编排器发出，脚本本身不变）。
+
+**仿真数据生成器 fxcorr-sim**（`applications/fxcorr-sim`，独立 C++ 串行应用；上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建，此为其替身）：
+
+- **应用落位与复用**：autotools 应用模板照 fxcorr-f（configure.ac PKG_CHECK_MODULES: fxcorrcommon），install-difx 注册 4 处；读 .input 复用 fxcorrcommon 的 Configuration（非 MPI 构造）——与 fxcorr-f 同一份解析语义，分批次对齐的根基。
+- **编排器无关**：纯文件/目录接口，不感知调度器——手工、xargs -P、scalebox 三种方式均可驱动。
+- **分片参数化**：按（站, batch 时间窗）参数化，天然分片单元 = 未来 scalebox 的 Task 粒度。
+- **分批次对齐**：读 .input 的 subint 结构，batch 时间窗与 subint 网格对齐（data-spec 12 节约束前置到数据产生端）；输出命名 `<station>_<batch_id>.vdif`。
+- **分布生成正确性**：多节点并行生成时，各分片的 VDIF 帧时间戳/帧号必须全局连续——作为程序内校验点，不依赖调度器保证。
+- V1 范围：tone + 高斯噪声 + pcal tone 注入（pcal.bin 链路对拍的前提，该链路至今未验证）+ 多 band。
+- **位序验证**：2bit 打包位序沿用 gen_test_vdif.py 已验证约定（对齐 mark5access lut2bit），C++ 实现与其同参数输出逐字节对拍。
+- 上游 datasim 的 IPP 修复（subband.h 13 处类型/签名 + subband.cpp 5 处调用，DFT/复乘换 fftwf）可作为独立小贡献，不绑进主路线。
+
+**实施记录（2026-09-12 完成，applications/fxcorr-sim 已建成）**：
+
+- 源码三件套：main.cpp（batch.json/对齐/帧时序/pcal 网格）+ signalgen.{h,cpp}（tone/噪声/pcal 合成 + 2bit 量化打包）+ vdifwriter.{h,cpp}（帧封装与时序连续性），vdif_header 位域头复用 vdifio.h（仅头文件，不链接 vdifio 库）。
+- 实测踩坑（均写入 applications/fxcorr-sim/CLAUDE.md）：① 采样率须从帧结构反推（getFramePayloadBytes×4×getFramesPerSecond），FREQ 表带宽≠采样率（4MHz band 以 8Ms/s 记录）；② FREQ 表 getter 单位是 MHz、pcal tone getter 单位是 Hz，须 ×1e6 统一；③ bytespersample 校验含 band 数因子（num/denom = nbands/4）。
+- 验收（测试机，全部通过）：位序与 gen_test_vdif.py 同参数输出 **BYTE-IDENTICAL**（1024 帧，对拍同时修复 Python 版帧号公式 bug）；单 band 全链路（fxcorr-sim→f→x）与 mpifxcorr cmp_swin **6/6 全等**；pcal 链路首次跑通（PHASE CAL INT 1MHz → 4 tones 201-204MHz 检出）；多 band（test2b.vex/v2d，2×4MHz）f/x 全链路跑通、tone 峰落位与可见度峰正确——mpifxcorr 读不了 2 band VDIF（vdifmux 帧结构识别异常，读端限制），2 band 对拍以物理验证为准。
 
 ---
 

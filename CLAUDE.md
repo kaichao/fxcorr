@@ -8,7 +8,7 @@ DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆�
 |---|---|---|
 | `mpifxcorr/` | 原 MPI 一体化相关器，拆分的源，保留不删（R7） | `mpifxcorr/CLAUDE.md` |
 | `libraries/` | 14 个共享库，独立 autotools 包（含已建成的 fxcorrcommon） | `libraries/CLAUDE.md` |
-| `applications/` | 独立程序（vex2difx、difx2fits 等）；fxcorr-f、fxcorr-x 已建成 | 模板见下 |
+| `applications/` | 独立程序（vex2difx、difx2fits 等）；fxcorr-f、fxcorr-x、fxcorr-sim 已建成 | 模板见下 |
 | `fxcorr/` | 改造工作区：文档 + bash 编排脚本 + test/ 测试资产（含对拍工具 cmp_swin.py） | `fxcorr/CLAUDE.md` |
 | `docker/` | 现有 CentOS8 镜像（clone 上游版，未涉及 fxcorr） | — |
 | `utilities/` `doc/` `tests/` | 工具 / 文档 / 测试 | — |
@@ -37,7 +37,7 @@ DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆�
 
 ## 改造约定
 
-- 改造目标是拆分 mpifxcorr 为 `applications/fxcorr-f`（station-based：解包、模型、通道化）+ `applications/fxcorr-x`（baseline-based：XMAC 与积分）+ `libraries/fxcorrcommon`（共享），以目录接口传数据，规范见 `fxcorr/data-spec.md`，V1 实施步骤见 `fxcorr/impl-plan.md`。
+- 改造目标是拆分 mpifxcorr 为 `applications/fxcorr-f`（station-based：解包、模型、通道化）+ `applications/fxcorr-x`（baseline-based：XMAC 与积分）+ `libraries/fxcorrcommon`（共享），另建 `applications/fxcorr-sim`（仿真数据生成器，datasim 的替身），以目录接口传数据，规范见 `fxcorr/data-spec.md`，V1 实施步骤见 `fxcorr/impl-plan.md`。
 - 原 `mpifxcorr/` 保留、可并行构建（R7）；算法/接口改动先对照 `fxcorr/data-spec.md`。
 - 拆分缝隙与可复用清单见 `mpifxcorr/CLAUDE.md`。
 
