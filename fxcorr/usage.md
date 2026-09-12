@@ -39,7 +39,7 @@ fxcorr-sim <batch_id> <station> [workdir] [tone_mhz ...]
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；`PHASE CAL INT (MHZ)` > 0 时自动注入 pcal tone（幅度 0.1）。
 - 输出 `workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF，多 band 帧内样本 band 交织）。
 
-程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界；batch 时长为整帧数。
+程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界。batch 时长非帧整数倍时文件生成到下一个帧边界取整（fxcorr-f 只读 batch 段）。
 
 示例：
 
@@ -134,4 +134,4 @@ fxcorr-x <batch_id>
 difx2fits <experiment>.input                 # 后处理按需
 ```
 
-以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_batch.sh`，规格见 impl-plan 2.4）。
+以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_bench.sh` / `run_batch.sh`，规格见 impl-plan 2.4）。

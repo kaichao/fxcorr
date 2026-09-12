@@ -235,12 +235,14 @@ int main(int argc, char **argv)
 		secns -= rem;                      // snap to the frame boundary
 	}
 	long long framestart = secns / framens;
-	if(durationns % framens != 0)
-	{
-		cerr << "fxcorr-sim: batch duration " << durationns << " ns is not an integer number of frames" << endl;
-		return EXIT_FAILURE;
-	}
-	long long nframestotal = durationns / framens;
+	// The batch duration need not be an integer number of frames: the file
+	// runs to the next frame boundary and fxcorr-f reads only the batch span.
+	// Frame-aligned subints (128 ms = 32 frames) are required for multi-batch
+	// starts to land on frame boundaries, but they trip a vdifmux frame-number
+	// parsing bug in mpifxcorr (frame # bit 7 treated as signed, ~0.5 s of
+	// every 256 frames misread; see impl-plan 2.4), so comparison runs use the
+	// test-input config (0.524288 s subint = 131.072 frames, non-aligned).
+	long long nframestotal = (durationns + framens - 1) / framens;
 
 	// tones: 0 values = no tone, 1 value = all bands, nbands values = per band
 	vector<double> tonehz(nbands, 0.0);

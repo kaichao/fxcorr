@@ -24,7 +24,7 @@
 | 脚本 | 作用 | 状态 |
 |---|---|---|
 | `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + batch.json），支持多 batch | 已实现 |
-| `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供 cmp_swin.py 对拍 | 未实现 |
+| `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供 cmp_swin.py 对拍 | 已实现 |
 | `run_batch.sh` | fxcorr 流水线：校验对齐 → 写 batch.json → 逐站 fxcorr-f → fxcorr-x → 更新 meta/batches.index | 未实现 |
 
 `watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度 V2 由 scalebox 承担，容器化同列 V2（scalebox Module 需容器镜像）。
@@ -33,11 +33,13 @@
 
 ```bash
 ./fxcorr/make_testdata.sh [workdir] [tone_mhz ...]   # -n N 连续 N 个 batch；FXSIM_NOISE/SEED、BATCH_NSUBINTS 环境变量
-./fxcorr/run_bench.sh                     # 出基准 SWIN（对拍基准，未实现）
+./fxcorr/run_bench.sh [workdir]            # 出基准 SWIN 到 bench/（对拍基准，NP 覆盖 mpirun 进程数）
 ./fxcorr/run_batch.sh 60512_45000         # fxcorr 流水线（未实现）
 ```
 
-make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；difxcalc 产物 sed 出 SUBINT 128ms / INT TIME 0.256 变体（test-sim.input，fxcorr-sim 帧长整除校验要求 SUBINT 落在 VDIF 帧网格）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。
+make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。
+
+run_bench.sh 实现要点（实测）：batch 定位走 DATA TABLE 软链 target 的 batch_id（fallback batches/ 最新 json）；EXECUTE TIME 截断 = `floor(initsec + (N−1)×intTime) + 1`（mpifxcorr 停写判定按积分起点、整秒字段，N = batch 时长/intTime 不整除即报错）；OUTPUT FILENAME sed 指 `bench/<exp>.difx`；mpirun 在 workdir 内跑（DATA TABLE 相对路径）、root 加 --allow-run-as-root、`LD_LIBRARY_PATH=$DIFXROOT/lib`；mpifxcorr 拒绝覆盖已有 SWIN（脚本先 rm -rf）。batch 时长 < 1s 无整秒解（mpifxcorr 多写 weight-0 积分），默认配置 2.097s 无碍。
 
 ## test/ 测试资产
 

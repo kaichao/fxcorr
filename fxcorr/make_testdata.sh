@@ -61,10 +61,12 @@ CFG="$WORKDIR/config"
 mkdir -p "$CFG" "$WORKDIR/batches"
 
 # ---- ① 前处理（幂等） ----
-# config 资产缺才复制。SUBINT 须落在 VDIF 帧网格上（fxcorr-sim 要求 batch 时长
-# 为帧长整数倍），而 difxcalc 默认推导的 SUBINT 0.524288s 非帧整数倍（131.072
-# 帧）——故 difxcalc 产物 sed 出 128ms SUBINT / 0.256s INT TIME 变体（测试机
-# 对拍配置同款；.calc/.im 不含 intTime 字段，无需改）
+# config 资产缺才复制。
+# 单 batch（对拍场景）直接用 difxcalc 原产物 test.input（SUBINT 0.524288s、
+# INT TIME 1.048576，6/6 对拍同配置）；帧对齐的 128ms SUBINT 变体只用于
+# -n 多 batch（连续切分起点须帧边界，0.524288s 与帧网格公倍数 65.5s 不可用）。
+# 128ms 变体会触发 mpifxcorr vdifmux 帧号 bit7 错读（~每 256 帧坏 0.5s，
+# 见 impl-plan 2.4），多 batch 对拍不做，仅 fxcorr 侧自测。
 [ -f "$CFG/test.vex" ] || cp "$SCRIPTDIR/test/test.vex" "$CFG/test.vex"
 [ -f "$CFG/test.v2d" ] || cp "$SCRIPTDIR/test/test.v2d" "$CFG/test.v2d"
 # vex2difx 的 vex= 路径相对 cwd（非 v2d 目录），.input 也输出到 cwd；
@@ -72,15 +74,19 @@ mkdir -p "$CFG" "$WORKDIR/batches"
 # 前处理工具的进度/警告输出重定向 stderr，脚本 stdout 只留 batch_id（规格⑥）
 [ -f "$CFG/test.input" ] || (cd "$CFG" && vex2difx test.v2d >&2)
 [ -f "$CFG/test.im" ] || (cd "$CFG" && difxcalc test.calc >&2)
-if [ ! -f "$CFG/test-sim.input" ]; then
-	sed -e 's/^INT TIME (SEC):[[:space:]]*[0-9.]*$/INT TIME (SEC):     0.256/' \
-	    -e 's/^SUBINT NANOSECONDS:[[:space:]]*[0-9]*$/SUBINT NANOSECONDS: 128000000/' \
-	    "$CFG/test.input" > "$CFG/test-sim.input"
+if [ "$NBATCH" -gt 1 ]; then
+	if [ ! -f "$CFG/test-sim.input" ]; then
+		sed -e 's/^INT TIME (SEC):[[:space:]]*[0-9.]*$/INT TIME (SEC):     0.256/' \
+		    -e 's/^SUBINT NANOSECONDS:[[:space:]]*[0-9]*$/SUBINT NANOSECONDS: 128000000/' \
+		    "$CFG/test.input" > "$CFG/test-sim.input"
+	fi
+	INPUT="$CFG/test-sim.input"
+else
+	INPUT="$CFG/test.input"
 fi
 
 # ---- ②③ 解析 .input、推导 batch 参数、写 batches/<batch_id>.json ----
 # python3：f64 精确 repr（start_mjd）、MJD 转历表（start_time）、数组字段拼装
-INPUT="$CFG/test-sim.input"
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
 export NBATCH INPUT
@@ -149,7 +155,7 @@ for i in range(nbatch):
         'duration_sec': nsub * subintns / 1.0e9,
         'stations': stations,
         'baselines': baselines,
-        'config_file': 'config/test-sim.input',
+        'config_file': os.path.relpath(os.environ['INPUT'], workdir),
         'calc_file': calcrel,
         'im_file': imrel,
         'n_subints': nsub,

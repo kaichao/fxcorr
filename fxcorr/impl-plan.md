@@ -147,7 +147,7 @@ for subint in batch:
 
 **make_testdata.sh 实施记录（2026-09-12 完成，fxcorr/make_testdata.sh）**：
 
-- 实现偏差与决策：① config 资产缺才从 `fxcorr/test/` 复制（test.vex/test.v2d），vex2difx/difxcalc 在 config/ 内跑（vex= 路径相对 cwd）；**difxcalc 产物 sed 出 test-sim.input 变体**（SUBINT 524288000→128000000、INT TIME 1.048576→0.256）——默认 SUBINT 非 VDIF 帧网格整数倍（131.072 帧），fxcorr-sim 帧长整除校验要求变体（v2d 的 subintNS/tInt 无法直接指定：vex2difx 不认 subintNS 关键字、tInt 会被 difxcalc nudge）。② 幂等：前处理产物存在跳过、VDIF 存在跳过；前处理工具输出重定向 stderr（stdout 只留 batch_id）。③ `-n N`：batch_i 起点 = scan 起点 + i×duration，n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒 floor 唯一）；软链指向最后 batch 并提示。④ batch.json 的 calc_file/im_file 从 .input 的 CALC FILENAME 推导（sed 变体不改它）。
+- 实现偏差与决策：① config 资产缺才从 `fxcorr/test/` 复制（test.vex/test.v2d），vex2difx/difxcalc 在 config/ 内跑（vex= 路径相对 cwd）；**单 batch 直接用 difxcalc 原产物 test.input**（SUBINT 0.524288s、INT TIME 1.048576 = 6/6 对拍同配置），**仅 `-n N` 多 batch 时 sed 出 test-sim.input 变体**（SUBINT 128000000、INT TIME 0.256）——多 batch 连续切分起点须 VDIF 帧边界，0.524288s 网格与帧网格公倍数 65.5s 不可用，128ms = 32 帧对齐（v2d 的 subintNS/tInt 无法直接指定：vex2difx 不认 subintNS 关键字、tInt 会被 difxcalc nudge）。② 幂等：前处理产物存在跳过、VDIF 存在跳过；前处理工具输出重定向 stderr（stdout 只留 batch_id）。③ `-n N`：batch_i 起点 = scan 起点 + i×duration，n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒 floor 唯一）；软链指向最后 batch 并提示。④ batch.json 的 calc_file/im_file 从 .input 的 CALC FILENAME 推导（sed 变体不改它）。
 - 实现 -n 多 batch 时发现并修复的三个既有 bug：**fxcorr-sim 整秒 snap 放宽**为帧边界整除（vdifwriter 帧号从秒内偏移起算，1µs 内近整秒仍归整秒——simcmp BYTE-IDENTICAL 回归通过）；**fxcorr-f 数据文件起点 = batch 起点**（原按 scan 起点定位，多 batch 偏移后读错位置；修复后 batch 1 对拍回归 6/6）；**fxcorr-x executeseconds 加 initsec 偏移**（原停写判定按 scan 起点基准，batch 起点偏移时静默不写盘）。
 - 实测踩坑（均写入 applications/*/CLAUDE.md 或 memory）：**mpifxcorr vdifmux 读不了带噪 2bit 数据**（FXSIM_NOISE>0 时 databytesperpacket 错乱、0 积分输出，NOISE=0 正常）——对拍数据须 `FXSIM_NOISE=0` 生成；f 数据块时间与 batch 起点换算的坐标系混用（当日秒系 vs scan 相对系）曾导致 .sp weight 全 0。
 - 验收（测试机，全部通过）：全新目录跑通单 batch 全流程（config/raw/batches/软链/batch.json 字段全对）；`-n 2` 两个 batch.json 时间连续（start_mjd 差 1.024s）、n_subints 自动 8、软链指最后 batch；batch 2（起点 scan+1.024s）f/x 全链路 4 积分 12 条；NOISE=0 数据 test.input 配置与 mpifxcorr cmp_swin **6/6 全等**；fxcorr-sim simcmp 位序 BYTE-IDENTICAL 回归。
@@ -159,6 +159,14 @@ for subint in batch:
 ```
 
 步骤：① 复制 `config/<exp>.input` → `bench/`，EXECUTE TIME 截断为完整覆盖段（≤ 数据时长 − 1 subint，避开 mpifxcorr vdifmux 滞后，见 fxcorr-f CLAUDE.md）；② `mpirun --allow-run-as-root -np 4 mpifxcorr bench/<exp>.input`；③ 基准 SWIN 落 `bench/<experiment>.difx/`；④ 打印对拍提示（`cmp_swin.py` 用法）。
+
+**run_bench.sh 实施记录（2026-09-12 完成，fxcorr/run_bench.sh）**：
+
+- batch 定位：DATA TABLE 软链 target 解析 `<station>_<batch_id>.vdif`（-n 多 batch 时软链指最后 batch，精确对应数据），无软链时 fallback batches/ 下 mtime 最新 json。读 batch.json 取 config_file/n_subints/subint_ns/integration_sec，与 fxcorr 侧同配置是两侧积分数一致的前提。
+- **EXECUTE TIME 截断公式**（mpifxcorr writedata 以积分起点 + scanstartsec ≥ executeseconds 停写，且 EXECUTE TIME 为整秒字段）：`exec = floor(initsec + (N−1)×intTime) + 1`，N = batch 时长/intTime（不整除即报错退出）。积分 1..N 起点 < exec 全写、积分 N+1 起点 ≥ exec 停；与 6/6 对拍实测 EXECUTE TIME=2 反推一致。**batch 时长 < 1s 时无整秒解**（如 0.512s 场景 mpifxcorr 会多写 weight-0 积分）——默认配置（n_subints=4 × 0.524288s = 2.097s）无此问题。
+- OUTPUT FILENAME sed 改指 `bench/<exp>.difx`（与 fxcorr 侧 OUTPUT 目录分开落盘）；DATA TABLE 相对路径靠 cwd 在 workdir 内跑；mpifxcorr 拒绝覆盖已有 SWIN，重跑前 rm -rf 输出目录（幂等）。
+- **发现 vdifmux 帧号 bit7 错读**（mpifxcorr 读端，fxcorr 无）：128ms 帧对齐 subint 数据在帧号 0x80..0xFF（128..255，256 帧周期 = 1.024s）段被误判乱序 → 丢帧错乱（伴随 frameheadersize 32→16 误检测、databytesperpacket 垃圾值），帧号 0x100 恢复。实验证据：坏段随 batch 起点帧号平移（帧号 0 起坏段在 [0.512,1.024]s、帧号 32 起在 [0.384,0.896]s）、与生成器/tone/噪声无关；0.524288s 非帧对齐 subint 网格不触发（6/6 全等）。**决策（方案 A）**：对拍统一 test.input 配置，fxcorr-sim 时长帧整除校验放宽为生成到帧边界取整（文件尾部多半帧，f 只读 batch 段）；128ms 变体仅用于 -n 多 batch（fxcorr 侧自测，不与 mpifxcorr 对拍）。
+- 验收（测试机，全部通过）：mktd3 默认单 batch（test.input 配置、525 帧）run_bench EXECUTE TIME=2 + fxcorr 全链路 cmp_swin **6/6 全等**；mktd4 `-n 2` 回归（test-sim 变体、batch.json 连续、batch 2 全链路 4 积分）；nonsec 坏段平移实验定稿根因。
 
 **run_batch.sh** —— fxcorr 流水线（V1 静态数据集，手工/编排器均可调）。
 
