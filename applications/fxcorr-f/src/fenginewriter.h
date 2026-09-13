@@ -47,8 +47,13 @@ public:
 	 * Averages in frequency and writes one autocorrelation averaging batch
 	 * (autocorr.bin).  The caller must zeroAutocorrelations() afterwards,
 	 * exactly like core.cpp:994-1003.
+	 *
+	 * P9: when datastreamsaveraged is set, the caller has already averaged
+	 * the spectra in frequency (for an STA dump above the post-average
+	 * channel count, core.cpp:1181-1187) and the average step here must be
+	 * skipped, like core.cpp:1263-1268.
 	 */
-	void writeAutocorrelationBatch(Mode *mode);
+	void writeAutocorrelationBatch(Mode *mode, bool datastreamsaveraged = false);
 
 private:
 	void writeSpHeader(int band);

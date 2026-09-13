@@ -22,7 +22,7 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 | P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 |
 | P7 | 交叉极化自相关（WRITE AUTOCORRS） | 功能未迁移 |
 | P8 | 相位阵频率域加权合并 | 功能未迁移 | ✅ 2026-09-13（x 侧 BeamEngine 波束加权求和 + beam.bin 落盘（上游输出端死代码、格式自定）；两种权重逐位 PASS、回归 6/6；详见 P8 节） |
-| P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 |
+| P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | ✅ 2026-09-13（f 侧 FXCORR_KURTOSIS=1 触发 + STA 平均分支；CHANS TO AVG 1/4 两轮 STA+kurtosis 对拍 318 条逐位全等、无开关回归 6/6；顺手修 P1 遗留 stride bug） |
 | P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 |
 | P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 |
 
@@ -689,6 +689,39 @@ fxcorr-x 支持相位阵模式：删 V1 拒绝，实现波束加权求和并按 
 - 无相位阵回归：test 配置（无 PHASED ARRAY 段）SWIN 对拍 6/6 不变；位序对拍 BYTE-IDENTICAL 不变。
 
 ✅ 2026-09-13：**实施完成**（fxcorr-x 早退分支 + BeamEngine，fxcorrcommon 仅补一行 `getFPhasedArrayAccumulationNS` getter；beam.bin 布局同步 data-spec 5.5 节/D14）。**数值验证**：test 配置 SUBINT 改 81920000ns（40 块，numbufferedffts 整除——原 256 块过不了上游 accffts 校验）、ACC TIME 20480000ns → 每 subint 4 窗口：DWeight(0.5,0.5) 与 (1.0,0.0) 两种权重下 cmp_beam.py 50×4 窗口**逐位 PASS**（频谱 f32 相同累加序逐位一致、时间戳 = subint 起点 + acc×20480000ns）；波束谱峰 chan 1536 = 1.5MHz、不写 SWIN ✓。**无相位阵回归**：标准配置 SWIN 对拍 6/6 全等（intTime 校验限定非相位阵后重确认）。**实施坑**：① 相位阵配置文件行格式——getinputkeyval 从固定第 20 列取 val，短 key 的值须空格 pad（照 pulsar 资产的 kv() 先例）；② 相位阵分支最初做 if/else 包裹重构（提公共 lambda），标准配置回归出现堆损坏（subint 1 fread 触发），二分无果后改**早退分支**（旧路径逐字节不动、相位阵提前 return），回归恢复全等——早退隔离性最好，保留；③ 上游 core.cpp:821 的 getFNumChannels(configindex) 是 bug（参数应为 freq 序号），fxcorr 按正确语义修复。
+
+---
+
+## P9：Kurtosis STA + STA 频域平均分支（✅ 2026-09-13 完成）
+
+### 动机分类
+
+功能未迁移。上游 STA 监控有三个组件，P1 只做了自相关 STA 的非平均分支：① `averageAndSendAutocorrs`（core.cpp:1166-1265）每 autocorr 批次发 STA_AUTOCORRELATION；② 同函数内的**频域平均分支**（:1181-1187）——`minpostavfreqchannels >= STADumpChannels` 时（默认 4096≥32 恒真）STA 发送前先把各站频谱 `averageFrequency()`，STA 的 renorm 与通道数按平均后频谱修正（:1249-1254），autocorr.bin 落盘跳过重复平均（:1263-1268）；③ `averageAndSendKurtosis`（:1378-1434）每 subint 末发 STA_KURTOSIS（谱峰度，无 weight gate、无 renorm）。上游由 difxmessage 控制消息运行时开启（`dumpsta=true` / `dumpkurtosis=true`，mpifxcorr.cpp:88-97，独立命令线程阻塞接收）；fxcorr 用环境变量（`FXCORR_STA=1` P1 已有、`FXCORR_KURTOSIS=1` 本次新增）。
+
+### 要解决的问题
+
+STA 是实时监控（difxmonitor GUI）的数据源：autocorr STA 的谱形、kurtosis 的 RFI 峰度统计都是标准观测监控项。P1 只覆盖了 autocorr STA 的默认分支，且 CHANS TO AVG>1 的配置下数值与上游不同（非平均分支 renorm 未除 FChannelsToAverage），监控图与上游不一致。
+
+### 预期效果
+
+`FXCORR_STA=1` 时 STA_AUTOCORRELATION 消息与 mpifxcorr 基准**逐位全等**（含 CHANS TO AVG 4 的平均分支）；`FXCORR_KURTOSIS=1` 时 STA_KURTOSIS 消息逐位全等；无开关路径零变化（SWIN 回归 6/6、autocorr.bin 逐字节不变）。
+
+### 设计
+
+**落点：fxcorr-f 只动 main.cpp + fenginewriter 一处签名**。fxcorrcommon 的 Mode 已把上游 kurtosis 全链路移植好（`process()` 内 s1/s2 累积在 fracsample 修正前、`zeroKurtosis` 惰性分配、`calculateAndAverageKurtosis` 含折叠平均），f 侧只需接线。
+
+- **Kurtosis 接线**：构造后 `mode->setDumpKurtosis(dokurtosis)`（process 内 `if(dumpkurtosis)` 分支已就位）；每 subint 循环 `if(dokurtosis) mode->zeroKurtosis()`（core.cpp:703-704 条件调用）；subint 尾（flushWeights 后）`sendKurtosis`：`calculateAndAverageKurtosis(blockspersend, STADumpChannels)` 后 per recorded band 发 STA_KURTOSIS——nChan = min(STADumpChannels, FNumChannels)，data = getKurtosis 前 nChan 直接拷贝（**无 weight gate、无 renorm**，与 autocorr STA 的区别），时间戳同 autocorr STA（当日秒系），nsoffset/nswidth = 整个 subint（blockspersend×blockns，非 ac 批次）。单线程 numblocks = blockspersend 与上游 core.cpp:2165 一致。
+- **频域平均分支**：两处 ac 批次边界（满批 + 尾批）改为：`bool datastreamsaveraged = (dosta && getMinPostAvFreqChannels(0) >= getSTADumpChannels())`；true 时先 `mode->averageFrequency()` 再 sendSTA，`writeAutocorrelationBatch(mode, datastreamsaveraged)` 内部跳过自己的平均（新参数，默认 false 保持旧行为）。sendSTA 内部按上游 :1249-1254 顺序：weight gate 用**原始** freqchannels（gate 在平均调整前）→ renorm 初值 → datastreamsaveraged 时 `renormvalue /= FChannelsToAverage(freqindex)`、`freqchannels /= FChannelsToAverage(freqindex)` → nChan 截断 → chans_to_avg 折叠 → renorm 乘。
+- **顺手补上游 MTU gate**（:1191-1192）：`sizeof(STARecord)+4×STADumpChannels > MTU` 时整体不发（P1 漏移植；默认 32 通道远小于 MTU，无实际影响）。
+- **上游怪癖不修**：`calculateAndAverageKurtosis` 的返回 nonzero 只反映**最后一个 band**（上游 bug，单 band 配置碰巧正确）——fxcorr 照抄；多 band 时 sk 的 stale 值与上游行为一致（对拍无法覆盖，上游自己都不一致）。
+- **difxsta 对拍设施**：difxmessage 库只有发送端 API 无现成抓包工具，测试资产自写 `sta_ctrl`（C，链 libdifxmessage）：`send` 模式发控制消息（difxMessageSendDifxParameter）、`recv` 模式 difxMessageBinaryOpen(BINARY_STA) 抓原始 record 流（与 fxcorr container 模式 .sta 落盘同布局，同一 cmp 解析）。
+
+### 验证方法
+
+- 资产 `fxcorr/test/sta/`：gen_test_sta.py（CHANS TO AVG 1→4 变体 + EXECUTE TIME=2 截断变体）、sta_ctrl.c（控制消息 + 抓包）、cmp_sta.py（按 (messageType, dsindex, bandindex, scan, sec, ns, nswidth) 分组逐位比对 + min_absns 过滤参数）、README（完整命令）。
+- 对拍两轮：默认 CHANS TO AVG 1（平均分支等价回归）与 CHANS TO AVG 4（真平均分支）各 318 条（autocorr 312 + kurtosis 6）逐位全等；无开关 SWIN 回归 6/6；FXCORR_STA=1 时 autocorr.bin md5 与无开关一致。
+
+✅ 2026-09-13：**实施完成**（main.cpp：FXCORR_KURTOSIS 开关 + setDumpKurtosis/条件 zeroKurtosis/sendKurtosis 新函数 + 两处批次边界的 datastreamsaveraged 判定 + sendSTA 平均分支与 MTU gate；fenginewriter：writeAutocorrelationBatch 加跳过平均参数）。**验证**：两轮对拍各 318 条**逐位 PASS**（含 kurtosis 6 条）；无开关 SWIN 回归 6/6 全等；autocorr.bin 开/关 STA 逐字节一致（md5）。**实施坑**：① **P1 遗留 stride bug**——sendSTA 折叠循环 `acdata[2*k*chans_to_avg].re` 直接照抄上游 f32* 的 ×2 stride（上游 acdata 是 `(f32*)getAutocorrelation()`，f32 stride 2 = cf32 stride 1），fxcorr 用 cf32* 时 ×2 导致隔块取样、STA 谱形完全错误；P1 对拍未覆盖 data 数值，P9 的逐位对拍暴露，修复为 `acdata[k*chans_to_avg].re`；② **基准控制消息时序**——mpifxcorr 命令线程在 .input 读完后才 spawn，先发的消息必丢，4 次×1s 连发只从第 3 个 subint 起生效；检验用 0.2s×40 轮连发（dump 从第 2 个 subint 起生效），首 subint 无基准记录、两边统一 min_absns=524288000 过滤（组播 fire-and-forget 固有行为，非 fxcorr 问题）。
 
 ---
 

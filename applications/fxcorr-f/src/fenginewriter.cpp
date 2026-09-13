@@ -252,18 +252,21 @@ void FEngineWriter::writePcal(Mode *mode)
 	}
 }
 
-void FEngineWriter::writeAutocorrelationBatch(Mode *mode)
+void FEngineWriter::writeAutocorrelationBatch(Mode *mode, bool datastreamsaveraged)
 {
 	// same order as Core::averageAndSendAutocorrs (core.cpp:1273-1302 for the
 	// data, 1314-1339 for the weights): average first, then copy out; one record
 	// per maxacblocks batch, the caller zeroes autocorrelations after.
+	// P9: an STA dump may have averaged the spectra already (core.cpp:1181-1187);
+	// averaging twice would fold the spectrum again (core.cpp:1263-1268).
 	// Zoom bands are slices of the parent autocorrelation array; their weight
 	// is taken from the parent recorded band (Mode::weights only holds recorded
 	// bands, so zoom bands cannot be queried directly).
 	// P7: with WRITE AUTOCORRS && maxproducts>2 the cross-polar section
 	// follows the parallel one (core.cpp:1288-1301 / 1342-1369); both walk
 	// the same total-band order.
-	mode->averageFrequency();
+	if(!datastreamsaveraged)
+		mode->averageFrequency();
 	auto writesection = [&](bool crosspol)
 	{
 		for(int j=0;j<ntotalbands;j++)

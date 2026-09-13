@@ -74,7 +74,8 @@ fxcorr-f <batch_id> <station> [workdir]
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `DIFX_MESSAGE_GROUP` / `DIFX_MESSAGE_PORT` | 未设（静默） | host 模式组播目标（setup.bash 默认 224.2.2.1:50201）；未设时不发状态消息 |
-| `FXCORR_STA` | 未设 | `1` 时每 autocorr 批次向 `DIFX_BINARY_GROUP/PORT` 组播 DifxMessageSTARecord |
+| `FXCORR_STA` | 未设 | `1` 时每 autocorr 批次向 `DIFX_BINARY_GROUP/PORT` 组播 DifxMessageSTARecord（STA_AUTOCORRELATION）；minpostavfreqchannels ≥ STA 通道数时自动走频域平均分支（与 mpifxcorr 一致，P9） |
+| `FXCORR_KURTOSIS` | 未设 | `1` 时每 subint 末向 `DIFX_BINARY_GROUP/PORT` 组播 DifxMessageSTARecord（STA_KURTOSIS，谱峰度，无 weight 门槛与归一化，P9） |
 | `DIFX_BINARY_GROUP` / `DIFX_BINARY_PORT` | 未设 | STA 二进制组播目标；未设时 STA 静默 |
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态/STA 降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
 

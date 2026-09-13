@@ -43,12 +43,20 @@ static int fail(DifxMonitor &monitor, const string &msg)
 
 // BINARY_STA records, one per recorded band, per autocorrelation batch
 // (algo-plan.md P1; core.cpp averageAndSendAutocorrs 1195-1253, V1
-// single-thread non-averaged branch).  nsoffsetns/nswidthns describe the
-// current ac batch (centre offset and width in ns).
+// single-thread form).  nsoffsetns/nswidthns describe the current ac batch
+// (centre offset and width in ns).
+// P9: datastreamsaveraged means the caller already ran averageFrequency()
+// for this batch (core.cpp:1181-1187); the renormalisation and the channel
+// count then refer to the averaged spectrum (core.cpp:1249-1254).
 static void sendSTA(DifxMonitor *monitor, Configuration &config, int configindex, int dsindex,
                     Mode *mode, int scan, long long scanstartsec, int subintsec, int subintns,
-                    double nsoffsetns, double nswidthns, const string &jobname)
+                    double nsoffsetns, double nswidthns, bool datastreamsaveraged, const string &jobname)
 {
+	// core.cpp:1191-1192: no STA at all when one record does not fit the MTU
+	int recordsize = sizeof(DifxMessageSTARecord) + sizeof(f32)*config.getSTADumpChannels();
+	if(recordsize > config.getMTU())
+		return;
+
 	int nrecordedbands = config.getDNumRecordedBands(configindex, dsindex);
 	for(int band=0;band<nrecordedbands;band++)
 	{
@@ -61,14 +69,23 @@ static void sendSTA(DifxMonitor *monitor, Configuration &config, int configindex
 		if(weight < 0.333*stasamples/(2*freqchannels))
 			continue;
 
+		// core.cpp:1224: energy -> power normalisation
+		f32 renormvalue = 1.0f/(2*freqchannels*weight);
+		// core.cpp:1227-1232: on an averaged spectrum channels are summed
+		// below, not averaged, so correct both factors
+		if(datastreamsaveraged)
+		{
+			renormvalue /= config.getFChannelsToAverage(freqindex);
+			freqchannels /= config.getFChannelsToAverage(freqindex);
+		}
+
+		// core.cpp:1234-1237: fold to the requested STA dump resolution
 		int nchan = config.getSTADumpChannels();
 		if(freqchannels < nchan)
 			nchan = freqchannels;
 		int chans_to_avg = freqchannels/nchan;
-		f32 renormvalue = 1.0f/(2*freqchannels*weight);
 
 		cf32 *acdata = mode->getAutocorrelation(false, band);
-		int recordsize = sizeof(DifxMessageSTARecord) + sizeof(f32)*nchan;
 		DifxMessageSTARecord *record = (DifxMessageSTARecord *)malloc(recordsize);
 		memset(record, 0, recordsize);
 
@@ -91,16 +108,74 @@ static void sendSTA(DifxMonitor *monitor, Configuration &config, int configindex
 		}
 		record->nswidth = (int)nswidthns;
 		record->bandindex = band;
-		// sum (not average) of chans_to_avg adjacent real parts, core.cpp:1244-1247
+		// sum (not average) of chans_to_avg adjacent real parts, core.cpp:1244-1247.
+		// Upstream indexes acdata as f32* with stride 2 (= cf32 stride 1); the
+		// P1 port kept the factor 2 with a cf32* pointer and folded every
+		// second chans_to_avg block instead of adjacent channels (fixed P9,
+		// caught by the averaged-branch STA bitwise comparison).
 		for(int k=0;k<nchan;k++)
 		{
-			record->data[k] = acdata[2*k*chans_to_avg].re;
+			record->data[k] = acdata[k*chans_to_avg].re;
 			for(int l=1;l<chans_to_avg;l++)
-				record->data[k] += acdata[2*(k*chans_to_avg+l)].re;
+				record->data[k] += acdata[k*chans_to_avg+l].re;
 		}
 		// vectorMulC_f32_I(renormvalue, ...): energy -> power
 		for(int k=0;k<nchan;k++)
 			record->data[k] *= renormvalue;
+
+		monitor->staSend(record, sizeof(DifxMessageSTARecord) + sizeof(f32)*nchan);
+		free(record);
+	}
+}
+
+// BINARY_STA records with messageType STA_KURTOSIS, one per recorded band,
+// per subint (algo-plan.md P9; core.cpp averageAndSendKurtosis 1378-1434,
+// V1 single-thread form).  The mode has accumulated s1/s2 in process(); the
+// excess-kurtosis statistic is folded and copied out by
+// calculateAndAverageKurtosis.  nsoffsetns/nswidthns describe the whole
+// subint (centre offset and width); unlike the autocorrelation STA there is
+// no weight gate and no renormalisation (core.cpp:1420-1431).
+static void sendKurtosis(DifxMonitor *monitor, Configuration &config, int configindex, int dsindex,
+                         Mode *mode, int scan, long long scanstartsec, int subintsec, int subintns,
+                         double nsoffsetns, double nswidthns, int numblocks, const string &jobname)
+{
+	bool valid = mode->calculateAndAverageKurtosis(numblocks, config.getSTADumpChannels());
+	if(!valid)
+		return;
+
+	int nrecordedbands = config.getDNumRecordedBands(configindex, dsindex);
+	for(int band=0;band<nrecordedbands;band++)
+	{
+		int freqindex = config.getDRecordedFreqIndex(configindex, dsindex, band);
+		int freqchannels = config.getFNumChannels(freqindex);
+		int nchan = config.getSTADumpChannels();
+		if(freqchannels < nchan)
+			nchan = freqchannels;
+
+		int recordsize = sizeof(DifxMessageSTARecord) + sizeof(f32)*nchan;
+		DifxMessageSTARecord *record = (DifxMessageSTARecord *)malloc(recordsize);
+		memset(record, 0, recordsize);
+
+		record->messageType = STA_KURTOSIS;
+		record->dsindex = dsindex;
+		record->coreindex = 0;
+		record->threadindex = 0;
+		snprintf(record->identifier, DIFX_MESSAGE_PARAM_LENGTH, "%s",
+		         jobname.substr(0, DIFX_MESSAGE_PARAM_LENGTH-1).c_str());
+		record->nChan = nchan;
+		record->scan = scan;
+		record->sec = (int)scanstartsec + subintsec;
+		record->ns = subintns + (int)nsoffsetns;
+		if(record->ns >= 1000000000)
+		{
+			record->ns -= 1000000000;
+			record->sec++;
+		}
+		record->nswidth = (int)nswidthns;
+		record->bandindex = band;
+		f32 *sk = mode->getKurtosis(band);
+		for(int k=0;k<nchan;k++)
+			record->data[k] = sk[k];
 
 		monitor->staSend(record, recordsize);
 		free(record);
@@ -234,6 +309,11 @@ int main(int argc, char **argv)
 	bool dosta = false;
 	if(const char *staenv = getenv("FXCORR_STA"))
 		dosta = (strcmp(staenv, "1") == 0);
+	// P9: kurtosis STA (algo-plan.md); upstream enables it at runtime via a
+	// difxmessage parameter ("dumpkurtosis=true"), fxcorr via environment.
+	bool dokurtosis = false;
+	if(const char *kurtosisenv = getenv("FXCORR_KURTOSIS"))
+		dokurtosis = (strcmp(kurtosisenv, "1") == 0);
 	if(containerprefix.size() > 0)
 	{
 		if(system(("mkdir -p " + workdir + "/meta/difxmsg").c_str()) != 0)
@@ -259,6 +339,10 @@ int main(int argc, char **argv)
 	}
 
 	DataReader reader(&config, 0, dsindex, model, batchstartsec, batchstartns);
+
+	// P9: Mode::process accumulates s1/s2 per FFT block only when this is
+	// set (mode.cpp:1236, upstream core.cpp:702)
+	mode->setDumpKurtosis(dokurtosis);
 
 	// autocorrelation averaging batch, same formula as core.cpp:769-783
 	int numbufferedffts = config.getNumBufferedFFTs(0);
@@ -411,6 +495,8 @@ int main(int argc, char **argv)
 		monitor.diagnosticInputDatarate((double)bytes / ((double)subintns/1.0e9));
 
 		mode->zeroAutocorrelations();
+		if(dokurtosis)
+			mode->zeroKurtosis();	// core.cpp:703-704
 		reader.fillValidFlags(validflags, bytes);
 		mode->setValidFlags(validflags);
 		mode->setData(databuf, bytes, scan, datasec, datans);
@@ -444,10 +530,18 @@ int main(int argc, char **argv)
 			{
 				if(haspcal)
 					pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
+				// P9: STA may demand the post-average spectrum (core.cpp:1181-1187):
+				// average before the dump, let the writer skip its own average
+				bool datastreamsaveraged = false;
+				if(dosta && config.getMinPostAvFreqChannels(0) >= config.getSTADumpChannels())
+				{
+					mode->averageFrequency();
+					datastreamsaveraged = true;
+				}
 				if(dosta)
 					sendSTA(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
-					        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns, maxacblocks*blockns, config.getJobName());
-				writer.writeAutocorrelationBatch(mode);
+					        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns, maxacblocks*blockns, datastreamsaveraged, config.getJobName());
+				writer.writeAutocorrelationBatch(mode, datastreamsaveraged);
 				mode->zeroAutocorrelations();
 				acblockcount = 0;
 				acshiftcount++;
@@ -457,10 +551,17 @@ int main(int argc, char **argv)
 		{
 			if(haspcal)
 				pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
+			// P9: same pre-STA averaging as the full batch above
+			bool datastreamsaveraged = false;
+			if(dosta && config.getMinPostAvFreqChannels(0) >= config.getSTADumpChannels())
+			{
+				mode->averageFrequency();
+				datastreamsaveraged = true;
+			}
 			if(dosta)
 				sendSTA(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
-				        (acshiftcount*maxacblocks + acblockcount/2.0)*blockns, acblockcount*blockns, config.getJobName());
-			writer.writeAutocorrelationBatch(mode);
+				        (acshiftcount*maxacblocks + acblockcount/2.0)*blockns, acblockcount*blockns, datastreamsaveraged, config.getJobName());
+			writer.writeAutocorrelationBatch(mode, datastreamsaveraged);
 			mode->zeroAutocorrelations();
 		}
 
@@ -476,6 +577,12 @@ int main(int argc, char **argv)
 			}
 		}
 		writer.flushWeights();
+
+		// P9: kurtosis covers the whole subint, not an ac batch
+		// (core.cpp:1062-1063; single-thread numblocks = blockspersend)
+		if(dokurtosis)
+			sendKurtosis(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
+			             (blockspersend/2.0)*blockns, (double)blockspersend*blockns, blockspersend, config.getJobName());
 	}
 
 	if(haspcal)
