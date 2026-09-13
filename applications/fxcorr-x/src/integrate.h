@@ -8,6 +8,8 @@
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/visibility.h>
 
+class DifxMonitor;
+
 /**
  * @class Integrator
  * @brief Single-Visibility long-term integration for fxcorr-x: the serial
@@ -18,6 +20,10 @@
  * integration period completes, writedata() emits the SWIN record and
  * increment() moves the Visibility to the next period.  Autocorrelations
  * come from the stations' autocorr.bin files (one record per subint).
+ *
+ * When a monitor is attached, each completed integration also emits a
+ * DIFX_STATE_RUNNING DifxMessage (algo-plan.md P1, upstream
+ * Visibility::multicastweights visibility.cpp:1100-1146).
  */
 class Integrator {
 public:
@@ -30,9 +36,10 @@ public:
 	 * @param scan     0 in V1 (single scan)
 	 * @param startsec seconds of the batch start relative to the scan start
 	 * @param startns  nanoseconds remainder of the batch start
+	 * @param monitor  optional DifxMessage emitter for RUNNING status
 	 */
 	Integrator(Configuration *config, int configindex, const std::string &difxdir, int eseconds,
-		int scan, int startsec, int startns);
+		int scan, int startsec, int startns, DifxMonitor *monitor = 0);
 	~Integrator();
 
 	Visibility *visibility() const { return vis_; }
@@ -54,10 +61,15 @@ public:
 	void addAutocorrs(int subint, const std::vector<std::string> &autocorrFiles, cf32 *subintresults);
 
 private:
+	// visibility.cpp multicastweights 1100-1146: per-station band-averaged
+	// autocorr weights + integration-centre MJD, sent as RUNNING
+	void sendRunning();
+
 	Configuration *config;
 	int configindex;
 	Visibility *vis_;
 	char *todiskbuffer_;
+	DifxMonitor *monitor_;
 };
 
 #endif

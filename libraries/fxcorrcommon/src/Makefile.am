@@ -17,7 +17,8 @@ h_sources = \
 	alert.h \
 	architecture.h \
 	fraction.h \
-	mpifxcorr.h
+	mpifxcorr.h \
+	difxmonitor.h
 
 internal_h_sources = \
 	pcal_impl.h
@@ -33,7 +34,8 @@ cpp_sources = \
 	visibility.cpp \
 	model.cpp \
 	datamuxer.cpp \
-	alert.cpp
+	alert.cpp \
+	difxmonitor.cpp
 
 # installed under $(includedir)/fxcorrcommon to avoid clashing with the
 # same-named headers mpifxcorr installs into $(includedir) itself

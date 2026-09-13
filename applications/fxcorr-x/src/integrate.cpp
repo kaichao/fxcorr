@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include <fxcorrcommon/visibility.h>
+#include <fxcorrcommon/difxmonitor.h>
 
 using namespace std;
 
@@ -17,8 +18,8 @@ static const string LINEAR_POL_NAMES[4] = {"XX", "YY", "XY", "YX"};
 // "FXCAC\0" + u32 version + u32 nsub + u32 nbands + per band (u32 bandindex, u32 nchan)
 
 Integrator::Integrator(Configuration *conf, int cindex, const string &difxdir, int eseconds,
-	int scan, int startsec, int startns) :
-	config(conf), configindex(cindex), vis_(0), todiskbuffer_(0)
+	int scan, int startsec, int startns, DifxMonitor *monitor) :
+	config(conf), configindex(cindex), vis_(0), todiskbuffer_(0), monitor_(monitor)
 {
 	// todiskbuffer sizing follows fxmanager.cpp:114-133
 	int resultlength = config->getMaxCoreResultLength();
@@ -79,9 +80,73 @@ bool Integrator::addSubint(cf32 *subintresults)
 	if(done)
 	{
 		vis_->writedata();
+		// RUNNING before increment(), which zeroes floatresults
+		// (same order as FxManager::loopwrite: writedata, multicastweights)
+		if(monitor_)
+			sendRunning();
 		vis_->increment();
 	}
 	return done;
+}
+
+// P1: RUNNING status, byte-identical semantics to
+// Visibility::multicastweights (visibility.cpp:1100-1146)
+void Integrator::sendRunning()
+{
+	int numdatastreams = config->getNumDataStreams();
+	float *weight = new float[numdatastreams];
+	int freqindex, weightcount;
+
+	// per-station weights, averaged over recorded bands (only used
+	// frequencies); the acweight section is indexed with the same
+	// resultindex walk as visibility.cpp:445-460
+	for(int i=0;i<numdatastreams;i++)
+	{
+		const int n = config->getDNumTotalBands(configindex, i);
+
+		weight[i] = 0.0;
+		weightcount = 0;
+		if(n > 0)
+		{
+			int resultindex = config->getCoreResultACWeightOffset(configindex, i)*2;
+			for(int j=0;j<n;j++)
+			{
+				freqindex = config->getDTotalFreqIndex(configindex, i, j);
+				if(config->isFrequencyUsed(configindex, freqindex) || config->isEquivalentFrequencyUsed(configindex, freqindex))
+				{
+					// f32 truncation at storage, like upstream
+					// autocorrweights (visibility.cpp:455)
+					float acw = (float)(vis_->floatresults[resultindex]/vis_->fftsperintegration);
+					weight[i] += acw;
+					resultindex++;
+					weightcount++;
+				}
+			}
+			if(weightcount > 0)
+				weight[i] /= weightcount;
+		}
+	}
+
+	// integration centre time, visibility.cpp:1119-1132 (day-of-observation
+	// decomposition; the integer/remainder order matters for f64 precision)
+	int intsec = vis_->experseconds +
+	             (int)config->getModel()->getScanStartSec(vis_->currentscan, vis_->expermjd, vis_->experseconds) +
+	             vis_->currentstartseconds;
+	int dumpmjd = vis_->expermjd + intsec/86400;
+	double dumpseconds = double(intsec%86400) + ((double)vis_->currentstartns)/1000000000.0 +
+	                     config->getIntTime(configindex)/2.0;
+	if(dumpseconds > 86400.0)
+	{
+		dumpmjd++;
+		dumpseconds -= 86400.0;
+	}
+	double mjd = dumpmjd + dumpseconds/86400.0;
+
+	monitor_->status(DIFX_STATE_RUNNING, "", mjd, numdatastreams, weight,
+	                 vis_->expermjd + vis_->experseconds/86400.0,
+	                 vis_->expermjd + (vis_->experseconds + vis_->executeseconds)/86400.0);
+
+	delete [] weight;
 }
 
 void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, cf32 *subintresults)

@@ -325,8 +325,14 @@ meta/
 ├── batches.index                     # D13
 ├── stations.json
 ├── run.log
-└── versions.txt
+├── versions.txt
+└── difxmsg/                          # DifxMessage 落盘日志（container 模式，algo-plan P1）
+    ├── <exp>_<batch>.xml              # fxcorr-x：每条完整 XML（Starting/Running/Ending/Done/Alert）
+    ├── <exp>_<batch>_<station>.xml    # fxcorr-f：同上 + 每 subint 两条 Diagnostic
+    └── <exp>_<batch>_<station>.sta    # fxcorr-f：DifxMessageSTARecord 二进制追加（FXCORR_STA=1）
 ```
+
+difxmsg/ 仅 container 模式（`FXCORR_RUN_MODE=container`）产生：组播受限的容器内降级为落盘，由编排层（scalebox）读取转发；文件内容与 host 模式组播包逐字节一致。每进程一个文件（文件名含 batch_id/station），进程启动时截断重写——重跑 batch 幂等，无并发追加竞态。
 
 **batches.index 示例**：
 ```

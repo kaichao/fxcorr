@@ -69,12 +69,22 @@ fxcorr-f <batch_id> <station> [workdir]
 | `station` | 站名（须在 .input 的 DATA TABLE / datastream 中） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
 
+环境变量（DifxMessage 状态发送，algo-plan P1）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DIFX_MESSAGE_GROUP` / `DIFX_MESSAGE_PORT` | 未设（静默） | host 模式组播目标（setup.bash 默认 224.2.2.1:50201）；未设时不发状态消息 |
+| `FXCORR_STA` | 未设 | `1` 时每 autocorr 批次向 `DIFX_BINARY_GROUP/PORT` 组播 DifxMessageSTARecord |
+| `DIFX_BINARY_GROUP` / `DIFX_BINARY_PORT` | 未设 | STA 二进制组播目标；未设时 STA 静默 |
+| `FXCORR_RUN_MODE` | 未设 | `container` 时状态/STA 降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
+
 输入输出：
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
 - 读 `workdir/<config_file>`（.input）；Model 由 .calc 内建，无 .im 依赖。
 - 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd，即 workdir）。
 - 输出 `workdir/fengine/<batch_id>/<station>/`（自动创建）：`band_XX.sp`、`pcal.bin`（配置了 phasecal 时）、`autocorr.bin`（二进制布局见 data-spec 5.3）。
+- 状态消息节奏（mpiId = dsindex+1，datastream/core 角色）：Starting（启动）→ 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误时 Alert + Aborting。RUNNING 不发（归 fxcorr-x，manager 角色）。
 
 程序内校验：batch 起点须在 subint 边界（1µs 容差，吸收 start_mjd 的 f64 表示误差）——batch.json 的 start_mjd 建议写精确 repr（如 `58948.291666666664`），否则报错退出。
 
@@ -101,11 +111,19 @@ fxcorr-x <batch_id> [workdir]
 | `batch_id` | 批量标识 |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
 
+环境变量（DifxMessage 状态发送，algo-plan P1）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DIFX_MESSAGE_GROUP` / `DIFX_MESSAGE_PORT` | 未设（静默） | host 模式组播目标（setup.bash 默认 224.2.2.1:50201）；未设时不发状态消息 |
+| `FXCORR_RUN_MODE` | 未设 | `container` 时状态降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
+
 输入输出：
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file / difx_dir）。
 - 数据源 `workdir/fengine/<batch_id>/<station>/`（各站 band_XX.sp + autocorr.bin），station 列表 = .input 的全部 datastream（自动枚举，无站参数）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘语义，difx2fits 零改造前提），batch.json 的 difx_dir 仅为元数据；输出目录不存在时自动创建（mkdir -p OUTPUT FILENAME 目录）。
+- 状态消息节奏（mpiId = 0，manager 角色）：Starting（启动）→ 每积分写盘一条 Running（visibilityMJD = 积分中心、各站 band 平均 weight、jobstart/jobstop）→ Ending → Done；错误时 Alert + Aborting。与 mpifxcorr 基准逐字段对拍通过（visibilityMJD/weight 逐位一致）。
 
 程序内校验：单 scan、单相位中心、maxproducts ≤ 2、intTime 为 subintNS 整数倍、batch 起点 subint 边界（1µs 容差，同 fxcorr-f）。
 

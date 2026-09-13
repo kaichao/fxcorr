@@ -56,7 +56,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 | 优先级 | 改进项 | 动机分类 | 一句话说明 |
 |---|---|---|---|
 | P0 | `PCAL_*.pcal` 文件生成 | 功能未迁移 | ✅ 2026-09-13（f 按 intTime 聚合 tone 写实验级文本，追加幂等；单 batch 与 mpifxcorr 基准逐字节对拍通过，多 batch 追加/重跑幂等验证通过） |
-| P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 | f/x 发状态；container 降级为落盘文件由编排层转发 |
+| P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 | ✅ 2026-09-13（fxcorrcommon 增 difxmonitor 封装；f = datastream/core 角色发 Starting/Diagnostic/STA，x = manager 角色发 Starting/Running/Ending/Done；host 组播与 mpifxcorr 基准逐字段对拍通过，container 落盘 meta/difxmsg/ 与组播字节一致、重跑幂等） |
 | P2 | 多 x 子集并行 | 串行环境新变化 | 基线切子集多进程并行，SWIN 合并（data-spec 12 节） |
 | P3 | 多线程（f/x 进程内并行） | 串行环境新变化 | OpenMP 并行 FFT 批 / 基线循环，与 P2 叠加 |
 | P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | x 侧补齐科学功能，按改动量排序 |

@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -10,12 +11,100 @@
 #include <fxcorrcommon/mode.h>
 #include <fxcorrcommon/mpifxcorr.h>	// FLAGS_PER_INT
 #include <fxcorrcommon/architecture.h>
+#include <fxcorrcommon/difxmonitor.h>
 
 #include "datareader.h"
 #include "fenginewriter.h"
 #include "pcaltextwriter.h"
 
 using namespace std;
+
+// experiment name for DifxMessage identification, same as mpifxcorr's
+// generateIdentifier (mpifxcorr.cpp:217-239): .input basename without the
+// ".input" suffix
+static string jobIdentifier(const string &inputfile)
+{
+	size_t slash = inputfile.find_last_of('/');
+	string base = (slash == string::npos) ? inputfile : inputfile.substr(slash+1);
+	size_t dot = base.find(".input");
+	return (dot == string::npos) ? base : base.substr(0, dot);
+}
+
+// unified error exit: report to stderr, then send Alert + Aborting status
+// (algo-plan.md P1, upstream alert.cpp:54 / fxmanager.cpp ABORTING)
+static int fail(DifxMonitor &monitor, const string &msg)
+{
+	cerr << msg << endl;
+	monitor.alert(msg, DIFX_ALERT_LEVEL_ERROR);
+	monitor.status(DIFX_STATE_ABORTING, msg, 0.0, 0, 0, 0.0, 0.0);
+	return EXIT_FAILURE;
+}
+
+// BINARY_STA records, one per recorded band, per autocorrelation batch
+// (algo-plan.md P1; core.cpp averageAndSendAutocorrs 1195-1253, V1
+// single-thread non-averaged branch).  nsoffsetns/nswidthns describe the
+// current ac batch (centre offset and width in ns).
+static void sendSTA(DifxMonitor *monitor, Configuration &config, int configindex, int dsindex,
+                    Mode *mode, int scan, long long scanstartsec, int subintsec, int subintns,
+                    double nsoffsetns, double nswidthns, const string &jobname)
+{
+	int nrecordedbands = config.getDNumRecordedBands(configindex, dsindex);
+	for(int band=0;band<nrecordedbands;band++)
+	{
+		int freqindex = config.getDRecordedFreqIndex(configindex, dsindex, band);
+		int freqchannels = config.getFNumChannels(freqindex);
+		f32 weight = mode->getWeight(false, band);
+
+		// minimum weight gate, core.cpp:1218-1220 (dodgy packet protection)
+		double stasamples = 0.001*nswidthns*2*config.getFreqTableBandwidth(freqindex);
+		if(weight < 0.333*stasamples/(2*freqchannels))
+			continue;
+
+		int nchan = config.getSTADumpChannels();
+		if(freqchannels < nchan)
+			nchan = freqchannels;
+		int chans_to_avg = freqchannels/nchan;
+		f32 renormvalue = 1.0f/(2*freqchannels*weight);
+
+		cf32 *acdata = mode->getAutocorrelation(false, band);
+		int recordsize = sizeof(DifxMessageSTARecord) + sizeof(f32)*nchan;
+		DifxMessageSTARecord *record = (DifxMessageSTARecord *)malloc(recordsize);
+		memset(record, 0, recordsize);
+
+		record->messageType = STA_AUTOCORRELATION;
+		record->dsindex = dsindex;
+		record->coreindex = 0;
+		record->threadindex = 0;
+		snprintf(record->identifier, DIFX_MESSAGE_PARAM_LENGTH, "%s",
+		         jobname.substr(0, DIFX_MESSAGE_PARAM_LENGTH-1).c_str());
+		record->nChan = nchan;
+		record->scan = scan;
+		// core.cpp:1208-1214: sec is day-of-observation seconds (the code,
+		// not the "since scan start" comment, is authoritative)
+		record->sec = (int)scanstartsec + subintsec;
+		record->ns = subintns + (int)nsoffsetns;
+		if(record->ns >= 1000000000)
+		{
+			record->ns -= 1000000000;
+			record->sec++;
+		}
+		record->nswidth = (int)nswidthns;
+		record->bandindex = band;
+		// sum (not average) of chans_to_avg adjacent real parts, core.cpp:1244-1247
+		for(int k=0;k<nchan;k++)
+		{
+			record->data[k] = acdata[2*k*chans_to_avg].re;
+			for(int l=1;l<chans_to_avg;l++)
+				record->data[k] += acdata[2*(k*chans_to_avg+l)].re;
+		}
+		// vectorMulC_f32_I(renormvalue, ...): energy -> power
+		for(int k=0;k<nchan;k++)
+			record->data[k] *= renormvalue;
+
+		monitor->staSend(record, recordsize);
+		free(record);
+	}
+}
 
 // Minimal batch.json field extraction (fixed V1 format, data-spec 5.3 D9).
 static bool extractJsonDouble(const string &json, const string &key, double *value)
@@ -130,6 +219,29 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	// P1: DifxMessage status emission (algo-plan.md).  f plays the
+	// datastream/core role: mpiId = dsindex+1, RUNNING is left to
+	// fxcorr-x (manager role); progress is reported via diagnostics.
+	// container mode logs to meta/difxmsg/<exp>_<batch>_<station>.*
+	string expname = jobIdentifier(inputfile);
+	string containerprefix;
+	if(const char *runmode = getenv("FXCORR_RUN_MODE"))
+	{
+		if(strcmp(runmode, "container") == 0)
+			containerprefix = workdir + "/meta/difxmsg/" + expname + "_" + batchid + "_" + station;
+	}
+	bool dosta = false;
+	if(const char *staenv = getenv("FXCORR_STA"))
+		dosta = (strcmp(staenv, "1") == 0);
+	if(containerprefix.size() > 0)
+	{
+		if(system(("mkdir -p " + workdir + "/meta/difxmsg").c_str()) != 0)
+			cerr << "fxcorr-f: cannot create " << workdir << "/meta/difxmsg" << endl;
+	}
+	DifxMonitor monitor(dsindex+1, expname, inputfile, containerprefix);
+	// AC_INIT version of fxcorr-f
+	monitor.status(DIFX_STATE_STARTING, "Version 0.1.0", 0.0, 0, 0, 0.0, 0.0);
+
 	// batch start expressed as job-relative seconds; the raw file holds this
 	// batch's data starting at that time (data-spec 5.2 file-per-batch), so
 	// DataReader byte offsets are relative to the batch start
@@ -161,10 +273,7 @@ int main(int argc, char **argv)
 	string outdir = workdir + "/fengine/" + batchid + "/" + station;
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
-	{
-		cerr << "fxcorr-f: cannot create " << outdir << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-f: cannot create " + outdir);
 	FEngineWriter writer(outdir, &config, 0, dsindex, nsubints, maxacblocks);
 
 	bool haspcal = (config.getDPhaseCalIntervalHz(0, dsindex) > 0);
@@ -179,10 +288,7 @@ int main(int argc, char **argv)
 	{
 		string pcaldir = config.getOutputFilename();
 		if(system(("mkdir -p " + pcaldir).c_str()) != 0)
-		{
-			cerr << "fxcorr-f: cannot create " << pcaldir << endl;
-			return EXIT_FAILURE;
-		}
+			return fail(monitor, "fxcorr-f: cannot create " + pcaldir);
 		pcaltext = new PcalTextWriter(pcaldir, &config, 0, dsindex);
 	}
 
@@ -198,9 +304,10 @@ int main(int argc, char **argv)
 		long long batchstartns = (long long)floor(batchstartjob*1.0e9 + 0.5);
 		if(batchstartns % subintns > 1000 && (subintns - batchstartns % subintns) > 1000)
 		{
-			cerr << "fxcorr-f: batch start " << startmjd << " is not on a subint boundary ("
-			     << batchstartns % subintns << " ns into a " << subintns << " ns subint)" << endl;
-			return EXIT_FAILURE;
+			ostringstream oss;
+			oss << "fxcorr-f: batch start " << startmjd << " is not on a subint boundary ("
+			    << batchstartns % subintns << " ns into a " << subintns << " ns subint)";
+			return fail(monitor, oss.str());
 		}
 	}
 
@@ -211,8 +318,9 @@ int main(int argc, char **argv)
 	long long subintsperint = (long long)(inttime*1.0e9/(double)subintns + 0.5);
 	if(subintsperint < 1)
 	{
-		cerr << "fxcorr-f: intTime " << inttime << " s is smaller than one subint (" << subintns << " ns)" << endl;
-		return EXIT_FAILURE;
+		ostringstream oss;
+		oss << "fxcorr-f: intTime " << inttime << " s is smaller than one subint (" << subintns << " ns)";
+		return fail(monitor, oss.str());
 	}
 	long long batchstartabsns = (long long)batchstartsec*1000000000LL + (long long)batchstartns;
 
@@ -222,8 +330,9 @@ int main(int argc, char **argv)
 		double reld = subintstart - (double)scanstartsec;
 		if(reld < 0.0)
 		{
-			cerr << "fxcorr-f: subint " << s << " starts before the scan start" << endl;
-			return EXIT_FAILURE;
+			ostringstream oss;
+			oss << "fxcorr-f: subint " << s << " starts before the scan start";
+			return fail(monitor, oss.str());
 		}
 		int offsetsec = (int)floor(reld);
 		int offsetns = (int)((reld - (double)offsetsec)*1.0e9 + 0.5);
@@ -231,6 +340,10 @@ int main(int argc, char **argv)
 		// station-based processing of one subint (core.cpp:694-801, V1 single-threaded)
 		int datasec = 0, datans = 0;
 		int bytes = reader.readSubint(scan, offsetsec, offsetns, databuf, sendbytes, &datasec, &datans);
+
+		// P1: input datarate diagnostics, upstream datastream.cpp:631-634
+		monitor.diagnosticDataConsumed(bytes);
+		monitor.diagnosticInputDatarate((double)bytes / ((double)subintns/1.0e9));
 
 		mode->zeroAutocorrelations();
 		reader.fillValidFlags(validflags, bytes);
@@ -244,7 +357,7 @@ int main(int argc, char **argv)
 
 		// same loop structure as core.cpp:786-801: buffered slot reuse over fftloops
 		int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
-		int acblockcount = 0;
+		int acblockcount = 0, acshiftcount = 0;
 		for(int fftloop=0;fftloop<fftloops;fftloop++)
 		{
 			int numffts = blockspersend - fftloop*numbufferedffts;
@@ -266,15 +379,22 @@ int main(int argc, char **argv)
 			{
 				if(haspcal)
 					pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
+				if(dosta)
+					sendSTA(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
+					        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns, maxacblocks*blockns, config.getJobName());
 				writer.writeAutocorrelationBatch(mode);
 				mode->zeroAutocorrelations();
 				acblockcount = 0;
+				acshiftcount++;
 			}
 		}
 		if(acblockcount != 0)
 		{
 			if(haspcal)
 				pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
+			if(dosta)
+				sendSTA(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
+				        (acshiftcount*maxacblocks + acblockcount/2.0)*blockns, acblockcount*blockns, config.getJobName());
 			writer.writeAutocorrelationBatch(mode);
 			mode->zeroAutocorrelations();
 		}
@@ -296,16 +416,17 @@ int main(int argc, char **argv)
 	if(haspcal)
 	{
 		if(pcaltext->hasUnflushed())
-		{
-			cerr << "fxcorr-f: batch " << batchid << " ends with unflushed pcal tones (batch length is not an intTime multiple)" << endl;
-			return EXIT_FAILURE;
-		}
+			return fail(monitor, "fxcorr-f: batch " + batchid + " ends with unflushed pcal tones (batch length is not an intTime multiple)");
 		delete pcaltext;
 	}
 
 	delete [] databuf;
 	delete [] validflags;
 	delete mode;
+
+	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
+	monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);
+	monitor.status(DIFX_STATE_DONE, "", 0.0, 0, 0, 0.0, 0.0);
 
 	return EXIT_SUCCESS;
 }

@@ -128,9 +128,28 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 
 ## P1：difxmessage 状态/STA 消息
 
+### difxmessage 是什么
+
+DiFX 自带的**状态广播库**（`libraries/difxmessage`）：进程把状态/告警/进度以 XML 消息组播到网络（默认 `224.2.2.1:50201`，UDP 尽力而为），观测室的 difxwatch/errormon 等监控工具监听显示。它**不承载科学数据**、不是进程间数据通道（fxcorr 的 f→x 数据走目录接口）、也不是日志系统（run.log/batches.index 才是）。
+
+**消息类型**：
+- **Status**（状态机）：Starting → Running → Ending → Done；错误时 Aborting。
+- **Alert**（告警）：FATAL/SEVERE/ERROR/WARNING/INFO 分级，带错误文本。
+- **Diagnostic**（诊断）：数据消费字节数、输入速率、缓冲状态。
+- **STA**（二进制）：station-based 自相关功率谱（独立组播通道），属内容监控而非进度。
+
+**进度粒度**（三层）：
+- Running：**每积分一条**（intTime 级，典型 1-4 秒）——"当前相关到第几秒"，附积分中心 MJD 与各站权重。
+- Diagnostic：f 每 subint 两条（典型 0.1-0.5 秒）——吞吐速率与累计字节。
+- STA：每 autocorr 批次一条谱图（10ms 级）——内容，不是进度。
+
+比 batch 级细（batch 内可见推进）、比 FFT 块级粗。
+
+**用途边界（为什么 P1 设计成默认全静默）**：difxmessage 是纯对外的监控接口，**唯一价值前提是有外部消费者**——UDP 组播没人收即消失。串行相关器自身不需要它。不设 `DIFX_MESSAGE_GROUP/PORT` 环境变量时零开销零输出（与上游 inUse 语义一致），纯批处理场景完全无感。与 scalebox 编排的关系：task 级状态（排队/运行/完成/失败）与 Status 状态机**重叠**（Starting/Done/Aborting 对编排层冗余）；**不重叠**的只有三点——task 内部秒级推进（区分"正常长跑"与"卡死/IO 挂起"，scalebox 只能靠超时兜底）、数据速率异常（吞吐掉零但进程没死）、失败原因文本（Alert 比 exit code + 翻 stderr 结构化）。是否需要开启取决于编排策略：超时 + exit code + batch.json status 够用则永远不开启；需要卡死检测时开环境变量即可。
+
 ### 动机分类
 
-功能未迁移 + 环境变化。上游 mpifxcorr 经 `libraries/difxmessage`（上游自带独立库）组播广播状态（fxmanager sendMonitorData），观测室监控工具依赖它。V1 只有 batch.json 的 status 落盘。且容器内组播受限（需 host 网络），编排层（scalebox）也需要状态信号。
+功能未迁移 + 环境变化。上游 mpifxcorr 经 `libraries/difxmessage`（上游自带独立库，install-difx 已注册，L106/215/249/477-478，无需新注册）组播广播状态，观测室监控工具（difxwatch/errormon）依赖它。V1 只有 batch.json 的 status 落盘。且容器内组播受限（需 host 网络），编排层（scalebox）也需要状态信号。
 
 ### 要解决的问题
 
@@ -138,14 +157,99 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 
 ### 预期效果
 
-f/x 按上游 DifxMessage 格式发送状态（启动/进度/完成/异常），现有 difx 监控工具零改造可接；容器模式降级为落盘 difxmessage 格式文件，由编排层转发，两种模式共用同一套消息结构。
+f/x 按上游 DifxMessage 格式发送状态（启动/进度/完成/异常），现有 difx 监控工具零改造可接；容器模式降级为落盘 difxmessage 格式文件，由编排层转发，两种模式共用同一套消息结构（字节级一致，可互相对拍）。
 
 ### 设计
 
-- f/x（或 fxcorrcommon）链接 `libraries/difxmessage`（已有独立 autotools 包，需查 install-difx 是否已注册；未注册则按新组件流程补 4 处注册）。
-- 发送点：进程 START/STOP、每 batch/每 subint 进度、ERROR（对齐上游 fxmanager 的消息节奏）。
-- 发送方式环境开关（与 FXCORR_RUN_MODE 同款模式）：host = 组播直发（同上游）；container = 写 `meta/<exp>.difxmsg` 追加文件，编排层读文件转发。
-- STA（station-based 状态）按 difxmessage.h 定义的消息类型与字段组装；具体消息类型/字段清单实施时对照 difxmessage.h 与 fxmanager.cpp:887 sendMonitorData 定稿。
+**落点：fxcorrcommon 新增 `difxmonitor.{h,cpp}` 封装**（fxcorrcommon 已 PKG_CHECK difxmessage，f/x 经它传递链接，无需新增依赖；difxmonitor.h 进安装头清单、`src/Makefile.am` 的 libfxcorrcommon_la_SOURCES 加 difxmonitor.cpp）。封装自生成 XML（与 difxsend.c 格式逐字节一致）、统一分发：host = 组播（`MulticastSend`，difxmessage 公开函数），container = 落盘追加文件。f/x 的 main.cpp 调用，不直接碰 difxmessage。
+
+**角色映射**（无 MPI 后进程角色重新分配，对齐上游语义）：
+- **x = manager 角色**（mpiId=0）：发 RUNNING（上游在 manager 进程发，visibility.cpp:1140 multicastweights）。
+- **f = datastream+core 融合角色**（mpiId=dsindex+1）：发 DIAGNOSTIC（上游 datastream.cpp:631-634）与 STA 二进制（上游 core.cpp:1198）。**f 不发 RUNNING**——RUNNING 是 visibility 进度语义，f 先跑完 x 再跑，f 发 RUNNING 会让进度在 f→x 交接时回退；f 的进度由 DIAGNOSTIC 表达（与上游分工完全一致）。
+- **identifier**：.input 文件 basename（去掉路径与 `.input` 后缀，同上游 generateIdentifier mpifxcorr.cpp:217-239）；f/x 同 identifier，监控器按它聚合同一 job。`difxMessageSetInputFilename` 同上游设置（alert/status body 带 `<input>` 标签）。
+
+**消息清单与发送节奏**（逐点对照上游）：
+
+| 消息 | 上游位置 | fxcorr 落点 | 节奏 |
+|---|---|---|---|
+| STARTING（difxMessageSendDifxStatus） | fxmanager ctor fxmanager.cpp:73 | f/x main（.input 解析、校验通过后） | 每进程 1 次 |
+| RUNNING（difxMessageSendDifxStatus3，附 mjd/weight/jobstart/jobstop） | visibility.cpp:1140 | x：integrator.addSubint 返回 true（一次积分写盘）时 | 每积分 |
+| DIAGNOSTIC（BufferStatus/InputDatarate/DataConsumed） | datastream.cpp:631-634 | f：每 subint readSubint 之后 | 每 subint |
+| STA 二进制（DifxMessageSTARecord） | core.cpp:1198（averageAndSendAutocorrs 内） | f：每 autocorr 批次、writeAutocorrelationBatch 之前（可选，FXCORR_STA=1） | 每批次 |
+| Alert | alert.cpp:54 | f/x：错误 exit 路径（统一 helper：cerr + Alert + ABORTING） | 错误时 |
+| ENDING → DONE / ABORTING | fxmanager.cpp:268-290 | f/x 正常结束（先 ENDING 后 DONE，上游 terminate() 节奏）/ 错误退出（ABORTING） | 每进程 1 次 |
+
+**发送方式开关**：
+- host（默认，FXCORR_RUN_MODE 未设或 ≠container）：组播。group/port 取 `DIFX_MESSAGE_GROUP`/`DIFX_MESSAGE_PORT` 环境变量（setup.bash 默认 224.2.2.1:50201）；port 未设（= -1）时静默不发送——与 difxmessage 库 `difxMessageSend2` 的 inUse 语义一致（difxsend.c:88-98，零风险默认关闭）。
+- container（FXCORR_RUN_MODE=container）：落盘 `meta/difxmsg/`。每进程一个文件（避免多进程并发追加竞态，NFS 上 O_APPEND 单 write 也不保证原子）：f → `meta/difxmsg/<exp>_<batch>_<station>.xml`、x → `meta/difxmsg/<exp>_<batch>.xml`；每条消息 = 完整独立 XML（`<?xml?><difxMessage>…</difxMessage>`），与组播字节一致（同一生成路径）；文件 O_TRUNC 打开（重跑 batch 幂等，覆盖自己的旧文件）。编排层轮询该目录转发。
+- **STA 开关**：上游由 difxmessage 命令线程动态设 `dumpsta=true`（默认 false）+ `stachannels`（默认 32）。fxcorr 批处理进程无命令线程 → 环境变量 `FXCORR_STA=1` 开启（V1 不做 LTA/kurtosis）；STA 走独立二进制通道 `DIFX_BINARY_GROUP`/`DIFX_BINARY_PORT`（同上游 difxsta.c），container 模式落盘 `meta/difxmsg/<exp>_<batch>_<station>.sta`（DifxMessageSTARecord 原始结构追加）。
+
+**difxmonitor 接口**（fxcorrcommon，C++ 封装）：
+```cpp
+class DifxMonitor {
+    DifxMonitor(int mpiId, const string &identifier, const string &inputFilename, const string &containerPrefix);
+    void status(enum DifxState, const string &msg, double visMJD, int nDS, const float *weight,
+                double mjdStart, double mjdStop);   // 状态（含 STARTING/RUNNING/DONE/ABORTING）
+    void alert(const string &msg, int severity);    // DIFX_ALERT_LEVEL_*
+    void diagnostic(DifxDiagnosticType, long long bytes, double rateMbps);  // 数据消费/速率/缓冲
+    void staSend(const DifxMessageSTARecord *record, int nbytes);           // BINARY_STA
+};
+```
+containerPrefix 如 `meta/difxmsg/test_60512_45000_T1`（.xml/.sta 由封装按消息类型补后缀）；host 模式忽略。XML 生成照抄 difxsend.c（difxmessageinit.c:138-152 的 XML 模板 + difxsend.c:940-1148 的 body 格式），seqNumber 每进程从 0 自增（同库语义）。
+
+**STA 记录组装（f 侧）**：DifxMessageSTARecord 全字段对照 core.cpp:1195-1253（注意：该块在 `averageAndSendAutocorrs` 函数内，**每 autocorr 批次发送一次**，数据窗口 = 本批次，不是整个 subint）：
+- messageType=STA_AUTOCORRELATION、dsindex、coreindex=0、threadindex=0、identifier=getJobName 截断 31 字节、nChan=getSTADumpChannels()（freqchannels < nChan 时收缩）。
+- 时间戳：scan=0；sec = scan 起点当日秒 + subint 偏移秒（代码照 core.cpp:1208-1214：`getScanStartSec(...) + offsets[1]`，当日秒系，注释与代码不一致以代码为准）；ns = offsets[2] + nsoffset（nsoffset = 批次中心偏移 = (acshiftcount×maxacblocks + 批次块数/2)×blockns，≥1e9 进位）；nswidth = 批次宽度（满批次 maxacblocks×blockns，尾批 acblockcount×blockns）。
+- data = 实功率谱前 nChan 通道：每通道 = chans_to_avg 个相邻实部之和（非平均）× renorm，renorm = 1/(2×freqchannels×getWeight)（datastreamsaveraged 时再 /getFChannelsToAverage）；f 侧无 averageFrequency（V1 不降频），恒走非 averaged 分支。
+- **最低权重门槛**（core.cpp:1218-1220）：weight < 0.333×stasamples/(2×freqchannels)（stasamples = 0.001×nswidth×2×bandwidth）时该 band 不发送（dodgy packet 保护）。
+- 每 datastream 每 band 一条记录；单站 f 进程即每 band 一条。f 侧取数时点在 writeAutocorrelationBatch（内部 averageFrequency）**之前**、本批次 zeroAutocorrelations 之前。
+
+### 算法详解
+
+#### 上游数据链路全景（mpifxcorr 如何发消息）
+
+1. **初始化**（mpifxcorr.cpp:296-298）：identifier = .input basename（generateIdentifier 去路径、去 `.input` 后缀）→ `difxMessageInit(mpiId, identifier)` → `difxMessageSetInputFilename(argv[1])`。difxMessageInit 读 `DIFX_MESSAGE_GROUP`/`DIFX_MESSAGE_PORT`（difxmessageinit.c:97-136），任一缺失即 inUse=0 静默不发送。
+2. **STARTING**：fxmanager 构造时发（fxmanager.cpp:73）。
+3. **RUNNING**：manager 写线程每写一个 dump（= intTime）前，`Visibility::multicastweights`（visibility.cpp:1100-1146）计算各站 band 平均权重（`weight[i] = Σ autocorrweights[i][0][j] / weightcount`，仅 used frequencies），发 `difxMessageSendDifxStatus3(RUNNING, "", 积分中心mjd, numdatastreams, weight, jobstartMJD, jobstopMJD)`。
+4. **DIAGNOSTIC**：datastream 进程每批数据读入时发 BufferStatus/InputDatarate/DataConsumed（datastream.cpp:631-634）。
+5. **STA**：core 进程每 subint（processdata 内，averageFrequency 前），dumpsta 开关开时按上节字段组装 DifxMessageSTARecord，`difxMessageSendBinary(..., BINARY_STA, bytecount)` 组播到 DIFX_BINARY_GROUP/PORT（difxsta.c，port 未设静默 -1）。
+6. **Alert**：错误时 difxMessageSendDifxAlert(msg, level)（alert.cpp:54）。
+7. **收尾**：正常 DONE、SIGINT TERMINATING→TERMINATED、错误 ABORTING（fxmanager.cpp:268-290）。
+
+#### f/x 实现对应表
+
+| 上游环节 | 上游位置 | fxcorr 落点 |
+|---|---|---|
+| init（identifier/mpiId/inputFilename） | mpifxcorr.cpp:296-298 | DifxMonitor 构造（f/x main） |
+| STARTING | fxmanager.cpp:73 | main 校验通过后 |
+| RUNNING + weight 计算 | visibility.cpp:1100-1146 | x：Integrator 内 writedata 后、increment 前（Integrator 构造收 DifxMonitor*）；weight 照抄 1116-1146：autocorrweights[i][0][j] = `vis_->floatresults`（public 字段）`[getCoreResultACWeightOffset(configindex,ds)*2+j] / fftsperintegration`，used band 平均 |
+| DIAGNOSTIC | datastream.cpp:631-634 | f main：readSubint 返回字节数后 |
+| STA 组装 + 发送 | core.cpp:1195-1253 | f main：writeAutocorrelationBatch 后（FXCORR_STA=1 时） |
+| Alert | alert.cpp:54 | f/x 错误 exit 统一 helper |
+| DONE/ABORTING | fxmanager.cpp:268-290 | f/x main 尾部/错误路径 |
+
+#### 关键点（易错，实施必读）
+
+1. **XML 逐字节一致**：difxmessage 的 XML 模板（difxmessageinit.c:138-152）与 body 格式（difxsend.c:940-1148）直接照抄：header 的 `<from>` = 本机 hostname、`<mpiProcessId>`、`<identifier>`、`<type>Status/Alert/...`；Status body = `<difxStatus><input>…</input><state>Running</state><message>…</message><visibilityMJD>%9.7f</visibilityMJD><jobstartMJD>…<jobstopMJD>…<weight ant="%d" wt="%5.3f"/>…</difxStatus>`；expandEntityReferences 转义 `<>&`。container 落盘文件与组播包字节一致，对拍可 diff。
+2. **weight 公式定稿**：上游 RUNNING 的 weight[i] = 各 used band 的 autocorrweight 平均，其中 `autocorrweights[i][j][k] = floatresults[getCoreResultACWeightOffset(configindex,i)*2+k]/fftsperintegration`（visibility.cpp:455），`fftsperintegration = meansubintsperintegration × getBlocksPerSend`（visibility.cpp:1316）。x 侧同式：`vis_->floatresults`（public 字段）的 acweight 段 ÷ (subintsperint×blockspersend)，f32 除法顺序一致即逐位一致。**时序**：Integrator::addSubint 里 writedata 后、increment 前发送（increment 清零 floatresults，之后取数为 0；上游同序——fxmanager loopwrite 也是 writedata() 后 multicastweights()）。numdatastreams > 20 截断、weight < 0 不发该条（difxsend.c:957-970 同款）。
+3. **RUNNING 时间戳**：visibilityMJD = 积分中心（intTime 起点 + intTime/2，同 P0 的 dumpmjd 分解式计算）；jobstart/jobstop MJD = 实验 START MJD/SECONDS 与 + executeseconds（x 侧 executeseconds 已按 batch 偏移修正，用 batch 的起止时刻）。
+4. **f 不发 RUNNING**：f 的 subint 进度用 DIAGNOSTIC（DataConsumed/InputDatarate），避免 f→x 交接时监控器进度回退。
+5. **STA 的 renorm 与门槛**：renorm = 1/(2×freqchannels×getWeight)（f 侧无 averageFrequency 恒走此分支）；weight < 0.333×stasamples/(2×freqchannels) 的 band 跳过；data 是实部之和（非平均）——照抄 core.cpp:1244-1249，勿"顺手"改成平均。
+6. **STA 时间戳是当日秒系**（core.cpp:1209 `getScanStartSec(...) + offsets[1]`），非注释所说的 scan 相对——以代码为准。
+7. **默认零行为**：host 模式未设 DIFX_MESSAGE_GROUP/PORT 时全部静默（port=-1 不发），与上游一致；container 模式仅 FXCORR_RUN_MODE=container 时落盘。两种模式互斥、默认全关，对现有对拍零影响。
+8. **容器落盘幂等**：O_TRUNC 覆盖本进程自己的文件（文件名含 batch_id + station），重跑 batch 无重复行；跨 batch 的 f 任务文件名不同（batch_id 不同），天然追加语义交给编排层按 batch 聚合。
+
+### 验证方法与结果（2026-09-13 实施完成）
+
+- **默认零行为回归**：不设任何状态环境变量时 f/x 跑批完全静默（组播 port 未设即不发，同上游 inUse 语义），SWIN 与 mpifxcorr 基准 cmp_swin.py 对拍 6/6 全等（P1 对科学输出零影响）。
+- **节奏与字段对拍（host 组播，测试机 cmp5）**：`run_bench.sh` 跑 mpifxcorr 基准与 fxcorr host 模式各抓一组消息（python 组播接收器），对比：
+  - 消息序列：mpifxcorr Starting → Running×2 → Ending → Done；fxcorr-x 完全一致（Starting → Running×2 → Ending → Done）；fxcorr-f（每站）Starting → Diagnostic×2×subints → Ending → Done。
+  - RUNNING 字段逐位一致：visibilityMJD = 58948.2916727/58948.2916849、weight ant0/1 = 0.989/0.989、1.000/1.000、jobstartMJD = 58948.2916667。jobstopMJD 不同（fxcorr 58948.2917014 vs 基准 58948.2916898）——fxcorr 的 executeseconds 按 batch 偏移修正（+1s 语义，见本目录关键实现要点），jobstop 随之平移，预期差异非缺陷。
+- **STA**（FXCORR_STA=1，单 band test 配置）：4 subints 共 207 条记录（每 autocorr 批次一条，与上游 averageAndSendAutocorrs 节奏一致）；头字段自检通过——batch 起点 sec/ns 正确、尾批 nswidth 2048000ns 正确、sec 进位正确、nChan=32、identifier=jobname、renorm 后功率 ~8053 量级合理。
+- **container 模式**：FXCORR_RUN_MODE=container 跑批，`meta/difxmsg/test_58948_25200.xml` 4 条、T1/T2 各 10 条（含 8 条 Diagnostic）、`.sta` 41400 字节（207×200B）；落盘 XML 与组播抓包逐字节一致；**重跑幂等**（构造时截断，两次重跑仍 4 条——初版用 fopen "a" 追加导致重跑翻倍，已修为构造时 O_TRUNC）。
+- **错误路径**：删站触发 cannot read → 组播抓到 Alert（severity=2 ERROR）+ Aborting 状态 ✓。
+- **文档同步**（已做）：data-spec.md 5.6 meta/ 布局加 `meta/difxmsg/`；usage.md 三工具环境变量表加 FXCORR_STA / DIFX_MESSAGE_GROUP/PORT / FXCORR_RUN_MODE；f/x 的 CLAUDE.md 调用方式章节同步；v2-plan.md 第 5 节 P1 行更新为 ✅。
+- 未做项（已确认可接受）：difxwatch 监控工具实接（utils 未注册 install-difx，需手工构建——组播抓包已直接验证 XML 格式）；mpifxcorr 基准 STA 对拍（上游 dumpsta 需经 difxmessage 命令线程动态开启，批处理场景不便——以字段自检 + 数值量级为准）。
 
 ---
 

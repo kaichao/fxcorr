@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -10,12 +11,34 @@
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/model.h>
 #include <fxcorrcommon/architecture.h>
+#include <fxcorrcommon/difxmonitor.h>
 
 #include "spreader.h"
 #include "xmac.h"
 #include "integrate.h"
 
 using namespace std;
+
+// experiment name for DifxMessage identification, same as mpifxcorr's
+// generateIdentifier (mpifxcorr.cpp:217-239): .input basename without the
+// ".input" suffix
+static string jobIdentifier(const string &inputfile)
+{
+	size_t slash = inputfile.find_last_of('/');
+	string base = (slash == string::npos) ? inputfile : inputfile.substr(slash+1);
+	size_t dot = base.find(".input");
+	return (dot == string::npos) ? base : base.substr(0, dot);
+}
+
+// unified error exit: report to stderr, then send Alert + Aborting status
+// (algo-plan.md P1, upstream alert.cpp:54 / fxmanager.cpp ABORTING)
+static int fail(DifxMonitor &monitor, const string &msg)
+{
+	cerr << msg << endl;
+	monitor.alert(msg, DIFX_ALERT_LEVEL_ERROR);
+	monitor.status(DIFX_STATE_ABORTING, msg, 0.0, 0, 0, 0.0, 0.0);
+	return EXIT_FAILURE;
+}
 
 // Minimal batch.json field extraction (fixed V1 format, data-spec 5.3 D9).
 static bool extractJsonDouble(const string &json, const string &key, double *value)
@@ -101,39 +124,45 @@ int main(int argc, char **argv)
 	Configuration config((workdir + "/" + inputfile).c_str(), 0);
 	Model *model = config.getModel();
 
+	// P1: DifxMessage status emission (algo-plan.md).  x plays the manager
+	// role: mpiId = 0, RUNNING per written integration (via Integrator).
+	// container mode logs to meta/difxmsg/<exp>_<batch>.xml
+	string expname = jobIdentifier(inputfile);
+	string containerprefix;
+	if(const char *runmode = getenv("FXCORR_RUN_MODE"))
+	{
+		if(strcmp(runmode, "container") == 0)
+			containerprefix = workdir + "/meta/difxmsg/" + expname + "_" + batchid;
+	}
+	if(containerprefix.size() > 0)
+	{
+		if(system(("mkdir -p " + workdir + "/meta/difxmsg").c_str()) != 0)
+			cerr << "fxcorr-x: cannot create " << workdir << "/meta/difxmsg" << endl;
+	}
+	DifxMonitor monitor(0, expname, inputfile, containerprefix);
+
 	// V1 restrictions (impl-plan 1 / data-spec 12)
 	if(model->getNumScans() != 1)
 	{
-		cerr << "fxcorr-x: V1 supports single-scan experiments only (got " << model->getNumScans() << " scans)" << endl;
-		return EXIT_FAILURE;
+		ostringstream oss;
+		oss << "fxcorr-x: V1 supports single-scan experiments only (got " << model->getNumScans() << " scans)";
+		return fail(monitor, oss.str());
 	}
 	int scan = 0;
 	int configindex = config.getScanConfigIndex(scan);
 	if(configindex < 0)
-	{
-		cerr << "fxcorr-x: no configuration for scan 0" << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-x: no configuration for scan 0");
 	if(config.pulsarBinOn(configindex))
-	{
-		cerr << "fxcorr-x: pulsar binning is not supported in V1" << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-x: pulsar binning is not supported in V1");
 	if(config.phasedArrayOn(configindex))
-	{
-		cerr << "fxcorr-x: phased arrays are not supported in V1" << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-x: phased arrays are not supported in V1");
 	if(config.getMaxProducts() > 2)
-	{
-		cerr << "fxcorr-x: cross-polar autocorrelations (maxproducts > 2) are not supported in V1" << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-x: cross-polar autocorrelations (maxproducts > 2) are not supported in V1");
 	if(model->getNumPhaseCentres(scan) > 1)
-	{
-		cerr << "fxcorr-x: multi phase centre uvshifting is not supported in V1" << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-x: multi phase centre uvshifting is not supported in V1");
+
+	// AC_INIT version of fxcorr-x
+	monitor.status(DIFX_STATE_STARTING, "Version 0.1.0", 0.0, 0, 0, 0.0, 0.0);
 
 	int subintns = config.getSubintNS(configindex);
 	int blockspersend = config.getBlocksPerSend(configindex);
@@ -145,8 +174,9 @@ int main(int argc, char **argv)
 		long long inttimens = (long long)(config.getIntTime(configindex)*1.0e9);
 		if(inttimens % (long long)subintns != 0)
 		{
-			cerr << "fxcorr-x: intTime " << config.getIntTime(configindex) << " s is not an integer multiple of subintNS " << subintns << " ns (required in V1)" << endl;
-			return EXIT_FAILURE;
+			ostringstream oss;
+			oss << "fxcorr-x: intTime " << config.getIntTime(configindex) << " s is not an integer multiple of subintNS " << subintns << " ns (required in V1)";
+			return fail(monitor, oss.str());
 		}
 	}
 
@@ -170,10 +200,7 @@ int main(int argc, char **argv)
 			snprintf(filename, sizeof(filename), "band_%02d.sp", band);
 			readers[ds][band] = new SpReader(sdir + "/" + filename);
 			if(!readers[ds][band]->ok())
-			{
-				cerr << "fxcorr-x: cannot read " << sdir << "/" << filename << endl;
-				return EXIT_FAILURE;
-			}
+				return fail(monitor, "fxcorr-x: cannot read " + sdir + "/" + filename);
 			int freqindex = config.getDRecordedFreqIndex(configindex, ds, band);
 			if(readers[ds][band]->numChannels() != config.getFNumChannels(freqindex) ||
 			   readers[ds][band]->blocksPerSend() != (u32)blockspersend ||
@@ -181,8 +208,9 @@ int main(int argc, char **argv)
 			   readers[ds][band]->subintNS() != (u32)subintns ||
 			   readers[ds][band]->numSubints() < (u32)nsubints)
 			{
-				cerr << "fxcorr-x: " << sdir << "/" << filename << " header does not match the config (nchan " << readers[ds][band]->numChannels() << " vs " << config.getFNumChannels(freqindex) << ", bps " << readers[ds][band]->blocksPerSend() << " vs " << blockspersend << ", nsub " << readers[ds][band]->numSubints() << " vs " << nsubints << ")" << endl;
-				return EXIT_FAILURE;
+				ostringstream oss;
+				oss << "fxcorr-x: " << sdir << "/" << filename << " header does not match the config (nchan " << readers[ds][band]->numChannels() << " vs " << config.getFNumChannels(freqindex) << ", bps " << readers[ds][band]->blocksPerSend() << " vs " << blockspersend << ", nsub " << readers[ds][band]->numSubints() << " vs " << nsubints << ")";
+				return fail(monitor, oss.str());
 			}
 		}
 		autocorrFiles[ds] = sdir + "/autocorr.bin";
@@ -201,19 +229,17 @@ int main(int argc, char **argv)
 		long long batchstartns = (long long)floor(batchstartjob*1.0e9 + 0.5);
 		if(batchstartns % subintns > 1000 && (subintns - batchstartns % subintns) > 1000)
 		{
-			cerr << "fxcorr-x: batch start " << startmjd << " is not on a subint boundary ("
-			     << batchstartns % subintns << " ns into a " << subintns << " ns subint)" << endl;
-			return EXIT_FAILURE;
+			ostringstream oss;
+			oss << "fxcorr-x: batch start " << startmjd << " is not on a subint boundary ("
+			    << batchstartns % subintns << " ns into a " << subintns << " ns subint)";
+			return fail(monitor, oss.str());
 		}
 	}
 
 	// Visibility start time: batch start relative to the scan start
 	double reld = batchstartjob - (double)scanstartsec;
 	if(reld < 0.0)
-	{
-		cerr << "fxcorr-x: batch starts before the scan start" << endl;
-		return EXIT_FAILURE;
-	}
+		return fail(monitor, "fxcorr-x: batch starts before the scan start");
 	int initsec = (int)floor(reld);
 	int initns = (int)((reld - (double)initsec)*1.0e9 + 0.5);
 	if(initns >= 1000000000)
@@ -228,7 +254,7 @@ int main(int argc, char **argv)
 	// scan must shift the limit by that offset (+1 so the last integration
 	// always clears it)
 	int executeseconds = (int)((double)nsubints*(double)subintns/1.0e9 + 0.5) + initsec + 1;
-	Integrator integrator(&config, configindex, workdir + "/" + difxdir, executeseconds, scan, initsec, initns);
+	Integrator integrator(&config, configindex, workdir + "/" + difxdir, executeseconds, scan, initsec, initns, &monitor);
 
 	int coreresultlength = config.getCoreResultLength(configindex);
 	cf32 *subintresults = vectorAlloc_cf32(coreresultlength);
@@ -261,13 +287,15 @@ int main(int argc, char **argv)
 				int rsec, rns, rscan;
 				if(!readers[ds][band]->readSubint(s, rscan, rsec, rns))
 				{
-					cerr << "fxcorr-x: failed to read subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band << endl;
-					return EXIT_FAILURE;
+					ostringstream oss;
+					oss << "fxcorr-x: failed to read subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band;
+					return fail(monitor, oss.str());
 				}
 				if(rscan != scan || rsec != expectedsec || rns != expectedns)
 				{
-					cerr << "fxcorr-x: subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band << " has time " << rscan << "/" << rsec << "/" << rns << ", expected " << scan << "/" << expectedsec << "/" << expectedns << endl;
-					return EXIT_FAILURE;
+					ostringstream oss;
+					oss << "fxcorr-x: subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band << " has time " << rscan << "/" << rsec << "/" << rns << ", expected " << scan << "/" << expectedsec << "/" << expectedns;
+					return fail(monitor, oss.str());
 				}
 			}
 		}
@@ -317,6 +345,10 @@ int main(int argc, char **argv)
 		for(size_t band=0;band<readers[ds].size();band++)
 			delete readers[ds][band];
 	vectorFree(subintresults);
+
+	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
+	monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);
+	monitor.status(DIFX_STATE_DONE, "", 0.0, 0, 0, 0.0, 0.0);
 
 	return EXIT_SUCCESS;
 }

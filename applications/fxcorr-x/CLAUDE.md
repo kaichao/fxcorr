@@ -12,6 +12,7 @@ fxcorr-x <batch_id> [workdir]
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。
 - 数据源 `workdir/fengine/<batch_id>/<station>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘沿用 config 语义，difx2fits 零改造），batch.json 的 difx_dir 仅为元数据。
+- **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = 0（manager 角色），identifier = .input basename。节奏：Starting → 每积分写盘一条 Running（Integrator::sendRunning，writedata 后、increment 前——increment 清零 floatresults，时序同上游 fxmanager loopwrite；weight 照抄 visibility.cpp:1100-1146，f32 截断点一致，对拍逐位一致）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>.xml`（构造时截断，重跑幂等）。
 
 ## 文件与 mpifxcorr 对照
 

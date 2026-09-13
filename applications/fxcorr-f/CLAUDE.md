@@ -13,6 +13,7 @@ fxcorr-f <batch_id> <station> [workdir]
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），Model 由 .calc 内建（无 .im 依赖）。
 - 输出目录 `workdir/fengine/<batch_id>/<station>/`（自动创建）。
 - 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd）。
+- **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = dsindex+1（datastream/core 角色），identifier = .input basename。节奏：Starting → 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。RUNNING 不发（归 fxcorr-x）。`FXCORR_STA=1` 时每 autocorr 批次（writeAutocorrelationBatch 前、本批次 zeroAutocorrelations 前）发 DifxMessageSTARecord 到 `DIFX_BINARY_GROUP/PORT`（组装照 core.cpp averageAndSendAutocorrs 1195-1253：data = 实部之和×renorm、最低权重门槛 0.333、时间戳当日秒系）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>_<station>.xml/.sta`（构造时截断，重跑幂等）。
 
 ## 文件与 mpifxcorr 对照
 
