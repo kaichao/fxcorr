@@ -8,6 +8,7 @@ baseline-based 相关器后端（X-Engine）：无 MPI 串行程序，读 fxcorr
 fxcorr-x <batch_id> [workdir]
 ```
 
+- `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。
 - 数据源 `workdir/fengine/<batch_id>/<station>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘沿用 config 语义，difx2fits 零改造），batch.json 的 difx_dir 仅为元数据。

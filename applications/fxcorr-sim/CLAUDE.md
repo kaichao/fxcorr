@@ -10,8 +10,8 @@ fxcorr-sim <batch_id> <station> [workdir] [tone_mhz ...]
 
 - 读 `workdir/batches/<batch_id>.json`（make_testdata.sh 预写），取 start_mjd / n_subints / config_file。
 - tone 参数（基带频率 MHz）：0 个 = 无 tone；1 个 = 所有 band 同频率；nbands 个 = 逐 band。
-- 环境变量：`FXSIM_NOISE`（噪声 σ，默认 0.02，0 关闭）、`FXSIM_SEED`（mt19937 种子，默认固定）。
-- PHASE CAL：`.input` 的 `PHASE CAL INT (MHZ)` > 0 时按 Configuration 的 tone 网格自动注入（幅度 0.1），频率/计数与 fxcorr-f 提取端完全一致。
+- 环境变量：`FXSIM_NOISE`（噪声 σ，默认 0.02，0 关闭）、`FXSIM_SEED`（mt19937 种子，默认固定）、`FXCORR_WORKDIR`（项目根目录，`workdir` 位置参数优先）。
+- PHASE CAL：`.input` 的 `PHASE CAL INT (MHZ)` > 0 时按 Configuration 的 tone 网格自动注入（幅度 0.7，避开 2bit 量化器电平陷阱——0.1 会被 rint(v×2)+2 量化吞掉），频率/计数与 fxcorr-f 提取端完全一致。
 
 ## 文件
 

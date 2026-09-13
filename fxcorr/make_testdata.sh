@@ -12,7 +12,7 @@
 #   workdir       项目根目录（默认 .）
 #   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone；1 个 = 全 band 同频；
 #                 nbands 个 = 逐 band
-#   环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数
+#   环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 set -euo pipefail
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
@@ -60,7 +60,7 @@ usage()
   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）
   workdir       项目根目录（默认 .）
   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone；1 个 = 全 band 同频；nbands 个 = 逐 band
-  环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数
+  环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 EOF
 	exit "${1:-2}"
 }
@@ -79,9 +79,9 @@ if ! [[ $NBATCH =~ ^[1-9][0-9]*$ ]]; then
 	exit 2
 fi
 
-WORKDIR=.
+WORKDIR="${FXCORR_WORKDIR:-.}"
 if [ $# -gt 0 ] && [ -d "$1" ]; then
-	WORKDIR=$1
+	WORKDIR=$1	# 位置参数优先于环境变量
 	shift
 fi
 TONES=("$@")

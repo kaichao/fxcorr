@@ -5,7 +5,7 @@
 ## 通用约定
 
 - 三工具均**无 MPI、串行**，通过目录接口衔接。
-- `workdir` 参数省略时默认当前目录（`.`）；所有相对路径（batches、.input、raw、fengine、vis）均相对 `workdir` 解释。
+- `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认当前目录（`.`）；所有相对路径（batches、.input、raw、fengine、vis）均相对 `workdir` 解释。
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
 - 任务粒度：f 任务 = (batch_id, station)（fxcorr-f 的 station 参数即该维度）；x 任务 = (batch_id, 站组对)，V1 全站一组 = 全基线，多子集并行属 V2（data-spec 第 6 / 12 节）。
 - 错误行为：参数不足或校验失败时打印原因到 stderr 并以非 0 退出；成功退出 0。
@@ -23,7 +23,7 @@ fxcorr-sim <batch_id> <station> [workdir] [tone_mhz ...]
 |---|---|
 | `batch_id` | 批量标识（`60512_45000` 或 `20260908_123000`），用于读 batch.json 与输出命名 |
 | `station` | 站名（如 `T1`），输出目录 `raw/<station>/` 与文件名前缀 |
-| `workdir` | 项目根目录，默认 `.` |
+| `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
 | `tone_mhz ...` | 基带 tone 频率（MHz，0 个 = 无 tone；1 个 = 所有 band 同频；nbands 个 = 逐 band） |
 
 环境变量：
@@ -32,11 +32,12 @@ fxcorr-sim <batch_id> <station> [workdir] [tone_mhz ...]
 |---|---|---|
 | `FXSIM_NOISE` | `0.02` | 高斯噪声 σ；`0` 关闭（配合固定 seed 可逐字节复现） |
 | `FXSIM_SEED` | 固定值 | mt19937 种子；默认固定保证可复现 |
+| `FXCORR_WORKDIR` | `.` | 项目根目录；`workdir` 位置参数优先 |
 
 输入输出：
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
-- 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；`PHASE CAL INT (MHZ)` > 0 时自动注入 pcal tone（幅度 0.1）。
+- 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；`PHASE CAL INT (MHZ)` > 0 时自动注入 pcal tone（幅度 0.7，避开 2bit 量化器电平陷阱）。
 - 输出 `workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF，多 band 帧内样本 band 交织）。
 
 程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界。batch 时长非帧整数倍时文件生成到下一个帧边界取整（fxcorr-f 只读 batch 段）。
@@ -66,7 +67,7 @@ fxcorr-f <batch_id> <station> [workdir]
 |---|---|
 | `batch_id` | 批量标识 |
 | `station` | 站名（须在 .input 的 DATA TABLE / datastream 中） |
-| `workdir` | 项目根目录，默认 `.` |
+| `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
 
 输入输出：
 
@@ -84,6 +85,7 @@ V1 边界：本地 VDIF（其他格式报错）、单 mux thread、单 scan、�
 ```bash
 fxcorr-f 60512_45000 T1            # 当前目录为项目根
 fxcorr-f 60512_45000 T1 /data/proj # 显式 workdir
+FXCORR_WORKDIR=/data/proj fxcorr-f 60512_45000 T1  # 环境变量定义（位置参数优先于它）
 ```
 
 ---
@@ -97,7 +99,7 @@ fxcorr-x <batch_id> [workdir]
 | 参数 | 说明 |
 |---|---|
 | `batch_id` | 批量标识 |
-| `workdir` | 项目根目录，默认 `.` |
+| `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
 
 输入输出：
 

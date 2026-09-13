@@ -8,6 +8,7 @@ station-based 相关器前端（F-Engine）：无 MPI 串行程序，逐站处�
 fxcorr-f <batch_id> <station> [workdir]
 ```
 
+- `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file。
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），Model 由 .calc 内建（无 .im 依赖）。
 - 输出目录 `workdir/fengine/<batch_id>/<station>/`（自动创建）。

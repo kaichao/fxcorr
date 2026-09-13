@@ -13,7 +13,7 @@
 #
 # 用法：./run_batch.sh <batch_id> [workdir]
 #   batch_id  批量标识（batches/<batch_id>.json 须已写好，可用 make_testdata.sh 生成）
-#   workdir   项目根目录（默认 .）
+#   workdir   项目根目录（默认 .；环境变量 FXCORR_WORKDIR 亦可定义，位置参数优先）
 set -euo pipefail
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
@@ -59,7 +59,7 @@ usage()
 	cat >&2 <<'EOF'
 用法：./run_batch.sh <batch_id> [workdir]
   batch_id  批量标识（batches/<batch_id>.json 须已写好，可用 make_testdata.sh 生成）
-  workdir   项目根目录（默认 .）
+  workdir   项目根目录（默认 .；环境变量 FXCORR_WORKDIR 亦可定义，位置参数优先）
 EOF
 	exit "${1:-2}"
 }
@@ -67,9 +67,9 @@ EOF
 [ $# -ge 1 ] && [ $# -le 2 ] || usage
 BID=$1
 shift
-WORKDIR=.
+WORKDIR="${FXCORR_WORKDIR:-.}"
 if [ $# -gt 0 ] && [ -d "$1" ]; then
-	WORKDIR=$1
+	WORKDIR=$1	# 位置参数优先于环境变量
 	shift
 fi
 [ $# -eq 0 ] || usage

@@ -142,6 +142,17 @@ raw/
 - **文件起点语义**：file-per-batch 布局下 raw 文件的时间起点 = batch 起点（fxcorr-f 的字节偏移按 batch 起点定位，非 scan 起点；batch 起点 = scan 起点时两者一致）。batch.json 的 start_mjd 是该起点的精确表示。
 - 仿真数据（测试替身，由 fxcorr-sim 生成）约束：batch 时间窗须与 subint 网格对齐（fxcorr-sim 读 .input 的 subint 结构保证，见第 12 节）；多节点分布生成时各分片的 VDIF 帧时间戳/帧号须全局连续（程序内校验点）；最小数据集可入仓库（`fxcorr/test/`，附 sha256），不受"运行时数据不进 git"约束
 
+#### 5.2.1 仿真数据生成器（fxcorr-sim）规范
+
+fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建），按 (batch_id, station) 生成 raw/ 下的 VDIF 数据。其配置输入与参数语义：
+
+- **配置目录（workdir）定位**：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。workdir 内所有相对路径（`batches/<batch_id>.json`、`.input` 的 config_file、`raw/` 输出）均相对它解释。三工具（fxcorr-sim/f/x）与编排脚本（make_testdata.sh / run_batch.sh / run_bench.sh）统一此语义。
+- **配置来源**：读 `workdir/batches/<batch_id>.json`（D9）取 start_mjd / n_subints / config_file；band 结构、采样率、PHASE CAL tone 网格全部来自 `workdir/<config_file>`（.input，非 MPI 构造），与 fxcorr-f 同一解析语义——这是分批次对齐要求的硬理由。
+- **tone 参数**（基带频率 MHz，位置参数尾部）：0 个 = 无 tone；1 个 = 所有 band 同频率；nbands 个 = 逐 band 指定。
+- **噪声**：`FXSIM_NOISE`（高斯噪声 σ，默认 0.02；0 关闭），`FXSIM_SEED`（mt19937 种子，默认固定）。噪声关闭 + 固定 seed 时同参数输出逐字节可复现。
+- **PHASE CAL 注入**：`.input` 的 `PHASE CAL INT (MHZ)` > 0 时按 Configuration 的 tone 网格自动注入（幅度 0.7，避开 2bit 量化器电平陷阱，见 applications/fxcorr-sim/CLAUDE.md），频率/计数与 fxcorr-f 提取端完全一致，构成注入-提取闭环。
+- **输出**：`workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF；多 band 时帧内样本 band 交织；帧时间戳/帧号按 batch 起点换算逐帧自增）。
+
 ### 5.3 F-Engine 输出（fengine/）
 
 ```

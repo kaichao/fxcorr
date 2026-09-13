@@ -60,12 +60,17 @@ int main(int argc, char **argv)
 {
 	if(argc < 3)
 	{
-		cerr << "usage: fxcorr-f <batch_id> <station> [workdir]" << endl;
+		cerr << "usage: fxcorr-f <batch_id> <station> [workdir]" << endl
+		     << "  env: FXCORR_WORKDIR (default .), overridden by the workdir argument" << endl;
 		return EXIT_FAILURE;
 	}
 	string batchid = argv[1];
 	string station = argv[2];
-	string workdir = (argc > 3) ? argv[3] : ".";
+	string workdir = ".";
+	if(const char *wd = getenv("FXCORR_WORKDIR"))
+		workdir = wd;
+	if(argc > 3)
+		workdir = argv[3];	// argument takes precedence over the environment
 
 	// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
 	string batchjsonpath = workdir + "/batches/" + batchid + ".json";

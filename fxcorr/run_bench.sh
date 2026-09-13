@@ -10,7 +10,7 @@
 #
 # 用法：./run_bench.sh [workdir]
 #   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
-#   环境变量：NP（mpirun 进程数，默认 4）
+#   环境变量：NP（mpirun 进程数，默认 4）；FXCORR_WORKDIR（项目根目录，位置参数优先）
 set -euo pipefail
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -27,15 +27,15 @@ usage()
 	cat >&2 <<'EOF'
 用法：./run_bench.sh [workdir]
   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
-  环境变量：NP（mpirun 进程数，默认 4）
+  环境变量：NP（mpirun 进程数，默认 4）；FXCORR_WORKDIR（项目根目录，位置参数优先）
 EOF
 	exit "${1:-2}"
 }
 
 [ $# -le 1 ] || usage
-WORKDIR=.
+WORKDIR="${FXCORR_WORKDIR:-.}"
 if [ $# -gt 0 ] && [ -d "$1" ]; then
-	WORKDIR=$1
+	WORKDIR=$1	# 位置参数优先于环境变量
 	shift
 fi
 [ $# -eq 0 ] || usage

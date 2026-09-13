@@ -64,12 +64,17 @@ int main(int argc, char **argv)
 	{
 		cerr << "usage: fxcorr-sim <batch_id> <station> [workdir] [tone_mhz ...]" << endl
 		     << "  one tone value applies to all bands; nbands values apply band by band" << endl
-		     << "  env: FXSIM_NOISE (default 0.02, 0 disables noise), FXSIM_SEED (default fixed)" << endl;
+		     << "  env: FXSIM_NOISE (default 0.02, 0 disables noise), FXSIM_SEED (default fixed)," << endl
+		     << "       FXCORR_WORKDIR (default .), overridden by the workdir argument" << endl;
 		return EXIT_FAILURE;
 	}
 	string batchid = argv[1];
 	string station = argv[2];
-	string workdir = (argc > 3) ? argv[3] : ".";
+	string workdir = ".";
+	if(const char *wd = getenv("FXCORR_WORKDIR"))
+		workdir = wd;
+	if(argc > 3)
+		workdir = argv[3];	// argument takes precedence over the environment
 
 	// optional baseband tone frequencies in MHz
 	vector<double> tonemhzarg;
