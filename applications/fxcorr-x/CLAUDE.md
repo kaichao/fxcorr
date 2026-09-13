@@ -46,37 +46,8 @@ fxcorr-x <batch_id> [workdir]
 
 ## 测试
 
-- 资产与对拍工具在 `fxcorr/test/`：cmp_swin.py（SWIN 逐记录比较，验收标准 2）；**zoom 检验资产（P4a）**：gen_test_zoom.py（从 test.input 生成 test-zoom.input + EXECUTE TIME 截断变体）、cmp_swin_zoom.py（按 SWIN 头 freqindex 分拆多 nchan 对拍）。
+- 资产与对拍工具在 `fxcorr/test/`：根目录共享件 cmp_swin.py（SWIN 逐记录比较，验收标准 2）；**zoom 检验资产（P4a）** 在 `fxcorr/test/zoom/`：gen_test_zoom.py（从 test.input 生成 test-zoom.input + EXECUTE TIME 截断变体）、cmp_swin_zoom.py（按 SWIN 头 freqindex 分拆多 nchan 对拍）、README.md（检验步骤与验证记录）。
 - 测试机 /root/fxcortest/：f 侧产物 fengine/58948_25200/ → `fxcorr-x 58948_25200` → config/test.difx/DIFX_*.s0000.b0000；对拍 mpifxcorr 用 EXECUTE TIME 截断到完整积分段（test-mpi2.input，EXECUTE TIME=2）。
 - 已验证：2 站 4 秒实验 4 subint（2 积分）SWIN 与 mpifxcorr 逐记录全等（6/6，可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS 成功；多 batch 第 2 个 batch（起点 = scan 起点 + 1.024s，test-sim 配置 8 subints）4 积分 12 条记录全链路跑通。
 
-**zoom（P4a）检验步骤**（2026-09-13 验证过，测试机可一键复现）：
-
-```bash
-cd /root/fxcortest && rm -rf zoom && mkdir zoom
-bash /root/fxcorr/fxcorr/make_testdata.sh zoom 1.5     # 单 band 只能 1 个 tone（tone 落 zoom 中心）
-cd zoom
-python3 /root/fxcorr/fxcorr/test/gen_test_zoom.py config/test.input
-#   -> config/test-zoom.input（父 4MHz/4096ch + zoom 201.5MHz 1MHz/1024ch）
-#   -> config/test-zoom-mpi2.input（EXECUTE TIME=2 截断，mpifxcorr 基准用）
-python3 - <<'EOF'
-import json
-j = json.load(open('batches/58948_25200.json'))
-j['config_file'] = 'config/test-zoom.input'
-json.dump(j, open('batches/58948_25200.json','w'), indent=2)
-EOF
-# fxcorr 链路
-bash -c 'source /root/fxcorr/setup.bash && export LD_LIBRARY_PATH=/usr/local/difx/lib && \
-  fxcorr-f 58948_25200 T1 && fxcorr-f 58948_25200 T2 && fxcorr-x 58948_25200'
-mv config/test.difx/DIFX_58948_025200.s0000.b0000 /tmp/zoom_fxcorr.s0000.b0000
-# mpifxcorr 基准
-bash -c 'source /root/fxcorr/setup.bash && export LD_LIBRARY_PATH=/usr/local/difx/lib && \
-  mpirun --allow-run-as-root -np 4 /usr/local/difx/bin/mpifxcorr config/test-zoom-mpi2.input'
-# 对拍（按 freqindex 分拆：主带 4096ch、zoom 1024ch）
-python3 /root/fxcorr/fxcorr/test/cmp_swin_zoom.py \
-  /tmp/zoom_fxcorr.s0000.b0000 config/test.difx/DIFX_58948_025200.s0000.b0000 0=4096,1=1024
-# 无 zoom 回归：batch.json config_file 改回 config/test.input，rm -rf fengine config/test.difx，
-# 重跑 f/x 与 mpifxcorr（test-mpi2.input），cmp_swin.py ... 4096 对拍 6/6
-```
-
-验收判据：zoom 对拍 12/12 记录 ALL OK（主带 6 + zoom 6，头字段含 weight/uvw 与可见度 max rel ≤1e-6）；无 zoom 回归 6/6。
+**zoom（P4a）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/zoom/README.md`（2026-09-13 验证过，测试机可一键复现）。

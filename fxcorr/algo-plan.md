@@ -122,15 +122,11 @@ P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，详细设计待后续
 
 - **fxcorr-sim pcal 注入幅度 0.1 → 0.7**（signalgen.cpp）：pcal 信号按 `0.1×sin` 注入，2bit 量化 `rint(v×2)+2` 的边界在 ±0.5——0.1 幅度的 2v ∈ (−0.2, 0.2) 永不跨档，信号被量化器完全抹平（pcal.bin/PCAL 全零，mpifxcorr 基准同样提取不到，两边一致地"没有数据行"）。0.7 与主 tone 同幅度后跨档正常。
 - **pcal.bin 布局文档修正**（data-spec 5.3）：V1 实现为 freq+pol 交错（每 tone 9B），原 data-spec 文本写成分组数组——按实现修正文本（P0 不改二进制格式）。
-- **测试资产新增**（fxcorr/test/）：`test-pcal.vex`（$PHASE_CAL_DETECT 段 def 内直接追加 tone 列表 `2 : 3 : 4 : 5`——VEX 词法无 `tones` 关键字，数值列表紧跟 `phase_cal_detect = &NoCal` 引用之后）、`test-pcal.v2d`（phaseCalInt = 0 → 1，MHz）。复制成 config/test.vex / test.v2d 后复用 make_testdata.sh 全流程；vex2difx 将 tone 序号 × 1MHz + base(0) 生成 .input PHASE CAL（difx 0-based 序号 1-4 → 201-204MHz，band 4MHz 内 4 tone）。注意 .input 的 PHASE CAL INDEX 行（freq table 级）与 configuration.cpp 自动生成的 tone 网格（bandedge 起按 interval 步进、与 INDEX 行无关）是两回事——提取与 PCAL 行都走后者。
+- **测试资产新增**（fxcorr/test/pcal/）：`test-pcal.vex`（$PHASE_CAL_DETECT 段 def 内直接追加 tone 列表 `2 : 3 : 4 : 5`——VEX 词法无 `tones` 关键字，数值列表紧跟 `phase_cal_detect = &NoCal` 引用之后）、`test-pcal.v2d`（phaseCalInt = 0 → 1，MHz）。复制成 config/test.vex / test.v2d 后复用 make_testdata.sh 全流程；vex2difx 将 tone 序号 × 1MHz + base(0) 生成 .input PHASE CAL（difx 0-based 序号 1-4 → 201-204MHz，band 4MHz 内 4 tone）。注意 .input 的 PHASE CAL INDEX 行（freq table 级）与 configuration.cpp 自动生成的 tone 网格（bandedge 起按 interval 步进、与 INDEX 行无关）是两回事——提取与 PCAL 行都走后者。
 
 #### 验证方法与结果
 
-- 对拍环境：cmp5（config 用 test-pcal 资产）+ `FXSIM_NOISE=0 make_testdata.sh`；基准 `run_bench.sh`（mpifxcorr 出 bench/<exp>.difx/PCAL_*，同一份 raw 数据）。
-- **单 batch（test.input，0.524288s subint、intTime 1.048576s、2 intTime/batch）**：`diff` PCAL T1/T2 与基准**逐字节一致**；SWIN 对拍（cmp_swin.py）同时全等（时域数据一致性佐证）。
-- **多 batch（test-sim.input，128ms subint、intTime 0.256s、4 intTime/batch，-n 2）**：两 batch 顺序跑后每站 8 数据行、pcalmjd 严格递增；重跑 batch1 后行数不变、时间序保持。此配置不与 mpifxcorr 对拍（128ms 帧对齐触发 vdifmux 帧号 bit7 错读，既有已知限制）。
-- **容器模式**：重建 builder/base/f 镜像后 `FXCORR_RUN_MODE=container` 跑批，PCAL 落挂载的 vis/ 内、与基准逐字节一致。
-- 独立对照实验（定位共轭问题时）：同一段合成数据（0.7×sin(2π×1MHz×n/8MHz)）分别链接 libfxcorrcommon 与 mpifxcorr 源码编译提取，两侧输出逐位相同（im 均负）——证实提取层无差异、差异在写盘层。
+✅ 2026-09-13：单 batch 与 mpifxcorr 基准**逐字节一致**；多 batch 追加/重跑幂等验证通过；容器模式落盘与基准一致。完整验证方法与结果记录见 `fxcorr/test/pcal/README.md`。
 
 ---
 
@@ -370,14 +366,11 @@ x 侧支持 .input ZOOM FREQ 定义、出 zoom SWIN；f 侧 autocorr.bin 补 zoo
 - autocorr.bin 头自检（nbands、bandindex、nchan）+ zoom 自相关峰值落位。
 - 无 zoom 配置回归：test 配置 6/6 对拍不变。
 
-**检验操作步骤**：可复现命令见 `applications/fxcorr-x/CLAUDE.md` 测试节"zoom（P4a）检验步骤"（make_testdata.sh 造数据 → `fxcorr/test/gen_test_zoom.py` 生成 test-zoom.input + mpi2 截断变体 → f/x 链路与 mpifxcorr 基准各跑一遍 → `fxcorr/test/cmp_swin_zoom.py` 按 freqindex 分拆对拍）；验收判据：zoom 12/12 ALL OK、无 zoom 回归 6/6。
+**检验操作步骤**：可复现命令与验收判据见 `fxcorr/test/zoom/README.md`（make_testdata.sh 造数据 → `gen_test_zoom.py` 生成 test-zoom.input + mpi2 截断变体 → f/x 链路与 mpifxcorr 基准各跑一遍 → `cmp_swin_zoom.py` 按 freqindex 分拆对拍）。
 
 #### 验证结果（2026-09-13 实施完成）
 
-- **zoom 对拍**（/root/fxcortest/zoom/，test.input 变体 test-zoom.input：父 band 4MHz/4096ch + zoom 201.5MHz 起 1MHz/1024ch，tone 1.5MHz 落 zoom 中心）：mpifxcorr 基准 vs fxcorr **12/12 记录全等**（freq 0 主带 6 条 + freq 1 zoom 6 条 = 2 积分 × (互相关 1 + 自相关 2 站×2 band)；头字段 bl/mjd/sec/src/frq/pol/pbin/weight/uvw 与可见度复数 max rel 0.00e+00）。
-- **无 zoom 回归**：原 test.input 配置对拍 6/6 全等（cmp_swin.py）。
-- 实施中实测的两个坑（已入 fxcorr-x CLAUDE.md 关键要点）：x 侧时间戳校验循环必须含 zoom 视图（否则 specbuf 恒 0）；.input 的 BASELINE 段 D/STREAM A/B BAND 行 key 序号是 pol product 序号。
-- zoom 的 XMAC/uvshift/accumulateWeights 均零改动（config 表驱动 + recordbandindex 父映射现成）；f 侧 Mode 零改动（getMode 工厂传 numzoombands）。
+✅ 2026-09-13：zoom 对拍 **12/12 记录全等**（主带 6 + zoom 6，可见度 max rel 0.00e+00）、无 zoom 回归 6/6；zoom 的 XMAC/uvshift/accumulateWeights 零改动、f 侧 Mode 零改动。完整验证记录与可复现步骤见 `fxcorr/test/zoom/README.md`；实施中实测的两个坑已入 fxcorr-x CLAUDE.md 关键要点。
 
 ### P4b：多相位中心
 

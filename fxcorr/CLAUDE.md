@@ -49,16 +49,20 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 
 ## test/ 测试资产
 
+**目录组织**（2026-09-13 定）：根目录放共享/通用件（base 配置、造数、通用对拍工具，各特性检验都依赖）；每个特性一个独立子目录（`zoom/`、`pcal/`，后续 P4b/P4c/P6-P11 各建），放该特性的专属脚本/配置，**检验步骤与验证记录写在各特性目录的 `README.md`**。新特性资产一律进特性目录，不再平放根目录。
+
 | 文件 | 作用 |
 |---|---|
 | `test.vex` | 上游 `tests/Synthetic/test-usb.vex` 原版（2 站 T1/T2、单 band 4MHz USB、2bit、2020y100d07h00m00s） |
 | `test.v2d` | 配套 vex2difx 配置（antennas=T1,T2，tInt=1，nChan=4096） |
 | `gen_test_vdif.py` | 生成 2bit 单 band VDIF 测试数据（datasim 因上游 IPP 依赖无法 --noipp 构建，此脚本替代；**低位先打包**对齐 mark5access 位序；fxcorr-sim 的位序逐字节对拍参照，对拍已验证 BYTE-IDENTICAL；帧号公式已修为 `n % fps`（原 `n % 8000000 // 32000` 恒为 0，对拍时发现）） |
 | `test2b.vex` / `test2b.v2d` | 2 band 测试配置（test.vex 加 205MHz 第 2 band），fxcorr-sim 多 band 验证资产 |
-| `test-pcal.vex` / `test-pcal.v2d` | 带 phasecal 的测试配置（PHASE_CAL_DETECT tone 列表 `2:3:4:5`、phaseCalInt=1 → .input 4 tones 201-204MHz），PCAL_*.pcal 对拍验证资产（algo-plan P0） |
-| `cmp_swin.py` | SWIN 逐记录比较（74 字节头 + 可见度复数），对拍工具（impl-plan 验收标准 2） |
-| `gen_test_zoom.py` | 从无 zoom 的 .input 生成 test-zoom.input + EXECUTE TIME 截断变体（P4a zoom 检验资产，见 fxcorr-x CLAUDE.md 测试节） |
-| `cmp_swin_zoom.py` | 按 SWIN 头 freqindex 分拆多 nchan 记录的逐记录比较（zoom 对拍用，同文件多 freq 各不同 nchan） |
+| `cmp_swin.py` | SWIN 逐记录比较（74 字节头 + 可见度复数），通用对拍工具（impl-plan 验收标准 2） |
+| `pcal/test-pcal.vex` / `pcal/test-pcal.v2d` | 带 phasecal 的测试配置（PHASE_CAL_DETECT tone 列表 `2:3:4:5`、phaseCalInt=1 → .input 4 tones 201-204MHz），PCAL_*.pcal 对拍验证资产（algo-plan P0） |
+| `pcal/README.md` | P0 检验资产用法 + 验证方法与结果记录 |
+| `zoom/gen_test_zoom.py` | 从无 zoom 的 .input 生成 test-zoom.input + EXECUTE TIME 截断变体（P4a zoom 检验资产） |
+| `zoom/cmp_swin_zoom.py` | 按 SWIN 头 freqindex 分拆多 nchan 记录的逐记录比较（zoom 对拍用，同文件多 freq 各不同 nchan） |
+| `zoom/README.md` | P4a 检验步骤（完整可复现命令）+ 验收判据 + 验证记录 |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 
