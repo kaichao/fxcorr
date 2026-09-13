@@ -11,13 +11,27 @@
  * @brief Reader for one band_XX.sp file produced by fxcorr-f
  *        (layout: fxcorr/data-spec.md 5.3).
  *
- * One instance per (datastream, recorded band).  Subints are read on demand
- * into internal buffers; spectra are in linear FFT order (the fftloop-batched
- * write order of FEngineWriter concatenates to global FFT index order).
+ * One instance per (datastream, band) in datastream-total band order:
+ * - recorded bands read the whole spectrum of their band_XX.sp;
+ * - zoom bands (P4a) are a channel-slice view of the parent recorded band's
+ *   spectrum (channeloffset from the .input zoom definition), so they open the
+ *   parent .sp file and copy out only [channeloffset, channeloffset+nchan).
+ *
+ * Subints are read on demand into internal buffers; spectra are in linear FFT
+ * order (the fftloop-batched write order of FEngineWriter concatenates to
+ * global FFT index order).  spectra()/numChannels() always describe the
+ * reader's own (possibly sliced) channels.
  */
 class SpReader {
 public:
-	SpReader(const std::string &path);
+	/**
+	 * @param path            band_XX.sp file (of the parent band, for zoom)
+	 * @param channeloffset   spectrum-slice start channel within the parent
+	 *                        file's channels (0 = full recorded band view)
+	 * @param nchanoverride   number of channels of this view (0 = use the
+	 *                        parent file's own nchan)
+	 */
+	SpReader(const std::string &path, int channeloffset = 0, int nchanoverride = 0);
 	~SpReader();
 
 	/** True if the header was read and validated. */
@@ -54,7 +68,9 @@ private:
 
 	int bandindex_;
 	char pol_;
-	int nchan_;
+	int nchan_;		// channels of this view (sliced for zoom)
+	int chanoffset_;	// slice start within the file's spectra (0 = full band)
+	int filenchan_;		// channels stored in the file (parent nchan for zoom)
 	u32 nsub_, subns_, bps_, nbf_, flagwords_;
 	long long subintbytes_;	// bytes of one subint record (header section + spectra)
 

@@ -247,7 +247,7 @@ Header（定长 256 字节）：
 - weights 语义：对应 `Mode::getDataWeight(band, subloop)`（Mk5Mode 启用 perbandweights 时按 band 取，否则退化为 dataweight[subloop]）；fxcorr-x 侧 baselineweight 还原为两站对应 band 权重之积（mode.cpp 的 weights 累加语义）
 - spectra 语义：已完成解包、延迟对齐（整数+分数采样校正）、条纹旋转、FFT 的结果；**不存共轭副本**，fxcorr-x 侧按需对整段做逐元素共轭（等价于原 `getConjugatedFreqs()`）
 - 通道→频率映射约定见第 8 节；无效 subloop（valid=0 或 dataWeight=0）的频谱块为全零
-- zoom band 不单独落盘（zoom band 在现实现中是父 band 数组的切片，V1 由 x 侧按 .input 的 zoom 定义从对应 recorded band 切片，或 V1 暂不支持 zoom）
+- **zoom band 不单独落盘**（2026-09-13 P4a 实现）：zoom 频谱是父 band 频谱数组的指针切片（mode.cpp:184-195），fxcorr-x 按 .input 的 zoom 定义（zoomfreqchanneloffset + zoom freq 的 nchan）对父 band_XX.sp 做通道切片视图读取（SpReader 切片构造参数），.sp 文件与布局不变
 
 **pcal.bin**（仅当该站配置了 phasecal；`n_tones` 由配置定）：
 
@@ -271,13 +271,13 @@ Header：
   u32       version = 1
   u32       n_subints
   u32       ac_batches（每 subint 的 AC 平均批次记录数 = ceil(blocks_per_send/maxacblocks)）
-  u32       n_bands
-  每 band：u32 band_index；u32 num_channels
+  u32       n_bands（total bands = recorded + zoom）
+  每 band：u32 band_index（datastream-total 序）；u32 num_channels（各 band 各自 nchan/chanstoavg）
 每 subint（ac_batches 条记录，按 fftloop 批序）：
   每 band：cf32[num_channels]（自相关复数谱）+ f32 weight（本批次累积权重）
 ```
 
-自相关在 f 侧由 `Mode::process` 累积，每 maxacblocks 个 FFT（与 core.cpp:993-1003 同节奏）`averageFrequency()` 平均后落一条记录、随即 `zeroAutocorrelations()`；x 侧把该 subint 的全部记录逐条累加进 SWIN 自相关段（`vectorAdd`，基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。maxacblocks 由 .calc 的 AC AVG INTERVAL 与 subint 结构共同决定（公式同 core.cpp:778-783）。
+自相关在 f 侧由 `Mode::process` 累积，每 maxacblocks 个 FFT（与 core.cpp:993-1003 同节奏）`averageFrequency()` 平均后落一条记录、随即 `zeroAutocorrelations()`；x 侧把该 subint 的全部记录逐条累加进 SWIN 自相关段（`vectorAdd`，基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。maxacblocks 由 .calc 的 AC AVG INTERVAL 与 subint 结构共同决定（公式同 core.cpp:778-783）。**zoom band（2026-09-13 P4a）**：自相关谱为父 band 平均后数组的切片（mode.cpp:382-385，偏移已除 channelstoaverage），zoom 段的 weight 从父 recorded band 取（Mode 的 weights 只有 recorded 维；映射逻辑同 core.cpp:1324-1339）。
 
 ### 5.4 X-Engine 输出（vis/，SWIN）
 

@@ -30,8 +30,9 @@ static u32 readU32(const char *buf, int off)
 	return v;
 }
 
-SpReader::SpReader(const string &path) :
+SpReader::SpReader(const string &path, int channeloffset, int nchanoverride) :
 	file_(0), ok_(false), bandindex_(0), pol_(0), nchan_(0),
+	chanoffset_(channeloffset), filenchan_(0),
 	nsub_(0), subns_(0), bps_(0), nbf_(0), flagwords_(0), subintbytes_(0),
 	scan_(0), sec_(0), ns_(0), flagsbuf_(0), wbuf_(0), specbuf_(0)
 {
@@ -56,15 +57,23 @@ SpReader::SpReader(const string &path) :
 
 	bandindex_ = (int)readU32(header, OFF_BANDINDEX);
 	pol_ = header[OFF_POL];
-	nchan_ = (int)readU32(header, OFF_NCHAN);
+	filenchan_ = (int)readU32(header, OFF_NCHAN);
 	nsub_ = readU32(header, OFF_NSUB);
 	subns_ = readU32(header, OFF_SUBNS);
 	bps_ = readU32(header, OFF_BPS);
 	nbf_ = readU32(header, OFF_NBF);
 	flagwords_ = readU32(header, OFF_FLAGWORDS);
 
+	// channels of this view: override for zoom slices, else the file's own
+	nchan_ = (nchanoverride > 0) ? nchanoverride : filenchan_;
+	if(chanoffset_ < 0 || nchan_ <= 0 || chanoffset_ + nchan_ > filenchan_)
+	{
+		cerr << "SpReader: bad slice view (offset " << chanoffset_ << ", nchan " << nchan_ << ", file nchan " << filenchan_ << ") in " << path << endl;
+		return;
+	}
+
 	// per subint: i32 scan/sec/ns + flags + weights + spectra
-	subintbytes_ = 12 + (long long)flagwords_*4 + (long long)bps_*4 + (long long)bps_*nchan_*8;
+	subintbytes_ = 12 + (long long)flagwords_*4 + (long long)bps_*4 + (long long)bps_*filenchan_*8;
 
 	flagsbuf_ = new s32[flagwords_];
 	wbuf_ = new f32[bps_];
@@ -97,8 +106,25 @@ bool SpReader::readSubint(int s, int &scan, int &sec, int &ns)
 		return false;
 	if(fread(wbuf_, 4, bps_, file_) != bps_)
 		return false;
-	if(fread(specbuf_, sizeof(cf32), (long long)bps_*nchan_, file_) != (size_t)((long long)bps_*nchan_))
-		return false;
+	if(chanoffset_ == 0 && nchan_ == filenchan_)
+	{
+		// full-band view: one contiguous read
+		if(fread(specbuf_, sizeof(cf32), (long long)bps_*nchan_, file_) != (size_t)((long long)bps_*nchan_))
+			return false;
+	}
+	else
+	{
+		// zoom slice view: copy out [chanoffset_, chanoffset_+nchan_) per FFT block
+		for(long long b=0;b<(long long)bps_;b++)
+		{
+			if(fseeko(file_, (long long)chanoffset_*sizeof(cf32), SEEK_CUR) != 0)
+				return false;
+			if(fread(specbuf_ + b*nchan_, sizeof(cf32), nchan_, file_) != (size_t)nchan_)
+				return false;
+			if(fseeko(file_, (long long)(filenchan_ - chanoffset_ - nchan_)*sizeof(cf32), SEEK_CUR) != 0)
+				return false;
+		}
+	}
 
 	scan = scan_;
 	sec = sec_;

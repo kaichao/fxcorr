@@ -14,20 +14,25 @@ using namespace std;
 
 FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int confindex, int ds, int nsubs, int acb) :
 	config(conf), configindex(confindex), dsindex(ds), nsubints(nsubs),
-	nrecordedbands(0), blockspersend(0), flagwords(0), acblocks(acb), autocorrchannels(0),
+	nrecordedbands(0), ntotalbands(0), blockspersend(0), flagwords(0), acblocks(acb),
 	haspcal(false), pcalfile(0), autocorrfile(0)
 {
 	nrecordedbands = config->getDNumRecordedBands(configindex, dsindex);
+	ntotalbands = config->getDNumTotalBands(configindex, dsindex);
 	blockspersend = config->getBlocksPerSend(configindex);
 	flagwords = blockspersend/FLAGS_PER_INT;
 	if(blockspersend%FLAGS_PER_INT)
 		flagwords++;
 
-	// autocorrelation width after averageFrequency() = recordedbandchannels/chanstoavg;
-	// chanstoavg is datastream-wide, taken from the first recorded freq
-	// (same formula as configuration.cpp's streamchanstoaverage)
-	int freqindex = config->getDRecordedFreqIndex(configindex, dsindex, 0);
-	autocorrchannels = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
+	// per-band autocorrelation width after averageFrequency()
+	// = nchan/chanstoavg of each total (recorded or zoom) band,
+	// same formula as core.cpp:1294
+	acbandnchan.resize(ntotalbands);
+	for(int k=0;k<ntotalbands;k++)
+	{
+		int freqindex = config->getDTotalFreqIndex(configindex, dsindex, k);
+		acbandnchan[k] = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
+	}
 
 	haspcal = (config->getDPhaseCalIntervalHz(configindex, dsindex) > 0);
 
@@ -151,11 +156,12 @@ void FEngineWriter::writeAutocorrHeader()
 	u32 nsub = nsubints;  fwrite(&nsub, 1, 4, autocorrfile);
 	// number of AC averaging-batch records per subint (= ceil(blockspersend/acblocks))
 	u32 acb = (blockspersend + acblocks - 1)/acblocks;  fwrite(&acb, 1, 4, autocorrfile);
-	u32 nbands = nrecordedbands;  fwrite(&nbands, 1, 4, autocorrfile);
-	for(int j=0;j<nrecordedbands;j++)
+	// total bands (recorded + zoom), bandindex in datastream-total order
+	u32 nbands = ntotalbands;  fwrite(&nbands, 1, 4, autocorrfile);
+	for(int j=0;j<ntotalbands;j++)
 	{
 		u32 bandindex = j;  fwrite(&bandindex, 1, 4, autocorrfile);
-		u32 nchan = autocorrchannels;  fwrite(&nchan, 1, 4, autocorrfile);
+		u32 nchan = acbandnchan[j];  fwrite(&nchan, 1, 4, autocorrfile);
 	}
 }
 
@@ -240,14 +246,37 @@ void FEngineWriter::writePcal(Mode *mode)
 
 void FEngineWriter::writeAutocorrelationBatch(Mode *mode)
 {
-	// same order as Core::averageAndSendAutocorrs: average first, then copy out;
-	// one record per maxacblocks batch, the caller zeroes autocorrelations after
+	// same order as Core::averageAndSendAutocorrs (core.cpp:1273-1302 for the
+	// data, 1314-1339 for the weights): average first, then copy out; one record
+	// per maxacblocks batch, the caller zeroes autocorrelations after.
+	// Zoom bands are slices of the parent autocorrelation array; their weight
+	// is taken from the parent recorded band (Mode::weights only holds recorded
+	// bands, so zoom bands cannot be queried directly).
 	mode->averageFrequency();
-	for(int j=0;j<nrecordedbands;j++)
+	for(int j=0;j<ntotalbands;j++)
 	{
 		const cf32 *ac = mode->getAutocorrelation(false, j);
-		fwrite(ac, sizeof(cf32), autocorrchannels, autocorrfile);
-		f32 w = mode->getWeight(false, j);
+		fwrite(ac, sizeof(cf32), acbandnchan[j], autocorrfile);
+
+		f32 w = 0.0f;
+		if(j >= nrecordedbands)
+		{
+			// core.cpp:1324-1339: weight of the parent recorded band
+			int localfreqindex = config->getDLocalZoomFreqIndex(configindex, dsindex, j-nrecordedbands);
+			int parentfreqindex = config->getDZoomFreqParentFreqIndex(configindex, dsindex, localfreqindex);
+			for(int l=0;l<nrecordedbands;l++)
+			{
+				if(config->getDLocalRecordedFreqIndex(configindex, dsindex, l) == parentfreqindex &&
+				   config->getDZoomBandPol(configindex, dsindex, j-nrecordedbands) == config->getDRecordedBandPol(configindex, dsindex, l))
+				{
+					w = mode->getWeight(false, l);
+				}
+			}
+		}
+		else
+		{
+			w = mode->getWeight(false, j);
+		}
 		fwrite(&w, 1, 4, autocorrfile);
 	}
 }

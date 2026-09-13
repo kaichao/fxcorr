@@ -49,18 +49,26 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 - difx-tools 清单已定：vex2difx、difxcalc（difxcalc11 安装名）、difx2fits；difx2mark4 按需再加。
 - builder 构建命令：`python3 install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen`（--nodoc 免装 doxygen）。
 
-## 5. V1 遗留算法改进清单（优先级已定稿 2026-09-13）
+## 5. 算法改进清单（2026-09-13 调整：V2 = 串行算法迁移，并行/流式挪 V3）
 
-每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。排序依据：先补齐数据链路完整性（P0/P1），再补算力（P2/P3），后补科学功能（P4 按改动量），最后新能力（P5）。
+每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。定位修正：V2 只做 mpifxcorr **串行算法**的迁移与完善——原 P2/P3（并行化）与 P5（流式新能力）挪 V3（README 的 V3 = 模块级 OpenMP / 按需 GPU），P4 符合串行迁移标准保留；2026-09-13 完整审查 mpifxcorr 后新增 P6-P11。排序依据：先补齐数据链路完整性（P0/P1），再科学功能（P4、P6-P8 按改动量），再监控消息（P9）、输入格式（P10）、reader 细节（P11）。
 
 | 优先级 | 改进项 | 动机分类 | 一句话说明 |
 |---|---|---|---|
 | P0 | `PCAL_*.pcal` 文件生成 | 功能未迁移 | ✅ 2026-09-13（f 按 intTime 聚合 tone 写实验级文本，追加幂等；单 batch 与 mpifxcorr 基准逐字节对拍通过，多 batch 追加/重跑幂等验证通过） |
 | P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 | ✅ 2026-09-13（fxcorrcommon 增 difxmonitor 封装；f = datastream/core 角色发 Starting/Diagnostic/STA，x = manager 角色发 Starting/Running/Ending/Done；host 组播与 mpifxcorr 基准逐字段对拍通过，container 落盘 meta/difxmsg/ 与组播字节一致、重跑幂等） |
-| P2 | 多 x 子集并行 | 串行环境新变化 | 基线切子集多进程并行，SWIN 合并（data-spec 12 节） |
-| P3 | 多线程（f/x 进程内并行） | 串行环境新变化 | OpenMP 并行 FFT 批 / 基线循环，与 P2 叠加 |
-| P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | x 侧补齐科学功能，按改动量排序 |
-| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） | 网络流输入，依赖采集环境 |
+| P2 | 多 x 子集并行 | 串行环境新变化 | ⤴ V3（2026-09-13 挪出）：进程级分片属并行化阶段；编排侧按 README 归 scalebox 仓库 |
+| P3 | 多线程（f/x 进程内并行） | 串行环境新变化 | ⤴ V3（2026-09-13 挪出）：即 V3 定义的模块级 OpenMP |
+| P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | 主体在 x 侧（zoom 另需 f 侧 autocorr.bin 补段），按改动量排序；详细设计见 algo-plan.md。P4a zoom ✅ 2026-09-13（对拍 12/12 全等、无 zoom 回归 6/6）；P4b/P4c 待实施 |
+| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） | ⤴ V3（2026-09-13 挪出）：流式新能力而非串行迁移；上游 vdifnetwork.cpp 现成实现可参照 |
+| P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 | f 侧新类（放 fxcorrcommon），站级纯串行、投入最小；SWITCHEDPOWER_* 落盘（switchedpower.cpp:22-276，参照 mark5access m5tsys.c） |
+| P7 | 交叉极化自相关（WRITE AUTOCORRS / maxproducts>2） | 功能未迁移 | f 落盘 crosspol 段（data-spec 5.3 需增）+ x 累加（core.cpp:1177/1288-1301/1342-1369、visibility.cpp:592-648），两侧联动 |
+| P8 | 相位阵（phased array）频率域加权 | 功能未迁移 | x 侧波束加权求和（core.cpp:818-865），f 的 .sp 多站频谱现成；TIMESERIES 输出为上游死代码不迁移 |
+| P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | f 侧 FXCORR_KURTOSIS=1 触发（mode.cpp:1403 API 现成），补 averageFrequency 分支（core.cpp:1181-1187/1378-1429） |
+| P10 | 输入格式补齐 | 功能未迁移 | f 侧 reader：Mark5B（mark5bfile.cpp:412-533）→ LBA 家族 → 其余（VLBA/K5VSSP/MKIV/KVN5B/CODIF）；多线程 VDIF corner-turn 数据重组（vdiffile.cpp:348-473，datamuxer 已在 common）；硬件访问（StreamStor/Mark6）不迁移 |
+| P11 | f 侧 reader 语义补全 | 语义等价 | valid flag 跨段续接子句（datastream.cpp:604-605）、subint 内延迟中途重对齐（datastream.cpp:538-574）；长积分高精度场景才暴露 |
+
+上游死代码不迁移：FILTERBANK USED/PROCESSING METHOD（configuration.cpp:1558-1574）、dumplta/ltachannels、checkData（datastream.cpp:1953 `#if 0`）、相位阵 TIMESERIES 输出（paoutputformat/padomain 无消费者）、MPI 分段缓冲回填。
 
 ## 6. 验收标准（第一版）
 

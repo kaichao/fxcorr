@@ -57,6 +57,8 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `test2b.vex` / `test2b.v2d` | 2 band 测试配置（test.vex 加 205MHz 第 2 band），fxcorr-sim 多 band 验证资产 |
 | `test-pcal.vex` / `test-pcal.v2d` | 带 phasecal 的测试配置（PHASE_CAL_DETECT tone 列表 `2:3:4:5`、phaseCalInt=1 → .input 4 tones 201-204MHz），PCAL_*.pcal 对拍验证资产（algo-plan P0） |
 | `cmp_swin.py` | SWIN 逐记录比较（74 字节头 + 可见度复数），对拍工具（impl-plan 验收标准 2） |
+| `gen_test_zoom.py` | 从无 zoom 的 .input 生成 test-zoom.input + EXECUTE TIME 截断变体（P4a zoom 检验资产，见 fxcorr-x CLAUDE.md 测试节） |
+| `cmp_swin_zoom.py` | 按 SWIN 头 freqindex 分拆多 nchan 记录的逐记录比较（zoom 对拍用，同文件多 freq 各不同 nchan） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 

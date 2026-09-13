@@ -9,18 +9,26 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 
 ## 优先级
 
-排序依据：**先补齐数据链路完整性（P0/P1，成本低、科学产出与可观测性受损），再补算力（P2/P3，P2 进程级先于 P3 线程级：隔离简单、可跨节点），后补科学功能（P4 按改动量递增），最后新能力（P5 依赖真实采集环境）**。
+排序依据（2026-09-13 调整）：**V2 只做 mpifxcorr 串行算法的迁移与完善——先补齐数据链路完整性（P0/P1，成本低、科学产出与可观测性受损），再科学功能（P4、P6-P8 按改动量递增），再监控消息（P9）、输入格式（P10）、reader 细节（P11）；并行化（P2/P3）与流式新能力（P5）挪 V3（README：模块级 OpenMP / 按需 GPU，并行与流式阶段）**。
 
 | 优先级 | 改进项 | 动机分类 |
 |---|---|---|
 | P0 | PCAL_*.pcal 文件生成 | 功能未迁移 |
 | P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 |
-| P2 | 多 x 子集并行 | 串行环境新变化 |
-| P3 | 多线程（f/x 进程内并行） | 串行环境新变化 |
+| P2 | 多 x 子集并行 | 串行环境新变化（⤴ V3，2026-09-13 挪出） |
+| P3 | 多线程（f/x 进程内并行） | 串行环境新变化（⤴ V3，2026-09-13 挪出） |
 | P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 |
-| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） |
+| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力，⤴ V3，2026-09-13 挪出） |
+| P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 |
+| P7 | 交叉极化自相关（WRITE AUTOCORRS） | 功能未迁移 |
+| P8 | 相位阵频率域加权合并 | 功能未迁移 |
+| P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 |
+| P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 |
+| P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 |
 
-对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P2/P3 与单 x 全量结果全等。
+P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，详细设计待后续在本文补节（按 P0/P1 相近方式细化后再实施）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
+
+对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P6/P8 SWIN 对拍、P2/P3（V3 实现时）与单 x 全量结果全等。
 
 ---
 
@@ -301,28 +309,197 @@ f 侧 FFT 批并行、x 侧基线循环并行，近线性加速（受内存带�
 
 ## P4：科学功能补齐（zoom band → 多相位中心 → 脉冲星 binning）
 
-三项均为功能未迁移（上游有、V1 不支持），按科学需求与改动量排序。
+三项均为功能未迁移（上游有、V1 不支持），按改动量递增排序。共同格局（2026-09-13 完整审查上游后确认）：**f 侧近乎零改动**（zoom 只需 autocorr.bin 补段，多相位中心与 pulsar 完全不涉及 f）——因为 zoom 频谱是 Mode 内的父 band 切片（getMode 工厂已算好）、多相位中心与 pulsar 全是基线级处理；**x 侧为改动主体**；configuration / model / polyco / visibility 四个零改造迁移组件已把解析、结果预算（thread/coreresult 均含 bin 与相位中心因子，configuration.cpp:2347/2365/2410）、写盘循环（多 .s/.b 文件、PULSAR BIN 字段、sourceindex）全部备好。
 
-### P4a：zoom band
+### P4a：zoom band（✅ 2026-09-13 实施完成）
 
-- **动机**：功能未迁移。上游 x 侧从父 recorded band 切片出 zoom band（core.cpp:1327 区，getDZoomFreqParentFreqIndex）；V1 的 f 落全带 .sp 已备好数据，x 侧按 .input ZOOM FREQ 定义切片即可，无数据格式变更。
-- **要解决的问题**：频谱线观测需要 zoom band 高分辨率输出，V1 无法做谱线科学。
-- **预期效果**：x 侧支持 .input ZOOM FREQ 定义，从 .sp 父 band 切片出 zoom band；同时补 zoom 的 pcal/autocorr 缩放（visibility.cpp:664 的 data-contribution 缩放，P0 遗留项）。
-- **设计**：x 侧 uvshift 后按 zoom 定义切片（对照 core.cpp:1327-1356）；对拍用含 ZOOM 的 .input 变体与 mpifxcorr 基准比 SWIN。
+#### 是什么
+
+观测整个宽带、只输出其中若干**窄子带的高分辨率频谱**（谱线巡天典型需求）。zoom 不是独立 FFT：zoom 窄带是 freq table 里的独立频率项，其频谱就是父 band 频谱数组的指针切片。
+
+#### 动机分类
+
+功能未迁移。V1 的 .sp 只落 recorded band、autocorr.bin 只落 recorded band，x 侧无 zoom 输出。
+
+#### 要解决的问题
+
+频谱线观测需要高分辨率窄带输出，V1 无法做谱线科学。
+
+#### 预期效果
+
+x 侧支持 .input ZOOM FREQ 定义、出 zoom SWIN；f 侧 autocorr.bin 补 zoom 段；无 zoom 配置行为与 V1 逐位一致（对拍回归保证）。
+
+#### 设计
+
+**上游数据链路全景**：
+
+1. .input DATASTREAM 段：`NUM ZOOM FREQS` → 每组 `ZOOM FREQ INDEX j`（freq table 窄带项）+ `NUM ZOOM POLS j` → `ZOOM BAND k POL/INDEX`（INDEX 指向 local zoom freq 序号）。
+2. Configuration 解析（configuration.cpp:1702-1753）：按频域包含关系自动找父 recorded band（zoomfreqparentdfreqindices），算 `zoomfreqchanneloffset = (zoom lowedge − parent lowedge)/parent_bw × parent_nchan`（:1733）。
+3. Mode 构造（getMode 工厂，configuration.cpp:948 等）：传 numzoombands；zoom 频谱 = 父 band 频谱 `[channeloffset]` 起的指针（mode.cpp:184-195），zoom 自相关同理切片（mode.cpp:374-390）。`getFreqs(nrecorded+l, subloop)` 直接返回切片。
+4. 基线表（configuration.cpp:1098-1145）：zoom band 按独立 band 参与基线（bandindex = nrecorded+zoom 序、polpairs 用 zoombandpols、freq 映射用 zoomfreqtableindices）。
+5. XMAC（core.cpp:896-968）：`getBDataStream1BandIndex` 返回 ds 内 total band 序，getFreqs 拿到 zoom 切片，与普通 band 无差别参与 XMAC；**权重仍取 recorded band 序**（getBDataStream1RecordBandIndex → getDataWeight(父 band)），zoom 权重即父权重。
+6. autocorr/acweight（core.cpp:1273-1302、1314-1339）：averageAndSendAutocorrs 遍历 total bands，getAutocorrelation 已含 zoom 切片；**zoom 的 acweight 从父 band 取**（k≥nrecorded 时按 parentfreqindex+pol 匹配 recorded band 的 getWeight，:1324-1339）。
+7. pcal：copyPCalTones 只遍历 recorded bands（core.cpp:1141-1153），zoom 无独立 pcal；PCAL 文本 zoom 无 matching autos 时 acw=1.0（visibility.cpp:664，P0 已实现于 f 侧 pcaltextwriter.cpp:93）。
+8. 写盘：zoom band 作为独立 freq（targetfreqindex = zoom freq）正常出 SWIN，无特殊分支。
+
+**f/x 实现对应表**：
+
+| 上游环节 | 上游位置 | fxcorr 落点 |
+|---|---|---|
+| zoom 解析（parent/offset） | configuration.cpp:1702-1753 | 零改造（已迁移） |
+| Mode zoom 频谱切片 | mode.cpp:184-195 | 零改造（getMode 工厂现成） |
+| zoom autocorr 落盘 | core.cpp:1273-1302 | f：FEngineWriter 写盘循环扩 numtotalbands |
+| zoom acweight 父 band 映射 | core.cpp:1324-1339 | f：autocorr.bin 的 weight 段换算（x 侧只见结果） |
+| XMAC 读 zoom 谱 | core.cpp:908-912 | x：SpReader 加 zoom 视图（切片） |
+| uvshift/频谱平均 | core.cpp:1605+ | x：零改造（freq 表驱动） |
+| addAutocorrs | core.cpp:1273-1302 | x：Integrator::addAutocorrs 扩 total bands |
+| pcal | core.cpp:1141-1153 | 无改动（zoom 无 pcal） |
+
+**关键点（易错，实施必读）**：
+
+1. **.sp 不新增文件**：zoom 视图 = 同一父 band .sp、从 channeloffset 起读 zoomfreq 的 nchan（data-spec:250 已约定"x 侧切片"方向）。SpReader 需支持切片视图（构造加 channeloffset/nchan，或读入后返回偏移指针）。
+2. **band 序号两套语义**：XMAC 的 `getBDataStream1BandIndex` 是 ds 内 total band 序（≥nrecorded 即 zoom），而 .sp 文件名 `band_XX.sp` 是 recorded band 序——SpReader 映射：band<nrecorded → 对应 .sp 全文；band≥nrecorded → 父 .sp 的 channeloffset 切片。`getBDataStream1RecordBandIndex` 恒为 recorded band 序（权重取父 .sp 的 weights），**accumulateWeights 零改动**。
+3. **autocorr.bin 头 nbands 扩到 getDNumTotalBands**：现有头每 band (bandindex, nchan)，bandindex 用 ds 内 total band 序、nchan = zoomfreq 的 nchan；x 侧 addAutocorrs 的 nbands 校验从 getDNumRecordedBands 改为 getDNumTotalBands，累加循环不变（weight 已是 f 侧换算后的值）。
+4. **zoom 的 acbuffer 尺寸**：addAutocorrs 的 acbuf 现按第一个 recorded band 分配，zoom 的 nchan 可能更大——改按 total bands 的最大 nchan 分配。
+5. **退化保证**：无 zoom 时 numtotalbands==numrecordedbands、所有新分支不进（条件结构与上游一致），V1 对拍回归不漂移。
+6. **频率映射断言**：uvshiftAndAverageBaselineFreq 的 `assert(targetfreqchannels == 0.5+bandwidthoftarget/bandwidth×freqchannels)` 对 zoom→zoom 映射天然成立，无需改动。
+
+#### 验证方法
+
+- 自造小配置（1 父 band 64MHz 4096ch + 1 zoom 2MHz 128ch，.input 照 ma008_1.input 的 ZOOM 段语法）生成 VDIF：mpifxcorr 基准 vs fxcorr 对拍，zoom SWIN 逐记录全等（可见度 <1e-6、weight 逐位一致）。
+- autocorr.bin 头自检（nbands、bandindex、nchan）+ zoom 自相关峰值落位。
+- 无 zoom 配置回归：test 配置 6/6 对拍不变。
+
+**检验操作步骤**：可复现命令见 `applications/fxcorr-x/CLAUDE.md` 测试节"zoom（P4a）检验步骤"（make_testdata.sh 造数据 → `fxcorr/test/gen_test_zoom.py` 生成 test-zoom.input + mpi2 截断变体 → f/x 链路与 mpifxcorr 基准各跑一遍 → `fxcorr/test/cmp_swin_zoom.py` 按 freqindex 分拆对拍）；验收判据：zoom 12/12 ALL OK、无 zoom 回归 6/6。
+
+#### 验证结果（2026-09-13 实施完成）
+
+- **zoom 对拍**（/root/fxcortest/zoom/，test.input 变体 test-zoom.input：父 band 4MHz/4096ch + zoom 201.5MHz 起 1MHz/1024ch，tone 1.5MHz 落 zoom 中心）：mpifxcorr 基准 vs fxcorr **12/12 记录全等**（freq 0 主带 6 条 + freq 1 zoom 6 条 = 2 积分 × (互相关 1 + 自相关 2 站×2 band)；头字段 bl/mjd/sec/src/frq/pol/pbin/weight/uvw 与可见度复数 max rel 0.00e+00）。
+- **无 zoom 回归**：原 test.input 配置对拍 6/6 全等（cmp_swin.py）。
+- 实施中实测的两个坑（已入 fxcorr-x CLAUDE.md 关键要点）：x 侧时间戳校验循环必须含 zoom 视图（否则 specbuf 恒 0）；.input 的 BASELINE 段 D/STREAM A/B BAND 行 key 序号是 pol product 序号。
+- zoom 的 XMAC/uvshift/accumulateWeights 均零改动（config 表驱动 + recordbandindex 父映射现成）；f 侧 Mode 零改动（getMode 工厂传 numzoombands）。
 
 ### P4b：多相位中心
 
-- **动机**：功能未迁移。上游 uvshiftAndAverage 按 phase centres 做多套 uvshift（core.cpp:745/1090 区）；V1 x 侧 Model 已 per-source 求 uvw（SWIN 头 sourceindex 已写），缺的是 uvshift 多套展开。
-- **要解决的问题**：in-beam 多源观测需要一次相关出多套源结果，V1 单相位中心做不了。
-- **预期效果**：x 侧支持 .input 多 SOURCE 相位中心，输出多套 .s 文件（SWIN 文件命名 .s<相位中心> 已支持）。
-- **设计**：x 侧 uvshift 展开多相位中心循环 + baselineshiftdecorr 权重（对照 core.cpp:745-752、1090-1098）。
+#### 是什么
+
+同一次相关**同时覆盖视场内多个天体**：所有源共用一次解包/FFT（f 侧零成本共享），基线级按各源相对指向中心的差分延迟做频域相位旋转（rotator），每源一套独立可见度（SWIN 多套 .s 文件，源序号进 SWIN 头）。
+
+#### 动机分类
+
+功能未迁移。V1 的 uvshiftAndAverageBaselineFreq 是删掉 rotator/decorr 段的单相位中心简化版，main.cpp 对 getNumPhaseCentres>1 直接报错。
+
+#### 要解决的问题
+
+in-beam 多源观测（巡天多源同波束、邻近双星）需要一次相关出多套源结果，V1 只能单源。
+
+#### 预期效果
+
+x 侧支持 .input 多 SOURCE 相位中心（.im 的 NUM PHASE CENTRES 驱动），一次相关出多套 .s 文件（源序号/SWIN 头 sourceindex/UVW 头按相位中心）；单源配置路径与 V1 逐位一致。
+
+#### 设计
+
+**上游数据链路全景**：
+
+1. 相位中心来源：.im 文件 `NUM PHASE CENTRES` + 逐行 SOURCE index（model.cpp:507-513），指向中心单独存（pointingcentre），`getNumPhaseCentres(scan)` = 相位中心个数（不含指向中心）；scansourceindex 0 = 指向中心、1..N = 各相位中心。
+2. 差分延迟（core.cpp:1636-1672，仅 numphasecentres>1 时）：指向中心延迟 = `calculateDelayInterpolator(scan, offsets[1]+(offsets[2]+nsoffset)/1e9, 1µs, 1, ant, 0, 1)`（scansourceindex=0，order=1 返 delay+rate）；每相位中心 s 同法取 scansourceindex=s+1；applieddelay = 相位中心延迟 − 指向中心延迟 + 几何 rate 修正（`applieddelay += applieddelay×指向中心rate`，:1663-1664）；differentialdelay[s][1] = applieddelay2−applieddelay1、[s][0] = rate 差。
+3. rotator 生成（core.cpp:1697-1767，仅多相位中心）：chanfreqs 按 LSB/USB 排列填 rotatorlength = rotatestridelen + numstrides×rotatesperstride 个频率；applieddelay≠0 时 argument = (applieddelay×chanfreq + edgeturns) 取小数×2π（edgeturns = applieddelay×lofrequency 取小数，仅第一段带），vectorSinCos + RealToComplex 成 rotator 复向量。
+4. 应用（core.cpp:1770-1815）：每相位中心 s、每 xmac stride、每 polpair：srcpointer（threadcrosscorrs 或 pulsaraccumspace）先 `vectorMul(rotator段, 每 rotatestridelen 分块)` + `vectorMulC(rotator标量段)` 进 rotated，srcpointer = rotated；后续频谱平均/累积与单相位中心同（:1817-1870）。
+5. 结果区步进（core.cpp:1878）：每相位中心 coreindex += corebinloop×numpolproducts×targetfreqchannels/targetchannelinc（V1 版跳过此步进）。
+6. decorr（core.cpp:1886-1923）：timesmeardecorr = sin(maxphasechange/2)/(maxphasechange/2)（maxphasechange = 2π×differentialdelay[s][0]×(nswidth/1000)×lofrequency）；delaydecorr = 1−|differentialdelay[s][1]|/delaywindow（delaywindow = nchan/bandwidth）；baselineshiftdecorr[freq][baseline][s] += nswidth×timesmeardecorr×delaydecorr（负值置 0 + shifterrorcount 告警）。
+7. floatresults 写段：bweight 段之后追加 shiftdecorr 段（getCoreResultBShiftDecorrOffset，core.cpp:1090-1105）。
+8. 写盘（visibility.cpp:840-888，零改造）：每相位中心 s → bin → pol 循环，weight = baselineweights×baselineshiftdecorrs[s]（>1 相位中心时），UVW = interpolateUVW(scan, t, ant1, ant2, **s+1**)，文件 .s%04d.b%04d、sourceindex = getPhaseCentreSourceIndex(scan, s)；自相关段多相位中心时 sourceindex 用指向中心（:896-898）。
+9. 预算：coreresultblocksize 已含 maxconfigphasecentres 因子（configuration.cpp:2410，零改造；subintresults 分配 getCoreResultLength 已含，无需改）。
+
+**f/x 实现对应表**：
+
+| 上游环节 | 上游位置 | fxcorr 落点 |
+|---|---|---|
+| 相位中心解析 | model.cpp:507-513 | 零改造（config.getModel() 已用） |
+| 差分延迟计算 | core.cpp:1636-1672 | x：XmacEngine::uvshiftAndAverageBaselineFreq（构造加 Model*） |
+| rotator 生成 | core.cpp:1697-1767 | x：同上（工作区加 chanfreqs/rotator/rotated/argument） |
+| 旋转+频谱平均+累积 | core.cpp:1770-1878 | x：同上 |
+| decorr 累加 | core.cpp:1886-1923 | x：同上（baselineshiftdecorr 数组） |
+| shiftdecorr 写段 | core.cpp:1090-1105 | x：copyBaselineWeights 尾部 |
+| 写盘 | visibility.cpp:840-888 | 零改造（writedata 自动多 .s 文件） |
+| 结果预算 | configuration.cpp:2410 | 零改造 |
+
+**关键点（易错，实施必读）**：
+
+1. **单相位中心退化必须逐位一致**：上游的 delay 计算/rotator 生成/decorr 段全部由 `getNumPhaseCentres>1` 条件包裹（core.cpp:1636/1699/1887），单源路径与 V1 现实现完全相同——新代码照同一条件结构，对拍回归 6/6 保证不漂移。
+2. **工作区尺寸**（照 core.cpp:421-434 scratchspace 分配）：chanfreqs f64×maxrotatestrideplussteplength（= rotatestridelen + maxchan/rotatestridelen，取全配置最大）、rotator cf32 同长、argument f32×3 同长、rotated cf32×maxchan；differentialdelay 临时表（3×numphasecentres×2 double）。
+3. **时间基准**：calculateDelayInterpolator 的 offsettime = offsets[1] + (offsets[2]+nsoffset)/1e9，scan 相对系——fxcorr-x 每 subint 已算 expectedsec/expectedns（main.cpp），直接传入；勿用当日秒系（那是 polyco 的系）。
+4. **rotator 分段**：rotatestridelen 内带 edgeturns、外不带；先段向量 vectorMul 再标量 vectorMulC，顺序照抄 core.cpp:1800-1804。
+5. **scansourceindex 语义**：0 = 指向中心、s+1 = 第 s 个相位中心（延迟与 UVW 两处一致，visibility.cpp:857）。
+6. **decorr 段结果区布局**：floatresults 的 bshiftdecorr 段在 bweight 段之后、每 (freq,baseline) 连续 numphasecentres 个 f32——offset 体系照 getCoreResultBShiftDecorrOffset，勿手算。
+7. **x 侧无锁**：上游 viscopylocks 是线程并行产物，fxcorr-x 单线程直接省略（V1 已如此）。
+
+#### 验证方法
+
+- 自造多源 .input/.im（2-3 相位中心、.im 的 NUM PHASE CENTRES + SOURCE 列表）：mpifxcorr 基准 vs fxcorr 对拍，每相位中心 .s0000/.s0001… 逐记录全等（含 sourceindex、decorr 后 weight、UVW 头）。
+- 单源回归：test 配置 6/6 对拍不变（退化路径）。
 
 ### P4c：脉冲星 binning
 
-- **动机**：功能未迁移。上游按 polyco 计算每个 FFT 块的 bin、每 bin 一套累积空间（core.cpp:437-458，pulsarscratchspace/pulsaraccumspace）；f 侧 .sp 已带每 FFT 块时间戳（scan/sec/ns），**无需改数据格式**。
-- **要解决的问题**：脉冲星门控观测需要按脉冲相位分 bin，V1 无法做。
-- **预期效果**：x 侧按 .input BIN 表 + polyco 把每个积分的样本分到各 bin，分别累积输出 .b 文件（SWIN 文件命名 .b<bin> 已支持）。
-- **设计**：x 侧 uvshift 前按 FFT 块时间映射 bin，累积与输出按 bin 展开（对照 core.cpp:437-458、988/1056 的 currentpolyco 传递）。三项中模型/数据流改动最大，排最后。
+#### 是什么
+
+按**脉冲相位把每个 FFT 块的互相关分到 N 个 bin 分别累积**：polyco 多项式预言到达时间 → 每 FFT 块算脉冲相位 → bin 号 → XMAC 结果分箱累积 → 每 bin 一套可见度（SWIN .b 文件）。可选 SCRUNCH OUTPUT：先分 bin 累加、uvshift 前按 bin 权重折叠回单 bin（剥离缓变 RFI）。
+
+#### 动机分类
+
+功能未迁移。V1 的 xmac.cpp 只有 non-pulsar 分支，main.cpp 对 pulsarBinOn 直接报错。
+
+#### 要解决的问题
+
+脉冲星门控/计时观测需要按脉冲相位分箱，V1 无法做。
+
+#### 预期效果
+
+x 侧支持 .input PULSAR BINNING + pulsar 配置文件，出 .b 文件（SCRUNCH 两种模式都支持）；无 pulsar 配置路径与 V1 逐位一致。
+
+#### 设计
+
+**上游数据链路全景**：
+
+1. 触发与解析：.input `PULSAR BINNING TRUE` → `PULSAR CONFIG FILE`（pulsar 配置：NUM POLYCO FILES/POLYCO FILE n/NUM PULSAR BINS/SCRUNCH OUTPUT/BIN PHASE END n/BIN WEIGHT n；每 bin 结束相位 0..1 递增）。Configuration::processPulsarConfig（configuration.cpp:3382+，已迁移）经 mpiGetFileContent（非 MPI = fopen 读全文件，configuration.cpp:107）读 polyco 文件、构造 configs[c].polycos 数组。
+2. currentpolyco 选择（core.cpp:496-507）：sec = startseconds + getScanStartSec(scan, startmjd, startseconds) + offsets[1] + offsets[2]/1e9（**当日秒系**）；`Polyco::getCurrentPolyco(configindex, startmjd, sec/86400, polycos, numpolycos, false)` + setTime；NULL 时 cfatal（配置校验阶段 configuration.cpp:3186 也会提前拦）。
+3. bins 计算（core.cpp:803-812）：每 fftloop 每 fftsubloop：i = fftloop×numbufferedffts + fftsubloop；offsetmins = i×blockns/6e10；`currentpolyco->getBins(offsetmins, bins[fftsubloop])` 填每通道 bin 号（bins[fftsubloop][f][chan]）。
+4. XMAC pulsar 分支（core.cpp:914-957）：vectorMul_cf32 进 pulsarscratchspace；非 scrunch：按 destbin = bins[fftsubloop][f][destchan] 累积 threadcrosscorrs（cindex = resultindex + (destbin×polpairs+p)×xmacstridelength + l），baselineweight[f][destbin][j][p] += w1×w2/**freqchannels**；scrunch：累积 pulsaraccumspace[f][x][j][0][p][destbin][l]，baselineweight[f][0][j][p] += bweight×binweights[destbin]（**仅 binweights>0 的 bin**，:938-939）。
+5. resultindex 步进（core.cpp:974-975）：pulsar 非 scrunch 时 += polpairs×numpulsarbins×xmacstridelength（与 populateResultLengths 的 thread 预算一致）。
+6. scrunch 折叠（core.cpp:1438-1475）：uvshiftAndAverage 开头，pulsaraccumspace 每 (freq,stride,base,pol,bin) 就地乘 binweights[k]（vectorMulC_f32_I）。
+7. uvshift bin 展开（core.cpp:1626-1631、1781-1789）：threadbinloop = numpulsarbins；corebinloop = numpulsarbins（scrunch 时 1）；coreoffset = ((b×polpairs+k)×targetfreqchannels + x×xmacstridelength)/targetchannelinc；srcpointer = threadcrosscorrs（或 scrunch 折叠后的 pulsaraccumspace）。
+8. bweight 段（core.cpp:1080-1087）：binloop 循环写 floatresults；pulsar 时 accumulateWeights 的非 pulsar 分支（:1005-1052）整体跳过（权重已在 XMAC 内更新）。
+9. 写盘（visibility.cpp:1369+、851-886，零改造）：Visibility 构造时 pulsar 初始化（getCurrentPolyco 按积分起点当日秒系、binweightdivisor[0]=Σ getBinWeightTimesWidth 或每 bin 一个 = getBinWeightTimesWidth×fftsperintegration）；writedata binloop=numbins，baselineweights 归一 /(fftsperintegration×getBinWidth(b))（binloop>1）或 /(fftsperintegration×binweightdivisor[0])（scrunch）；SWIN 头 PULSAR BIN 字段、文件 .b%04d。
+10. 预算：threadresult（configuration.cpp:2347/2365）与 coreresult（:2410）均含 bin 因子，零改造。
+
+**f/x 实现对应表**：
+
+| 上游环节 | 上游位置 | fxcorr 落点 |
+|---|---|---|
+| pulsar 配置解析（polyco 装载） | configuration.cpp:3382+ | 零改造（已迁移，非 MPI 读文件） |
+| currentpolyco 选择/setTime | core.cpp:496-507 | x：main 每 subint 起点 |
+| bins 计算 | core.cpp:803-812 | x：XmacEngine::xmacBatch 前（每 fftloop） |
+| XMAC pulsar/scrunch 分支 | core.cpp:914-957 | x：XmacEngine::xmacBatch |
+| scrunch 折叠 | core.cpp:1438-1475 | x：uvshiftAndAverage 开头 |
+| uvshift bin 展开 | core.cpp:1626-1631/1781-1789 | x：uvshiftAndAverageBaselineFreq |
+| bweight bin 循环 | core.cpp:1080-1087 | x：copyBaselineWeights |
+| 写盘/预算 | visibility.cpp:1369+/851-886 | 零改造 |
+
+**关键点（易错，实施必读）**：
+
+1. **两套时间系勿混**：polyco 的 setTime/getBins 用**当日秒系**（core.cpp:497 的 sec 含 job 起点 + scan 偏移），bins 的 offsetmins 是 subint 内 FFT 序号×blockns/6e10（i 从 0 起，fxcorr-x 无 startblock）；rotator/delay 用 scan 相对系（见 P4b）——同一次 uvshift 内两种系并存，照上游各自取数。
+2. **bweight 的 freqchannels 因子**：pulsar 分支 bweight = w1×w2/freqchannels（core.cpp:924/945），non-pulsar 分支不除（:1042）——fxcorr-x 现实现的 accumulateWeights 是 non-pulsar 版，pulsar 时改为 XMAC 内更新、跳过 accumulateWeights。
+3. **scrunch 负权重语义**：负 binweight 的 bin 参与数据折叠但不进 baselineweight（剥离缓变信号），照抄 :938-939 的 `if(binweights[destbin] > 0.0)`。
+4. **单 polyco 假设**：pulsaraccumspace 源槽恒 0（"forced to single pulsar ephemeris"，:928/1458/1584）；getCurrentPolyco 返回子 polyco 之一、多子 polyco 跨时段自动切换（按时刻匹配）。
+5. **Visibility 的 polyco 时刻**：visibility.cpp:1369 按积分起点（expermjd + experseconds + scan 偏移 + currentstartseconds）选 polyco——x 侧 Visibility 构造的 initsec/initns 已含 batch 偏移，零改造正确。
+6. **文件路径**：pulsar config 与 polyco 文件名按 cwd 相对解析（非 MPI fopen），run_batch.sh 的 cwd=workdir 与 .input DATA TABLE 同语义；.input 里 PULSAR CONFIG FILE 也是相对路径。
+7. **scrunch 折叠时序**：uvshiftAndAverage 开头对 accumspace 就地乘 binweights，之后 corebinloop=1 走单 bin 路径；bins 计算照跑（getBins 无条件调用）。
+8. **退化保证**：pulsarBinOn=false 时新分支全不进（条件结构照上游），V1 对拍回归不漂移。
+
+#### 验证方法
+
+- 自造小配置：PULSAR BINNING TRUE + 2-4 bins + 覆盖观测时段的短 polyco（自造 .polyco）+ SCRUNCH OUTPUT 两种取值：mpifxcorr 基准 vs fxcorr 对拍，各 .b 文件逐记录全等（含 PULSAR BIN 头字段、weight 归一）。
+- 无 pulsar 回归：test 配置 6/6 对拍不变。
 
 ---
 

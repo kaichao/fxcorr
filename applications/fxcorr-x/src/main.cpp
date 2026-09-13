@@ -184,7 +184,9 @@ int main(int argc, char **argv)
 	// size is read from the file header by Integrator::addAutocorrs
 	double blockns = (double)subintns/(double)blockspersend;
 
-	// open one SpReader per (datastream, recorded band)
+	// open one SpReader per (datastream, band) in datastream-total band order:
+	// recorded bands read their band_XX.sp whole, zoom bands are a channel-slice
+	// view of the parent recorded band's .sp (P4a, data-spec 5.3)
 	int numdatastreams = config.getNumDataStreams();
 	vector<vector<SpReader *> > readers(numdatastreams);
 	vector<string> autocorrFiles(numdatastreams);
@@ -193,15 +195,43 @@ int main(int argc, char **argv)
 		string station = config.getDStationName(configindex, ds);
 		string sdir = workdir + "/fengine/" + batchid + "/" + station;
 		int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
-		readers[ds].resize(nrecordedbands);
-		for(int band=0;band<nrecordedbands;band++)
+		int ntotalbands = config.getDNumTotalBands(configindex, ds);
+		readers[ds].resize(ntotalbands);
+		for(int band=0;band<ntotalbands;band++)
 		{
 			char filename[32];
-			snprintf(filename, sizeof(filename), "band_%02d.sp", band);
-			readers[ds][band] = new SpReader(sdir + "/" + filename);
+			int freqindex;
+			if(band < nrecordedbands)
+			{
+				snprintf(filename, sizeof(filename), "band_%02d.sp", band);
+				freqindex = config.getDRecordedFreqIndex(configindex, ds, band);
+				readers[ds][band] = new SpReader(sdir + "/" + filename);
+			}
+			else
+			{
+				// zoom band: parent recorded band .sp with a channel slice
+				int localzoom = config.getDLocalZoomFreqIndex(configindex, ds, band-nrecordedbands);
+				int parentfreqindex = config.getDZoomFreqParentFreqIndex(configindex, ds, localzoom);
+				int parentband = -1;
+				for(int l=0;l<nrecordedbands;l++)
+				{
+					if(config.getDLocalRecordedFreqIndex(configindex, ds, l) == parentfreqindex &&
+					   config.getDZoomBandPol(configindex, ds, band-nrecordedbands) == config.getDRecordedBandPol(configindex, ds, l))
+					{
+						parentband = l;
+						break;
+					}
+				}
+				if(parentband < 0)
+					return fail(monitor, "fxcorr-x: no parent band for zoom band " + to_string(band) + " of station " + station);
+				snprintf(filename, sizeof(filename), "band_%02d.sp", parentband);
+				freqindex = config.getDZoomFreqIndex(configindex, ds, localzoom);
+				readers[ds][band] = new SpReader(sdir + "/" + filename,
+					config.getDZoomFreqChannelOffset(configindex, ds, localzoom),
+					config.getFNumChannels(freqindex));
+			}
 			if(!readers[ds][band]->ok())
 				return fail(monitor, "fxcorr-x: cannot read " + sdir + "/" + filename);
-			int freqindex = config.getDRecordedFreqIndex(configindex, ds, band);
 			if(readers[ds][band]->numChannels() != config.getFNumChannels(freqindex) ||
 			   readers[ds][band]->blocksPerSend() != (u32)blockspersend ||
 			   readers[ds][band]->numBufferedFFTs() != (u32)numbufferedffts ||
@@ -281,8 +311,9 @@ int main(int argc, char **argv)
 		int expectedns = (int)((sreld - (double)expectedsec)*1.0e9 + 0.5);
 		for(int ds=0;ds<numdatastreams;ds++)
 		{
-			int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
-			for(int band=0;band<nrecordedbands;band++)
+			// every band view (recorded + zoom) must read its subint; zoom
+			// views share the parent .sp so their timestamps are identical
+			for(size_t band=0;band<readers[ds].size();band++)
 			{
 				int rsec, rns, rscan;
 				if(!readers[ds][band]->readSubint(s, rscan, rsec, rns))

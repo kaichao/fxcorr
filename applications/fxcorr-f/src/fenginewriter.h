@@ -61,10 +61,11 @@ private:
 	int nsubints;
 
 	int nrecordedbands;
+	int ntotalbands;	// recorded + zoom (autocorr.bin covers all of them)
 	int blockspersend;
 	int flagwords;
 	int acblocks;		// FFTs per autocorrelation averaging batch
-	int autocorrchannels;	// width after averageFrequency()
+	std::vector<int> acbandnchan;	// per total band, autocorr width after averageFrequency()
 	bool haspcal;
 
 	std::vector<FILE *> spfiles;

@@ -176,9 +176,9 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 			fclose(file);
 			continue;
 		}
-		if((int)nbands != config->getDNumRecordedBands(configindex, ds))
+		if((int)nbands != config->getDNumTotalBands(configindex, ds))
 		{
-			cerr << "addAutocorrs: " << autocorrFiles[ds] << " has " << nbands << " bands, config expects " << config->getDNumRecordedBands(configindex, ds) << endl;
+			cerr << "addAutocorrs: " << autocorrFiles[ds] << " has " << nbands << " bands, config expects " << config->getDNumTotalBands(configindex, ds) << endl;
 			fclose(file);
 			continue;
 		}
@@ -186,6 +186,7 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 		// per-band channel counts; each ac batch record is sum over bands of (nchan*8 + 4) bytes
 		int *bandnchan = new int[nbands];
 		long long recordsize = 0;
+		int maxnchan = 0;
 		for(int k=0;k<(int)nbands;k++)
 		{
 			u32 bandindex, nchan;
@@ -198,6 +199,8 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 			}
 			bandnchan[k] = (int)nchan;
 			recordsize += (long long)nchan*8 + 4;
+			if((int)nchan > maxnchan)
+				maxnchan = (int)nchan;
 		}
 
 		long long headeroffset = 6 + 4 + 4 + 4 + 4 + (long long)nbands*8;
@@ -216,16 +219,17 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 			continue;
 		}
 
-		// core.cpp:1273-1302 / 1314-1339 with zoom-band-free V1 assumption:
-		// every ac batch record of this subint is accumulated
-		cf32 *acbuf = new cf32[config->getFNumChannels(config->getDRecordedFreqIndex(configindex, ds, 0))];
+		// core.cpp:1273-1302 / 1314-1339: every ac batch record of this subint
+		// is accumulated, over total bands (recorded + zoom); zoom band weights
+		// were already mapped to the parent recorded band by fxcorr-f
+		cf32 *acbuf = new cf32[maxnchan];
 		for(u32 rec=0;rec<acbatches;rec++)
 		{
 			int resultindex = config->getCoreResultAutocorrOffset(configindex, ds);
 			int weightindex = config->getCoreResultACWeightOffset(configindex, ds)*2;
 			for(int k=0;k<(int)nbands;k++)
 			{
-				int freqindex = config->getDRecordedFreqIndex(configindex, ds, k);
+				int freqindex = config->getDTotalFreqIndex(configindex, ds, k);
 				int freqchannels = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
 				if((int)bandnchan[k] != freqchannels)
 				{
