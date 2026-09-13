@@ -514,11 +514,11 @@ if components["vex2difx"]:
 if components["difx2mark4"]:
     apptargets.append(["difx2mark4", difx_version, True,True,True,False])
 if components["fxcorr-f"]:
-    apptargets.append(["fxcorr-f", difx_version, True,False,False,True])
+    apptargets.append(["fxcorr-f", difx_version, True,False,False,False])
 if components["fxcorr-x"]:
-    apptargets.append(["fxcorr-x", difx_version, True,False,False,True])
+    apptargets.append(["fxcorr-x", difx_version, True,False,False,False])
 if components["fxcorr-sim"]:
-    apptargets.append(["fxcorr-sim", difx_version, True,False,False,True])
+    apptargets.append(["fxcorr-sim", difx_version, True,False,False,False])
 if components["difxfilterbank"]:
     apptargets.append(["difxfilterbank", difx_version, True,False,False,True])
 if components["hops"]:

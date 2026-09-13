@@ -58,9 +58,42 @@ make install
 - 包间依赖顺序：先装依赖库再装应用（fxcorr-f/x/sim 依赖 fxcorrcommon、fftw3f；fxcorr-sim 另需 vdifio 的头文件）。
 - 重编译单个应用只改该包：`cd applications/fxcorr-f && make -j8 && make install`。
 
+## 容器构建（fxcorr/docker/，V2）
+
+V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化为 **docker host**（镜像体系见 `v2-plan.md`）。镜像定义在 `fxcorr/docker/`，每镜像一个子目录（Dockerfile + Makefile + README，模式参考 go-scalebox build/）。
+
+| 子目录 | 镜像 | 基础 | 说明 |
+|---|---|---|---|
+| `fxcorr-builder/` | fxcorr-builder | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr` 全量编译 |
+| `fxcorr-base/` | fxcorr-base | debian:13-slim | 运行时依赖 + 从 builder COPY 的 `/usr/local/difx/lib` 与 `/share`（含 difxcalc 星历数据） |
+| `fxcorr-f/` `fxcorr-x/` `fxcorr-sim/` | 同名 | fxcorr-base | 各自 COPY 一个 bin |
+| `difx-tools/` | difx-tools | fxcorr-base | vex2difx + difxcalc + difx2fits，另补 libgsl28/libgslcblas0 运行时 |
+
+构建顺序（在测试机执行，前置 `make sync`）：
+
+```bash
+ssh fxcorr 'cd /root/fxcorr/fxcorr/docker/fxcorr-builder && make build'    # 全量编译，约 30 分钟
+ssh fxcorr 'cd /root/fxcorr/fxcorr/docker/fxcorr-base && make build'        # 依赖 builder:latest
+ssh fxcorr 'cd /root/fxcorr/fxcorr/docker/fxcorr-f && make build'           # 依赖 base:latest（x/sim/difx-tools 同法）
+```
+
+debian:13 与 rocky 9.8 构建差异（已实测解决，详见 v2-plan.md 第 4 节）：
+
+- 容器内不 source setup.bash：`PKG_CONFIG_PATH`、`MPICXX=g++` 必须显式设（install-difx 直接拼接这两个变量，未设崩溃）；补 libgsl-dev、bison、flex。
+- difxcalc11 链接报 `relocation R_X86_64_32S`：仅设 `LDFLAGS=-no-pie`（编译参数保持默认——`-fno-pie` 编译会改变 fxcorr-f 运行行为导致数据越界）。
+- 运行时包名：`libcfitsio10t64`（trixie t64 命名）、`libfftw3-double3`/`libfftw3-single3` 等。
+- 测试机 docker 需 registry mirror（`/etc/docker/daemon.json` 已配 1panel/daocloud/dockerproxy），否则拉 debian:13 超时。
+
+镜像调用：workdir 整体挂载，容器内外绝对路径一致（容器单 batch 对拍 6/6 全等已实测，2026-09-12）：
+
+```bash
+docker run --rm -v <workdir>:<workdir> -w <workdir> fxcorr-f:latest fxcorr-f <batch_id> <station>
+docker run --rm -v <workdir>:<workdir> -w <workdir> difx-tools:latest difxcalc <config>.calc
+```
+
 ## 测试机构建工作流
 
-构建与验证在 Linux 测试机（Rocky 9.8，`ssh fxcorr`，仓库在 `/root/fxcorr`）上做：
+构建与验证在 Linux 测试机（Rocky 9.8，`ssh fxcorr`，仓库在 `/root/fxcorr`）上做。**宿主集成构建仅用于 V1 回归与对拍**（mpifxcorr 需要宿主 MPI）；V2 常规构建走上面的容器构建节：
 
 ```bash
 # 本地：同步仓库到测试机（在 fxcorr/ 工作区目录下）

@@ -16,14 +16,43 @@
 #   workdir   项目根目录（默认 .）
 set -euo pipefail
 
+# 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
+FXCORR_RUN_MODE="${FXCORR_RUN_MODE:-host}"
+
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-if ! command -v fxcorr-f >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
+if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v fxcorr-f >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
 	set +u
 	. "$SCRIPTDIR/../setup.bash"
 	set -u
 fi
+
+# ---- 容器模式执行前缀：工具→镜像映射，workdir 整体挂载、cwd 与宿主直跑一致 ----
+run_in_container()
+{
+	local tool="$1"; shift
+	local img
+	case "$tool" in
+		fxcorr-f)   img=fxcorr-f ;;
+		fxcorr-x)   img=fxcorr-x ;;
+		fxcorr-sim) img=fxcorr-sim ;;
+		vex2difx|difxcalc|difx2fits) img=difx-tools ;;
+		*) echo "fxc: no image for tool $tool" >&2; exit 2 ;;
+	esac
+	local envargs=()
+	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
+	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")
+	docker run --rm "${envargs[@]}" -v "$WORKDIR:$WORKDIR" -w "$(pwd)" "$img:latest" "$tool" "$@"
+}
+fxc()
+{
+	if [ "$FXCORR_RUN_MODE" = "container" ]; then
+		run_in_container "$@"
+	else
+		"$@"
+	fi
+}
 
 usage()
 {
@@ -49,8 +78,12 @@ if [ ! -f "$WORKDIR/batches/$BID.json" ]; then
 	echo "run_batch.sh: $WORKDIR/batches/$BID.json not found" >&2
 	exit 2
 fi
-command -v fxcorr-f >/dev/null 2>&1 || { echo "run_batch.sh: fxcorr-f not found (source setup.bash or install)" >&2; exit 2; }
-command -v fxcorr-x >/dev/null 2>&1 || { echo "run_batch.sh: fxcorr-x not found (source setup.bash or install)" >&2; exit 2; }
+if [ "$FXCORR_RUN_MODE" = "container" ]; then
+	command -v docker >/dev/null 2>&1 || { echo "run_batch.sh: docker not found (FXCORR_RUN_MODE=container)" >&2; exit 2; }
+else
+	command -v fxcorr-f >/dev/null 2>&1 || { echo "run_batch.sh: fxcorr-f not found (source setup.bash or install)" >&2; exit 2; }
+	command -v fxcorr-x >/dev/null 2>&1 || { echo "run_batch.sh: fxcorr-x not found (source setup.bash or install)" >&2; exit 2; }
+fi
 mkdir -p "$WORKDIR/meta"
 
 # ---- ①② 读 batch.json + .input、前置校验、DATA TABLE 软链重做 ----
@@ -167,7 +200,7 @@ mark_status running
 # 逐站 fxcorr-f：任一失败 → status=failed、非 0 退出，不跑后续站（规格③④）
 for st in "${DSTATION[@]}"; do
 	echo "run_batch.sh: fxcorr-f $BID $st" >&2
-	if ! fxcorr-f "$BID" "$st" "$WORKDIR"; then
+	if ! fxc fxcorr-f "$BID" "$st" "$WORKDIR"; then
 		echo "run_batch.sh: fxcorr-f failed for station $st" >&2
 		mark_status failed
 		exit 1
@@ -175,7 +208,7 @@ for st in "${DSTATION[@]}"; do
 done
 
 mkdir -p "$OUTDIR"    # 规格⑤（fxcorr-x 自身也会建，先建无害）
-if ! fxcorr-x "$BID" "$WORKDIR"; then
+if ! fxc fxcorr-x "$BID" "$WORKDIR"; then
 	echo "run_batch.sh: fxcorr-x failed for batch $BID" >&2
 	mark_status failed
 	exit 1

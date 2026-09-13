@@ -16,6 +16,7 @@ RSYNC_EXCLUDES := \
 	--exclude=product/ \
 	--exclude=meta/ \
 	--exclude=work/ \
+	--include='fxcorr/docker/*/Makefile' \
 	--exclude='*/Makefile' \
 	--exclude='*/Makefile.in' \
 	--exclude='*/configure' \

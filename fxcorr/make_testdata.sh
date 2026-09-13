@@ -15,14 +15,43 @@
 #   环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数
 set -euo pipefail
 
+# 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
+FXCORR_RUN_MODE="${FXCORR_RUN_MODE:-host}"
+
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-if ! command -v vex2difx >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
+if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v vex2difx >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
 	set +u
 	. "$SCRIPTDIR/../setup.bash"
 	set -u
 fi
+
+# ---- 容器模式执行前缀：工具→镜像映射，workdir 整体挂载、cwd 与宿主直跑一致 ----
+run_in_container()
+{
+	local tool="$1"; shift
+	local img
+	case "$tool" in
+		fxcorr-f)   img=fxcorr-f ;;
+		fxcorr-x)   img=fxcorr-x ;;
+		fxcorr-sim) img=fxcorr-sim ;;
+		vex2difx|difxcalc|difx2fits) img=difx-tools ;;
+		*) echo "fxc: no image for tool $tool" >&2; exit 2 ;;
+	esac
+	local envargs=()
+	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
+	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")
+	docker run --rm "${envargs[@]}" -v "$WORKDIR:$WORKDIR" -w "$(pwd)" "$img:latest" "$tool" "$@"
+}
+fxc()
+{
+	if [ "$FXCORR_RUN_MODE" = "container" ]; then
+		run_in_container "$@"
+	else
+		"$@"
+	fi
+}
 
 usage()
 {
@@ -72,8 +101,8 @@ mkdir -p "$CFG" "$WORKDIR/batches"
 # vex2difx 的 vex= 路径相对 cwd（非 v2d 目录），.input 也输出到 cwd；
 # 故在 config/ 内跑，与 .v2d/.vex 同目录（.input 内 CALC FILENAME 会绝对化）
 # 前处理工具的进度/警告输出重定向 stderr，脚本 stdout 只留 batch_id（规格⑥）
-[ -f "$CFG/test.input" ] || (cd "$CFG" && vex2difx test.v2d >&2)
-[ -f "$CFG/test.im" ] || (cd "$CFG" && difxcalc test.calc >&2)
+[ -f "$CFG/test.input" ] || (cd "$CFG" && fxc vex2difx test.v2d >&2)
+[ -f "$CFG/test.im" ] || (cd "$CFG" && fxc difxcalc test.calc >&2)
 if [ "$NBATCH" -gt 1 ]; then
 	if [ ! -f "$CFG/test-sim.input" ]; then
 		sed -e 's/^INT TIME (SEC):[[:space:]]*[0-9.]*$/INT TIME (SEC):     0.256/' \
@@ -197,7 +226,7 @@ for bid in "${BATCHES[@]}"; do
 		if [ -s "$WORKDIR/$out" ]; then
 			echo "make_testdata.sh: skip existing $out" >&2
 		else
-			fxcorr-sim "$bid" "$st" "$WORKDIR" ${TONES[@]+"${TONES[@]}"}
+			fxc fxcorr-sim "$bid" "$st" "$WORKDIR" ${TONES[@]+"${TONES[@]}"}
 		fi
 	done
 done

@@ -1,0 +1,14 @@
+# docker 构建上下文排除（fxcorr/docker/* 的构建上下文 = 仓库根）
+.git/
+difx-data/
+
+# 运行时数据目录（不进镜像）
+fxcorr/config/
+fxcorr/batches/
+fxcorr/raw/
+fxcorr/fengine/
+fxcorr/vis/
+fxcorr/product/
+fxcorr/meta/
+fxcorr/work/
+fxcorr/testdata-min/
