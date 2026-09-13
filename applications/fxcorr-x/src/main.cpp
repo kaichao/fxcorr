@@ -17,6 +17,7 @@
 #include "spreader.h"
 #include "xmac.h"
 #include "integrate.h"
+#include "beamengine.h"
 
 using namespace std;
 
@@ -153,11 +154,10 @@ int main(int argc, char **argv)
 	int configindex = config.getScanConfigIndex(scan);
 	if(configindex < 0)
 		return fail(monitor, "fxcorr-x: no configuration for scan 0");
-	if(config.phasedArrayOn(configindex))
-		return fail(monitor, "fxcorr-x: phased arrays are not supported in V1");
 	// P7: cross-polar autocorrelations (maxproducts > 2) are supported; the
 	// autocorr.bin cross-pol section flag decides whether the extra records
-	// are read (Integrator::addAutocorrs)
+	// are read (Integrator::addAutocorrs).  P8: phased arrays are supported
+	// (beam forming early-return branch below, no SWIN output).
 
 	// AC_INIT version of fxcorr-x
 	monitor.status(DIFX_STATE_STARTING, "Version 0.1.0", 0.0, 0, 0, 0.0, 0.0);
@@ -167,7 +167,9 @@ int main(int argc, char **argv)
 	int numbufferedffts = config.getNumBufferedFFTs(configindex);
 
 	// intTime must be an integer multiple of subintns, so that Visibility's
-	// dump grid coincides with the subint grid (offsetnsperintegration == 0)
+	// dump grid coincides with the subint grid (offsetnsperintegration == 0).
+	// Phased array batches write no SWIN and need no intTime grid (P8).
+	if(!config.phasedArrayOn(configindex))
 	{
 		long long inttimens = (long long)(config.getIntTime(configindex)*1.0e9);
 		if(inttimens % (long long)subintns != 0)
@@ -262,6 +264,56 @@ int main(int argc, char **argv)
 			    << batchstartns % subintns << " ns into a " << subintns << " ns subint)";
 			return fail(monitor, oss.str());
 		}
+	}
+
+	// P8: phased array beam forming (algo-plan.md).  No cross-correlation/SWIN
+	// output: upstream has no consumer for the beam data (core.cpp:818-865
+	// fills threadcrosscorrs in a baseline-free layout that
+	// uvshiftAndAverage cannot consume), so beam.bin is defined by fxcorr
+	// (data-spec.md).  Station products (.sp/autocorr.bin) still come from
+	// fxcorr-f as usual.  The beam branch needs no intTime grid.
+	if(config.phasedArrayOn(configindex))
+	{
+		BeamEngine beam(&config, configindex, workdir, batchid, nsubints, readers);
+		if(!beam.ok())
+			return fail(monitor, "fxcorr-x: cannot initialise beam output");
+		for(int s=0;s<nsubints;s++)
+		{
+			// read this subint from every station, checking the time stamps
+			// (same time formula as the XMAC branch below)
+			double subintstart = batchstartjob + (double)s*(double)subintns/1.0e9;
+			double sreld = subintstart - (double)scanstartsec;
+			int expectedsec = (int)floor(sreld);
+			int expectedns = (int)((sreld - (double)expectedsec)*1.0e9 + 0.5);
+			for(int ds=0;ds<numdatastreams;ds++)
+			{
+				for(size_t band=0;band<readers[ds].size();band++)
+				{
+					int rsec, rns, rscan;
+					if(!readers[ds][band]->readSubint(s, rscan, rsec, rns))
+					{
+						ostringstream oss;
+						oss << "fxcorr-x: failed to read subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band;
+						return fail(monitor, oss.str());
+					}
+					if(rscan != scan || rsec != expectedsec || rns != expectedns)
+					{
+						ostringstream oss;
+						oss << "fxcorr-x: subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band << " has time " << rscan << "/" << rsec << "/" << rns << ", expected " << scan << "/" << expectedsec << "/" << expectedns;
+						return fail(monitor, oss.str());
+					}
+				}
+			}
+			beam.processSubint(s, scan, expectedsec, expectedns);
+		}
+		cout << "fxcorr-x: batch " << batchid << " complete, " << nsubints << " subints of beam output written" << endl;
+		for(int ds=0;ds<numdatastreams;ds++)
+			for(size_t band=0;band<readers[ds].size();band++)
+				delete readers[ds][band];
+		// upstream ending sequence (fxmanager.cpp terminate/DONE)
+		monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);
+		monitor.status(DIFX_STATE_DONE, "", 0.0, 0, 0, 0.0, 0.0);
+		return EXIT_SUCCESS;
 	}
 
 	// Visibility start time: batch start relative to the scan start

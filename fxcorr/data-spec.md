@@ -45,6 +45,7 @@ project/                          # 项目根目录（可自定义）
 ├── raw/                          # 原始基带数据
 ├── fengine/                      # fxcorr-f 输出（频域谱）
 ├── vis/                          # fxcorr-x 输出（SWIN 可见度）
+├── beam/                         # fxcorr-x 相位阵输出（波束频谱，P8）
 ├── product/                      # 最终科学产品（FITS / Mark4）
 ├── meta/                         # 全局索引与日志
 └── work/                         # 临时工作区（可选，不进 git）
@@ -56,6 +57,7 @@ project/                          # 项目根目录（可自定义）
 |---|---|---|
 | `config/` `batches/` `meta/` `product/` | 共享存储 | 配置、元数据、索引、产品；量小，全部节点须一致可见 |
 | `vis/` | 共享存储 | SWIN 跨 batch 追加、difx2fits 直读；多 x 子集并行时按 subset 子目录分写（第 12 节） |
+| `beam/` | 共享存储 | 相位阵波束频谱，按 batch 组织；下游波束消费者直读 |
 | `raw/` | 本地存储 | TB 级原始基带；各站数据在各记录节点 |
 | `fengine/` | 本地存储 | 各站 f 输出在计算节点；目录逻辑集中、物理分布（每节点只持有自己写的站） |
 | `work/` | 本地存储 | 临时文件，进程结束可清理 |
@@ -79,6 +81,7 @@ project/                          # 项目根目录（可自定义）
 | D11 | FITS 科学产品 | `*.FITS` | 后处理 | FITS-IDI | MB~GB | 天文标准格式 |
 | D12 | Mark4 科学产品 | Mark4 文件集 | 后处理 | Mark4 | MB~GB | 测地学常用格式 |
 | D13 | 全局索引/日志 | `meta/` | 运行过程 | 文本/JSON | KB~MB | 批量索引、运行日志等 |
+| D14 | 波束数据 | `beam/<batch_id>/beam.bin` | fxcorr-x（相位阵） | 二进制（beam.bin） | MB 级 | 相位阵波束加权和频谱，按 acc 窗口记录（P8 2026-09-13；上游无对照格式，fxcorr 自定，见 5.5 节） |
 
 ---
 
@@ -89,7 +92,7 @@ project/                          # 项目根目录（可自定义）
 | **vex2difx** | 前处理1 | D1（.vex）、D2（.v2d） | D3（.input）、D4（.calc）、D5（.flag） | 纯配置生成，不碰原始数据 |
 | **difxcalc / calcif2** | 前处理2 | D4（.calc） | D6（.im） | 生成几何延迟模型 |
 | **fxcorr-f** | 核心（Station-based） | D3（.input）、D4（.calc）、D6（.im）、D7（raw） | D8（频域谱+自相关+pcal）、D9（batch.json） | 按台站、按批量处理 |
-| **fxcorr-x** | 核心（Baseline-based） | D3（.input）、D4（.calc）、D6（.im）、D8（fengine）、D9 | D10（SWIN 可见度）、D9（batch.json） | 按批量处理多台站数据；UVW 由模型求值 |
+| **fxcorr-x** | 核心（Baseline-based） | D3（.input）、D4（.calc）、D6（.im）、D8（fengine）、D9 | D10（SWIN 可见度）、D9（batch.json）；相位阵配置时改出 D14（beam.bin，无 SWIN） | 按批量处理多台站数据；UVW 由模型求值 |
 | **difx2fits** | 后处理1 | D3、D4、D6、D10、D5（可选） | D11（.FITS） | 生成 FITS-IDI，SWIN 零改造直读 |
 | **difx2mark4** | 后处理2 | D3、D4、D6、D10、D1 等 | D12（Mark4） | 生成 Mark4 格式 |
 
@@ -310,7 +313,50 @@ vis/
 
 batch.json（D9）已并入 `batches/<batch_id>.json` 单文件全字段，见 5.3 节。
 
-### 5.5 最终科学产品（product/）
+### 5.5 X-Engine 波束输出（beam/，P8 2026-09-13）
+
+相位阵配置（.input CONFIG 段 `PHASED ARRAY TRUE` + `PHASED ARRAY CONFIG FILE`）时，fxcorr-x 不做互相关、不写 SWIN，改为波束形成：各站频谱按相位阵配置文件的 DWeight 加权求和（`Σ_ds DWeight[freq][ds] × spectrum_ds`，累加不归一化），按 `ACC TIME (NS)` 窗口落盘。上游 mpifxcorr 的相位阵输出端（padomain/paoutputformat/DIFX/VDIF/TIMESERIES）是无消费者的死代码，**本格式为 fxcorr 自定**（设计见 algo-plan.md P8 节；检验资产见 `fxcorr/test/phasearr/`）。
+
+```
+beam/
+└── 60512_45000/                      # batch_id
+    └── beam.bin                      # D14：每 acc 窗口一条记录（追加写，重跑覆盖幂等）
+```
+
+**beam.bin 二进制格式**（host 字节序，V1 单机）：
+
+```
+Header（定长 256 字节）：
+  偏移  类型      字段
+  0     char[6]   magic = "FXCBM\0"
+  6     u32       version = 1
+  10    u32       n_subints
+  14    u32       n_accs（每 subint 的 acc 窗口数 = subintns/ACC TIME，Configuration 校验整除）
+  18    u32       acc_ns（= ACC TIME (NS)）
+  22    u32       n_segs（输出段数 = Σ_freq 该 freq 的 pol 数）
+  26..255        保留，填 0
+
+段表（n_segs 条，每段 9 字节）：u32 freq_index + char pol + u32 nchan
+  （段序 = freq table 序 × 各 freq 的 pol 列表序；nchan = 该 freq 的 NUM CHANNELS）
+
+每 subint（顺序存 n_subints 个）：
+  每 acc 窗口（n_accs 条记录）：
+    i32       scan（scan 序号）
+    i32       sec（窗口起点，相对 scan 起点的秒 = subint sec + acc×acc_ns 进位）
+    i32       ns（窗口起点 ns）
+    每段：cf32[nchan]（该窗口内所有 FFT 块的加权和频谱）
+```
+
+语义要点：
+
+- 波束 = Σ_站 DWeight×频谱，**累加不归一化**、**不查 valid flags**（无效 FFT 块的频谱在 f 侧落盘即全零，直接加权自然等价，与上游 core.cpp:818-865 一致）；权重 ≥0 由 Configuration 校验。
+- acc 窗口 = 整数个 FFT 块（Configuration 校验 accffts 为 `NUM BUFFERED FFTS` 的整数倍），窗口起点时间戳 = subint 起点 + acc 序号×acc_ns（scan 相对系，同 .sp）。
+- 无 weight 段（上游无此概念）；DWeight 不落 header（.input 可查，落盘易与配置漂移）。
+- 每 (freq, pol) 的贡献站映射：recorded band 优先（freq==该 freq 且 pol==papol），否则 zoom band——照上游 core.cpp:822-851。
+- 通道数语义修正：上游 core.cpp:821 误用 `getFNumChannels(configindex)`（参数应为 freq 序号），fxcorr 用 `getFNumChannels(freqindex)`。
+- 相位阵 batch 不写 SWIN（fxcorr-x 早退分支）；f 侧产物（.sp/autocorr.bin）照常；与 pulsar/多相位中心互斥（上游 if/else 语义）。
+
+### 5.6 最终科学产品（product/）
 
 ```
 product/
@@ -320,7 +366,7 @@ product/
     └── ...
 ```
 
-### 5.6 全局元数据（meta/）
+### 5.7 全局元数据（meta/）
 
 ```
 meta/
@@ -436,6 +482,7 @@ D11 (.FITS) 或 D12 (Mark4)
 | F pcal 文件 | D8 | `pcal.bin` | `pcal.bin` |
 | F 自相关文件 | D8 | `autocorr.bin` | `autocorr.bin` |
 | 可见度文件 | D10 | `DIFX_<MJD>_<sec>.s<XX>.b<XX>` | `DIFX_60512_45000.s0000.b0000` |
+| 波束文件 | D14 | `beam/<batch_id>/beam.bin` | `beam/60512_45000/beam.bin` |
 | 批量元数据 | D9 | `batches/<batch_id>.json` | `batches/60512_45000.json` |
 | 状态文件 | - | `status.txt` | `status.txt` |
 | FITS 产品 | D11 | `<exp>_<batch_id>.FITS` | `exp_60512_45000.FITS` |

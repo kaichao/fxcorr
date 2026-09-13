@@ -123,11 +123,12 @@ fxcorr-x <batch_id> [workdir]
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file / difx_dir）。
 - 数据源 `workdir/fengine/<batch_id>/<station>/`（各站 band_XX.sp + autocorr.bin），station 列表 = .input 的全部 datastream（自动枚举，无站参数）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘语义，difx2fits 零改造前提），batch.json 的 difx_dir 仅为元数据；输出目录不存在时自动创建（mkdir -p OUTPUT FILENAME 目录）。
-- 状态消息节奏（mpiId = 0，manager 角色）：Starting（启动）→ 每积分写盘一条 Running（visibilityMJD = 积分中心、各站 band 平均 weight、jobstart/jobstop）→ Ending → Done；错误时 Alert + Aborting。与 mpifxcorr 基准逐字段对拍通过（visibilityMJD/weight 逐位一致）。
+- **相位阵配置（.input `PHASED ARRAY TRUE` + `PHASED ARRAY CONFIG FILE`）时不写 SWIN**，改出 `beam/<batch_id>/beam.bin`（波束加权和，per ACC TIME 窗口记录；布局见 data-spec 5.5）。
+- 状态消息节奏（mpiId = 0，manager 角色）：Starting（启动）→ 每积分写盘一条 Running（visibilityMJD = 积分中心、各站 band 平均 weight、jobstart/jobstop）→ Ending → Done；错误时 Alert + Aborting。与 mpifxcorr 基准逐字段对拍通过（visibilityMJD/weight 逐位一致）。相位阵模式只发 Starting/Ending/Done（无积分写盘）。
 
-程序内校验：单 scan、单相位中心、maxproducts ≤ 2、intTime 为 subintNS 整数倍、batch 起点 subint 边界（1µs 容差，同 fxcorr-f）。
+程序内校验：单 scan、单相位中心（脉冲星 binning 时多源免检）、intTime 为 subintNS 整数倍（相位阵时跳过）、batch 起点 subint 边界（1µs 容差，同 fxcorr-f）。
 
-V1 边界：仅 fxcorr-f 的 .sp 输入（无 zoom 切片）；多相位中心/脉冲星/PCAL 文件生成不做。
+V1 边界：仅 fxcorr-f 的 .sp 输入；zoom band（P4a）、多相位中心（P4b）、脉冲星 binning（P4c）、交叉极化自相关（P7）、相位阵波束形成（P8）均已支持；PCAL/STA 文件生成不做。
 
 示例：
 

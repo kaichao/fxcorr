@@ -67,6 +67,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `pulsar/gen_test_pulsar.py` / `pulsar/README.md` | P4c 脉冲星 binning 检验资产（.input 变体 + pulsar config + 自造 tempo polyco，--scrunch/--negative-weight 变体）+ 检验步骤/验收判据/验证记录 |
 | `tcal/test-tcal.v2d` / `tcal/README.md` | P6 SwitchedPower 检验资产（两站 tcalFreq=80 → .input TCAL FREQUENCY）+ 检验步骤/验收判据/验证记录（含生成器帧头两个 bug 的记录：legacy 位、vdifio/mark5access 字布局） |
 | `crosspol/test-pols.vex` / `crosspol/test-pols.v2d` / `crosspol/README.md` | P7 交叉极化自相关检验资产（RCP+LCP 同 200MHz dual-pol → .input POL PRODUCTS 4 + WRITE AUTOCORRS）+ 检验步骤/验收判据/验证记录（含 test2b $TRACKS 帧长修复与 fxcorr-sim nbands 语义修复两个坑） |
+| `phasearr/gen_test_phasearr.py` / `phasearr/cmp_beam.py` / `phasearr/README.md` | P8 相位阵检验资产（.input 变体 + 相位阵配置文件生成，SUBINT 改 numbufferedffts 整数倍过上游 accffts 校验；beam.bin 与手算加权和逐位核对）+ 检验步骤/验收判据/验证记录（含 getinputkeyval 第 20 列坑与早退分支决策记录；上游 mpifxcorr 相位阵死代码无法对拍） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 

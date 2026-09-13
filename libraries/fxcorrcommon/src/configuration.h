@@ -500,6 +500,8 @@ public:
     { return configs[configindex].numpafreqpols[freqindex]; }
   inline char getFPhaseArrayPol(int configindex, int freqindex, int polindex) const
     { return configs[configindex].papols[freqindex][polindex]; }
+  inline int getFPhasedArrayAccumulationNS(int configindex) const
+    { return configs[configindex].paaccumulationns; } // P8 2026-09-13: added for fxcorr-x beam output
 
 //@}
 

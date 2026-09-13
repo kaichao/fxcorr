@@ -22,6 +22,7 @@ fxcorr-x <batch_id> [workdir]
 | spreader.{h,cpp} | .sp 读取：256 字节头校验 + 按 subint fseek 读头/flags/weights/spectra（线性 FFT 序）；**zoom 切片视图（P4a 2026-09-13）**：构造参数 (channeloffset, nchanoverride) 时每 FFT 块只读父 .sp 的切片段，spectra()/numChannels() 语义不变 | 布局见 data-spec 5.3；对应 fxcorr-f 的 FEngineWriter |
 | xmac.{h,cpp} | XMAC 批循环 + baselineweight 累加 + uvshiftAndAverage（含 pulsar binning 与多相位中心） | core.cpp:867-982（删 phased array）、:1005-1052、:1431-1938（单线程、无锁）；**脉冲星（P4c）**：bins 计算 + pulsar/scrunch 分支照 :803-812/:914-975，scrunch 折叠照 :1438-1475，bin 展开照 :1626-1631/:1781-1789，bweight bin 循环照 :1080-1087，工作区分配照 :1940-2064；**多相位中心（P4b）**：差分延迟 + rotator 生成 + 旋转 + 结果区步进 + decorr 段照 :1636-1725/:1746-1815/:1877-1923，工作区分配照 :416-433，shiftdecorr 写段照 :1090-1105；vis2 逐块 `vectorConj_cf32` 后 `vectorAddProduct_cf32`（等价 getConjugatedFreqs）；zoom band 由 config 表驱动零改动（band index = ds total 序，readers 已含 zoom 视图） |
 | integrate.{h,cpp} | 单 Visibility（numvis=1）：addData 满 intTime → writedata → increment；autocorr.bin 逐批次累加进 results 自相关段/acweight 段 | fxmanager.cpp:168-185（构造+polnames）、:114-133（todiskbuffer 预算）；core.cpp:1260-1370（autocorr 累加，**P4a 2026-09-13 起覆盖 total bands**：nbands 校验 getDNumTotalBands、freqindex 用 getDTotalFreqIndex、acbuf 取最大 nchan，zoom 的 weight 已是 f 侧换算好的父 band 值）；**P7 2026-09-13**：header 支持 version 1/2（v2 多 u32 crosspol 标志），crosspol=1 时每条批次记录平行段后接 crosspol 段，读段 lambda 两次调用、resultindex/weightindex 从平行 walk 结束处**连续**接续（core.cpp:1288-1301/1342-1369 的 results 串联布局，非独立 offset 区） |
+| beamengine.{h,cpp} | **相位阵波束形成（P8 2026-09-13）**：per (freq,papol) 段表（recorded band 优先、zoom 兜底）+ per subint per acc 窗口 Σ_ds DWeight×频谱落盘 beam/<batch_id>/beam.bin | core.cpp:818-865（f 侧波束加权，Mode 换成 .sp 频谱）；输出端上游死代码无对照，beam.bin 布局 fxcorr 自定（data-spec 5.5）；通道数用 getFNumChannels(f)（上游 :821 误传 configindex） |
 
 ## 关键实现要点（易错，改前必读）
 
@@ -33,13 +34,13 @@ fxcorr-x <batch_id> [workdir]
 - **scrunch accumspace 清零（P4c 实测坑）**：pulsaraccumspace 必须在 uvshiftAndAverage **尾部**清零（core.cpp:1565-1602，threadcrosscorrs 清零之后）——漏移植会导致 accumspace 跨 uvshift 窗口累积，可见度按积分序放大（首积分 1.5×、次积分 3.5×，模式 (2n-0.5)×），对拍必炸。
 - **多相位中心三条易错点（P4b，algo-plan P4b 关键点）**：① **时间基准**：calculateDelayInterpolator 的 offsettime = offsetsec + nsoffset/1e9，offsetsec 是 subint 起点的 **scan 相对秒**（main.cpp 由 expectedsec/expectedns 合成，勿用当日秒系）；② **单源退化必须逐位一致**：延迟/rotator/decorr/写段全部由 numphasecentres>1 条件包裹（照 core.cpp:1636/1699/1887），单源路径与 P4b 前实现完全相同；③ **decorr 段结果区布局**：floatresults 的 shiftdecorr 段在 bweight 段之后、每 (freq,baseline) 连续 numphasecentres 个 f32，offset 用 getCoreResultBShiftDecorrOffset 勿手算。
 - **weight 语义链**：.sp weights = 每 FFT 块 dataWeight（槽式回填，见 fxcorr-f CLAUDE.md）→ baselineweight = Σ weight1×weight2 → floatresults（bweightoffset×2 处）；autocorr weight = 各批次 getWeight 累加 → acweightoffset×2 处。writedata 内部除以 fftsperintegration 归一。
-- **V1 启动边界检查**（main.cpp）：单 scan、单相位中心、intTime 为 subintNS 整数倍、无 pulsar/phased array；batch 起点 subint 边界校验（容差 1µs，同 fxcorr-f）。**maxproducts>2 已放行（P7 2026-09-13）**：crosspol 由 autocorr.bin header 的 crosspol 标志驱动（f 侧写段、x 侧读段、Visibility 的 autocorrwidth=2 写盘全链零改造就位）。
+- **V1 启动边界检查**（main.cpp）：单 scan、单相位中心、intTime 为 subintNS 整数倍（相位阵时跳过——不写 SWIN 无积分网格需求）、无 pulsar；batch 起点 subint 边界校验（容差 1µs，同 fxcorr-f）。**maxproducts>2 已放行（P7 2026-09-13）**：crosspol 由 autocorr.bin header 的 crosspol 标志驱动（f 侧写段、x 侧读段、Visibility 的 autocorrwidth=2 写盘全链零改造就位）。**相位阵已支持（P8 2026-09-13）**：phasedArrayOn 时走 main.cpp 的**早退分支**（readers 校验后 BeamEngine + per subint 读谱加权落盘，不构造 XmacEngine/Integrator、不写 SWIN），旧路径逐字节不动——相位阵改动一律放早退分支或 beamengine，**不要动 XMAC 路径**（曾因 if/else 包裹重构引发回归堆损坏，教训见 fxcorr/test/phasearr/README.md）。
 - **executeseconds 语义**（Visibility::writedata 停写判定）：executeseconds 以 **scan 起点**为基准（mpifxcorr EXECUTE TIME 语义），batch 起点偏移 initsec 时须 `executeseconds = batch时长 + initsec + 1`，否则 batch 起点非 scan 起点的 batch 全部静默不写盘（2026-09-12 修复，batch 起点 scan 起点时退化为原语义、对拍回归 6/6）。
 - **mpifxcorr mux 滞后**：对拍时 mpifxcorr 数据后段会有确定性的 invalid 边界 subint（vdifmux 流式管线滞后，两次运行可复现），fxcorr 无此滞后——对拍 batch 取数据完整覆盖段（见 impl-plan 2.3 实施记录）。
 
 ## V1 边界
 
-- 输入仅 fxcorr-f 的 .sp（**zoom band 已支持（P4a 2026-09-13）**：x 侧按 .input 的 zoom 定义对父 .sp 做通道切片视图，无新文件；**多相位中心已支持（P4b）**：.im 的 NUM PHASE CENTRES 驱动，每源一套 .s 文件，写盘零改造；**脉冲星 binning 已支持（P4c）**：.input PULSAR BINNING + pulsar config + polyco，.b 文件与 SCRUNCH 两种模式，写盘零改造）；STA/PCAL 文件生成均不做（V2）。
+- 输入仅 fxcorr-f 的 .sp（**zoom band 已支持（P4a 2026-09-13）**：x 侧按 .input 的 zoom 定义对父 .sp 做通道切片视图，无新文件；**多相位中心已支持（P4b）**：.im 的 NUM PHASE CENTRES 驱动，每源一套 .s 文件，写盘零改造；**脉冲星 binning 已支持（P4c）**：.input PULSAR BINNING + pulsar config + polyco，.b 文件与 SCRUNCH 两种模式，写盘零改造；**相位阵已支持（P8）**：phasedArrayOn 时只出 beam/<batch_id>/beam.bin、不写 SWIN）；STA/PCAL 文件生成均不做（V2）。
 - 无流式：整 batch 逐 subint 顺序读 .sp（每 subint 各站各 band 一次 fseek），谱数据按 subint 常驻（blockspersend×nchan cf32/站/band）。
 
 ## 构建与注册
@@ -56,3 +57,5 @@ fxcorr-x <batch_id> [workdir]
 **zoom（P4a）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/zoom/README.md`（2026-09-13 验证过，测试机可一键复现）。
 
 **交叉极化自相关（P7）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/crosspol/README.md`（2026-09-13 验证过：dual-pol 全链路 SWIN 72 条含自相关 RR/LL/RL/LR、单 pol + WRITE AUTOCORRS 与 mpifxcorr 对拍 6/6 全等、无 WRITE AUTOCORRS 回归 2/2、位序 BYTE-IDENTICAL）。注意自相关伪基线号 257×(tel+1) 与单 pol 互相关 T1-T1/T2-T2 基线号撞号，对拍解析按记录序/polpair 区分。
+
+**相位阵（P8）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/phasearr/README.md`（2026-09-13 验证过：DWeight 0.5/0.5 与 1.0/0.0 两变体 beam.bin 50×4 窗口与手算加权和逐位全等、时间戳正确、谱峰 chan 1536、不写 SWIN；无相位阵回归对拍 6/6）。注意上游 mpifxcorr 相位阵是死代码无法对拍；SUBINT 须 numbufferedffts 整数倍（上游 accffts 校验）。

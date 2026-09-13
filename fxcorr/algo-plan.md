@@ -21,7 +21,7 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 | P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力，⤴ V3，2026-09-13 挪出） |
 | P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 |
 | P7 | 交叉极化自相关（WRITE AUTOCORRS） | 功能未迁移 |
-| P8 | 相位阵频率域加权合并 | 功能未迁移 |
+| P8 | 相位阵频率域加权合并 | 功能未迁移 | ✅ 2026-09-13（x 侧 BeamEngine 波束加权求和 + beam.bin 落盘（上游输出端死代码、格式自定）；两种权重逐位 PASS、回归 6/6；详见 P8 节） |
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 |
 | P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 |
 | P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 |
@@ -639,9 +639,60 @@ dual-pol 观测（如 RCP+LCP 同频率）时，除平行自相关（RR/LL）外
 
 ✅ 2026-09-13：**dual-pol 全链路跑通**（test-pols 资产：RCP+LCP 同 200MHz、POL PRODUCTS 4、WRITE AUTOCORRS TRUE）：autocorr.bin v2 crosspol=1（记录 = 平行 2 band + crosspol 2 band，weight>0）；SWIN 72 条 = 6 积分 × 12（1 基线 × 4 pol 互相关 + 自相关伪基线 257/514 各 RR/LL/RL/LR 4 条，顺序同 visibility.cpp:913-944），自相关谱峰全部落 1.5MHz（tone 频率）、交叉谱功率 = 平行谱功率（同 tone 完全相关，物理判据）、weight=1.0。**单 pol + WRITE AUTOCORRS 对拍**：fxcorr 与 mpifxcorr 前 2 积分 6/6 记录逐位全等（含 4 条自相关记录：基线号/时间戳/polpair/weight/可见度——autocorr.bin v2 读法、x 侧累加、Visibility 自相关写盘与上游一致）。**无 WRITE AUTOCORRS 回归**：autocorr.bin v2 crosspol=0、SWIN 对拍 2/2 全等（退化路径不漂移）。**位序回归**：fxcorr-sim 单 band 输出与 gen_test_vdif.py BYTE-IDENTICAL（8032000 字节公共前缀）。**对拍数据链路前置发现（非 P7 代码问题）**：① test2b.vex 的 $TRACKS `track_frame_format = VDIF/8032/2` 帧长写错（2 band 实为 16032）→ vex2difx 生成 DATA FRAME SIZE 8032 → vdifmux 帧长不匹配错乱；改为 16032 后 vdifmux 警告清零、SWIN 头字段正常，但 mpifxcorr 读 2 band 样本交织帧仍只有首积分有效（vdiffile.cpp:538-550 的 setvdifmuxinputchannels(2) corner-turn 路径输出 32032B 帧，与 mark5access 的 2channel 交织解码期望不匹配，上游此路径本不可用），**mpifxcorr 对拍 2 band 仍不可行**，crosspol 对拍以单 pol 场景覆盖（自相关写盘路径共享）+ dual-pol 链路自洽验证；② fxcorr-sim 的 nbands 用 getDNumRecordedFreqs（不同频率数）——dual-pol 同频率时 freq 数=1 而 band 数=2，2bit 校验与 tone/pcal 网格全部按 band 语义使用，改为 getDNumRecordedBands（多频场景两值相等，行为不变；位序回归 BYTE-IDENTICAL 佐证）。
 
+## P8：相位阵（phased array）频率域波束形成（✅ 2026-09-13 完成）
+
+### 是什么
+
+相位阵模式（.input CONFIG 段 `PHASED ARRAY TRUE` + `PHASED ARRAY CONFIG FILE`）不做站间互相关，而是把各站频谱按配置权重加权求和成一个波束频谱（beam forming，core.cpp:818-865），按 `ACC TIME (NS)` 窗口输出。典型用途：把相控阵（如 VGOS/WIDAR 子阵）的各单元数据合成单口径波束。
+
+### 动机分类
+
+功能未迁移。
+
+### 要解决的问题
+
+.INPUT 的相位阵配置解析与预算（configuration.cpp 的 PHASED ARRAY 段、processPhasedArrayConfig、populateResultLengths 的相位阵分支、subintns%paaccumulationns 与 accffts 整数校验）随 fxcorrcommon 零改造就位，但 fxcorr-x 在 V1 启动检查直接拒绝（main.cpp:156 "phased arrays are not supported in V1"）。上游 mpifxcorr 的相位阵链路是**半成品死代码**：f 侧算波束和写入 threadcrosscorrs（布局 = Σ_freq Σ_pol nchan，无 baseline 维），但消费端 uvshiftAndAverage 仍按 freq×baseline offset 解包（相位阵时 baseline offset 表未分配，configuration.cpp 相位阵分支只设 threadresultlength/coreresultlength），输出端（padomain/paoutputformat/DIFX/VDIF/TIMESERIES）全程无消费者——上游无法跑通，也无输出格式可对照。
+
+### 预期效果
+
+fxcorr-x 支持相位阵模式：删 V1 拒绝，实现波束加权求和并按 ACC TIME 分窗落盘（自定格式，同步 data-spec），与上游算法逐位对齐（波束和 = Σ_ds DWeight[ds] × spectrum_ds，累加不归一化）。无相位阵配置时路径零变化（回归对拍不变）。
+
+### 设计
+
+**算法（core.cpp:818-865 迁移，f 侧 .sp 多站频谱现成）**：
+
+- per freq f（freq table 序号，numpafreqpols[f] > 0 的 freq 才输出，上游不查 isFrequencyUsed）：
+  - per papol（getFPhasedArrayNumPols/getFPhaseArrayPol）：
+    - per FFT 块（subloop）：per datastream ds：在 recorded bands 找 freq==f && pol==papol 的 band（getDRecordedFreqIndex/getDRecordedBandPol，同上游 dsfreqindex 匹配）→ 取该 FFT 块频谱；找不到再在 zoom bands 找（getDZoomFreqIndex/getDZoomBandPol）；找到则 `波束[f] += DWeight[f][ds] × 频谱`（vectorMulC + vectorAdd，DWeight 由 getFPhasedArrayDWeight，上游校验 ≥0）。
+- **通道数用 getFNumChannels(f)**——上游 core.cpp:821 误传 configindex（getFNumChannels 的参数是 freq 序号，上游把 config 序号传进去，单 freq 配置碰巧 configindex==0==f 才正确），fxcorr 按正确语义修复并在文档记录。
+- **不查 valid flags**：上游相位阵分支直接取 getFreqs 加权，不判有效位；fxcorr 侧无效 FFT 块频谱在 f 侧落盘即全零（fxcorr-f 保证），直接加权自然等价。
+- **acc 分窗**：paaccumulationns 的窗口 = 整数个 FFT 块（Configuration 校验：subintns%paaccumulationns==0 且 accffts = paaccumulationns/ffttime 为整数且 %numbufferedffts==0），即整数个 fftloop 批。fxcorr-x 按 fftloop 计数累积（accfftloops = accffts/numbufferedffts），满一组落盘并清零；每窗口一条记录，时间戳 = subint 起点 + acc 序号×accns（scan 相对系，同 .sp）。
+- 相位阵与 pulsar/多相位中心互斥（上游 if/else），与自相关并存（f 侧 .sp/autocorr.bin 照常落盘）。
+
+**输出格式（上游无对照，自定；数据规范同步 data-spec 新节）**：
+
+- 目录 `beam/<batch_id>/beam.bin`（batch 粒度，与 fengine/<batch_id> 对称；不是 vis/ 的 SWIN 语义）。
+- Header（照 .sp/autocorr.bin 风格）：magic "FXCBM"、version 1、n_subints、n_accs_per_subint（= subintns/paaccumulationns）、acc_ns、n_freqs；per freq：freq_index、n_pols、pols[n_pols]、nchan。DWeight 不落 header（.input 可查，落盘易与配置漂移）。
+- 每 subint：n_accs 条记录：i32 scan / i32 sec / i32 ns（窗口起点时间戳，scan 相对）+ per (freq, pol) cf32[nchan]（波束频谱，累加值）。无 weight 段（上游无此概念）。
+- **相位阵 batch 不写 SWIN**：上游互相关消费端无相位阵路径（见动机），fxcorr-x 相位阵时跳过 XmacEngine/Integrator 路径、只出 beam.bin；intTime 整数倍校验随之跳过（不写 SWIN 即无积分网格需求）；batch 起点 subint 边界校验保留（beam 时间戳网格依赖）。
+
+**fxcorr-x 结构**：
+
+- main.cpp：删 V1 拒绝；相位阵时走独立分支（不构造 XmacEngine/Integrator、不分配 subintresults——相位阵的 coreresultlength 预算语义是字节数且无 baseline 布局，不可复用）。
+- 新文件 beamengine.{h,cpp}：构造（freq/pol/band 映射表，一次建好）+ per subint 处理（读各站频谱 → per (freq,papol) 加权求和 → acc 分窗落盘）。频带映射沿用 main.cpp 现成的 readers 构造逻辑（recorded + zoom 视图）。
+- 落盘 writer 照 autocorr.bin 风格（fseek 回填不适用——记录定长，顺序写）。
+
+### 验证方法
+
+- 资产 `fxcorr/test/phasearr/`：gen_test_phasearr.py 从 test.input 生成相位阵变体（CONFIG 段插 `PHASED ARRAY TRUE` + `PHASED ARRAY CONFIG FILE` 两行 + 相位阵配置文件：OUTPUT TYPE FILTERBANK / OUTPUT FORMAT DIFX / ACC TIME (NS) = 整数个 FFT 块 / COMPLEX OUTPUT FALSE / OUTPUT BITS 32 / 每 freq NUM FREQ 与 pol 列表 + 每 ds 权重）；README 写检验步骤。
+- **数值验证（上游死代码无法对拍）**：① 单站 DWeight=1（另一站权重 0）：beam.bin 波束谱与 fxcorr-f 的 .sp 频谱逐位全等（Σ 只有一项）；② 两站 DWeight=(0.5,0.5)：波束 = (T1+T2)/2，与 Python 手算参考逐位核对；③ DWeight=(1,0)：T2 频谱无贡献；④ tone 峰落位（1.5MHz 通道）；⑤ numaccs=2 变体：窗口时间戳 = subint 起点 + acc×accns、分段累加值正确。
+- 无相位阵回归：test 配置（无 PHASED ARRAY 段）SWIN 对拍 6/6 不变；位序对拍 BYTE-IDENTICAL 不变。
+
+✅ 2026-09-13：**实施完成**（fxcorr-x 早退分支 + BeamEngine，fxcorrcommon 仅补一行 `getFPhasedArrayAccumulationNS` getter；beam.bin 布局同步 data-spec 5.5 节/D14）。**数值验证**：test 配置 SUBINT 改 81920000ns（40 块，numbufferedffts 整除——原 256 块过不了上游 accffts 校验）、ACC TIME 20480000ns → 每 subint 4 窗口：DWeight(0.5,0.5) 与 (1.0,0.0) 两种权重下 cmp_beam.py 50×4 窗口**逐位 PASS**（频谱 f32 相同累加序逐位一致、时间戳 = subint 起点 + acc×20480000ns）；波束谱峰 chan 1536 = 1.5MHz、不写 SWIN ✓。**无相位阵回归**：标准配置 SWIN 对拍 6/6 全等（intTime 校验限定非相位阵后重确认）。**实施坑**：① 相位阵配置文件行格式——getinputkeyval 从固定第 20 列取 val，短 key 的值须空格 pad（照 pulsar 资产的 kv() 先例）；② 相位阵分支最初做 if/else 包裹重构（提公共 lambda），标准配置回归出现堆损坏（subint 1 fread 触发），二分无果后改**早退分支**（旧路径逐字节不动、相位阵提前 return），回归恢复全等——早退隔离性最好，保留；③ 上游 core.cpp:821 的 getFNumChannels(configindex) 是 bug（参数应为 freq 序号），fxcorr 按正确语义修复。
+
 ---
 
 ## 相关
 
 - 优先级与验收总览：v2-plan.md 第 5/6 节
-- 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（子集目录与合并约定，12 节）、**P7（autocorr.bin 增 crosspol 段与 header 字段，5.3 节）**
+- 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（子集目录与合并约定，12 节）、**P7（autocorr.bin 增 crosspol 段与 header 字段，5.3 节）**、**P8（新增 beam.bin 数据类型 D14 与 5.5 节，上游无对照格式自定）**
