@@ -21,7 +21,7 @@ fxcorr-x <batch_id> [workdir]
 | main.cpp | batch.json 解析、V1 边界检查、逐 subint 驱动（xcblockcount/maxxcblocks 批次、尾批、时间推进） | core.cpp:657-784（批控制）、:985-991 / :1055-1060（uvshift 触发）；fxmanager.cpp:650-698 的单 Visibility 串行替代 |
 | spreader.{h,cpp} | .sp 读取：256 字节头校验 + 按 subint fseek 读头/flags/weights/spectra（线性 FFT 序）；**zoom 切片视图（P4a 2026-09-13）**：构造参数 (channeloffset, nchanoverride) 时每 FFT 块只读父 .sp 的切片段，spectra()/numChannels() 语义不变 | 布局见 data-spec 5.3；对应 fxcorr-f 的 FEngineWriter |
 | xmac.{h,cpp} | XMAC 批循环 + baselineweight 累加 + uvshiftAndAverage（含 pulsar binning 与多相位中心） | core.cpp:867-982（删 phased array）、:1005-1052、:1431-1938（单线程、无锁）；**脉冲星（P4c）**：bins 计算 + pulsar/scrunch 分支照 :803-812/:914-975，scrunch 折叠照 :1438-1475，bin 展开照 :1626-1631/:1781-1789，bweight bin 循环照 :1080-1087，工作区分配照 :1940-2064；**多相位中心（P4b）**：差分延迟 + rotator 生成 + 旋转 + 结果区步进 + decorr 段照 :1636-1725/:1746-1815/:1877-1923，工作区分配照 :416-433，shiftdecorr 写段照 :1090-1105；vis2 逐块 `vectorConj_cf32` 后 `vectorAddProduct_cf32`（等价 getConjugatedFreqs）；zoom band 由 config 表驱动零改动（band index = ds total 序，readers 已含 zoom 视图） |
-| integrate.{h,cpp} | 单 Visibility（numvis=1）：addData 满 intTime → writedata → increment；autocorr.bin 逐批次累加进 results 自相关段/acweight 段 | fxmanager.cpp:168-185（构造+polnames）、:114-133（todiskbuffer 预算）；core.cpp:1260-1370（autocorr 累加，**P4a 2026-09-13 起覆盖 total bands**：nbands 校验 getDNumTotalBands、freqindex 用 getDTotalFreqIndex、acbuf 取最大 nchan，zoom 的 weight 已是 f 侧换算好的父 band 值） |
+| integrate.{h,cpp} | 单 Visibility（numvis=1）：addData 满 intTime → writedata → increment；autocorr.bin 逐批次累加进 results 自相关段/acweight 段 | fxmanager.cpp:168-185（构造+polnames）、:114-133（todiskbuffer 预算）；core.cpp:1260-1370（autocorr 累加，**P4a 2026-09-13 起覆盖 total bands**：nbands 校验 getDNumTotalBands、freqindex 用 getDTotalFreqIndex、acbuf 取最大 nchan，zoom 的 weight 已是 f 侧换算好的父 band 值）；**P7 2026-09-13**：header 支持 version 1/2（v2 多 u32 crosspol 标志），crosspol=1 时每条批次记录平行段后接 crosspol 段，读段 lambda 两次调用、resultindex/weightindex 从平行 walk 结束处**连续**接续（core.cpp:1288-1301/1342-1369 的 results 串联布局，非独立 offset 区） |
 
 ## 关键实现要点（易错，改前必读）
 
@@ -33,7 +33,7 @@ fxcorr-x <batch_id> [workdir]
 - **scrunch accumspace 清零（P4c 实测坑）**：pulsaraccumspace 必须在 uvshiftAndAverage **尾部**清零（core.cpp:1565-1602，threadcrosscorrs 清零之后）——漏移植会导致 accumspace 跨 uvshift 窗口累积，可见度按积分序放大（首积分 1.5×、次积分 3.5×，模式 (2n-0.5)×），对拍必炸。
 - **多相位中心三条易错点（P4b，algo-plan P4b 关键点）**：① **时间基准**：calculateDelayInterpolator 的 offsettime = offsetsec + nsoffset/1e9，offsetsec 是 subint 起点的 **scan 相对秒**（main.cpp 由 expectedsec/expectedns 合成，勿用当日秒系）；② **单源退化必须逐位一致**：延迟/rotator/decorr/写段全部由 numphasecentres>1 条件包裹（照 core.cpp:1636/1699/1887），单源路径与 P4b 前实现完全相同；③ **decorr 段结果区布局**：floatresults 的 shiftdecorr 段在 bweight 段之后、每 (freq,baseline) 连续 numphasecentres 个 f32，offset 用 getCoreResultBShiftDecorrOffset 勿手算。
 - **weight 语义链**：.sp weights = 每 FFT 块 dataWeight（槽式回填，见 fxcorr-f CLAUDE.md）→ baselineweight = Σ weight1×weight2 → floatresults（bweightoffset×2 处）；autocorr weight = 各批次 getWeight 累加 → acweightoffset×2 处。writedata 内部除以 fftsperintegration 归一。
-- **V1 启动边界检查**（main.cpp）：单 scan、单相位中心、maxproducts≤2、intTime 为 subintNS 整数倍、无 pulsar/phased array；batch 起点 subint 边界校验（容差 1µs，同 fxcorr-f）。
+- **V1 启动边界检查**（main.cpp）：单 scan、单相位中心、intTime 为 subintNS 整数倍、无 pulsar/phased array；batch 起点 subint 边界校验（容差 1µs，同 fxcorr-f）。**maxproducts>2 已放行（P7 2026-09-13）**：crosspol 由 autocorr.bin header 的 crosspol 标志驱动（f 侧写段、x 侧读段、Visibility 的 autocorrwidth=2 写盘全链零改造就位）。
 - **executeseconds 语义**（Visibility::writedata 停写判定）：executeseconds 以 **scan 起点**为基准（mpifxcorr EXECUTE TIME 语义），batch 起点偏移 initsec 时须 `executeseconds = batch时长 + initsec + 1`，否则 batch 起点非 scan 起点的 batch 全部静默不写盘（2026-09-12 修复，batch 起点 scan 起点时退化为原语义、对拍回归 6/6）。
 - **mpifxcorr mux 滞后**：对拍时 mpifxcorr 数据后段会有确定性的 invalid 边界 subint（vdifmux 流式管线滞后，两次运行可复现），fxcorr 无此滞后——对拍 batch 取数据完整覆盖段（见 impl-plan 2.3 实施记录）。
 
@@ -54,3 +54,5 @@ fxcorr-x <batch_id> [workdir]
 - 已验证：2 站 4 秒实验 4 subint（2 积分）SWIN 与 mpifxcorr 逐记录全等（6/6，可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS 成功；多 batch 第 2 个 batch（起点 = scan 起点 + 1.024s，test-sim 配置 8 subints）4 积分 12 条记录全链路跑通。
 
 **zoom（P4a）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/zoom/README.md`（2026-09-13 验证过，测试机可一键复现）。
+
+**交叉极化自相关（P7）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/crosspol/README.md`（2026-09-13 验证过：dual-pol 全链路 SWIN 72 条含自相关 RR/LL/RL/LR、单 pol + WRITE AUTOCORRS 与 mpifxcorr 对拍 6/6 全等、无 WRITE AUTOCORRS 回归 2/2、位序 BYTE-IDENTICAL）。注意自相关伪基线号 257×(tel+1) 与单 pol 互相关 T1-T1/T2-T2 基线号撞号，对拍解析按记录序/polpair 区分。

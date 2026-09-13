@@ -150,7 +150,9 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-sim: V1 supports real (baseband) sampling only" << endl;
 		return EXIT_FAILURE;
 	}
-	int nbands = config.getDNumRecordedFreqs(0, dsindex);
+	// band count, not distinct-frequency count: dual-pol setups record two
+	// bands (R/L) at the same frequency, which numrecordedfreqs would count once
+	int nbands = config.getDNumRecordedBands(0, dsindex);
 	if(nbands < 1)
 	{
 		cerr << "fxcorr-sim: station " << station << " has no recorded bands" << endl;

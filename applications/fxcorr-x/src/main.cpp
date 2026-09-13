@@ -155,8 +155,9 @@ int main(int argc, char **argv)
 		return fail(monitor, "fxcorr-x: no configuration for scan 0");
 	if(config.phasedArrayOn(configindex))
 		return fail(monitor, "fxcorr-x: phased arrays are not supported in V1");
-	if(config.getMaxProducts() > 2)
-		return fail(monitor, "fxcorr-x: cross-polar autocorrelations (maxproducts > 2) are not supported in V1");
+	// P7: cross-polar autocorrelations (maxproducts > 2) are supported; the
+	// autocorr.bin cross-pol section flag decides whether the extra records
+	// are read (Integrator::addAutocorrs)
 
 	// AC_INIT version of fxcorr-x
 	monitor.status(DIFX_STATE_STARTING, "Version 0.1.0", 0.0, 0, 0, 0.0, 0.0);

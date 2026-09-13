@@ -67,6 +67,8 @@ private:
 	int acblocks;		// FFTs per autocorrelation averaging batch
 	std::vector<int> acbandnchan;	// per total band, autocorr width after averageFrequency()
 	bool haspcal;
+	bool hascrosspol;	// WRITE AUTOCORRS && maxproducts>2: autocorr.bin also carries
+				// the cross-polar section (core.cpp:1288 condition)
 
 	std::vector<FILE *> spfiles;
 	std::vector<std::string> spnames;

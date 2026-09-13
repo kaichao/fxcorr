@@ -21,7 +21,7 @@ fxcorr-f <batch_id> <station> [workdir]
 |---|---|---|
 | main.cpp | 参数/batch.json 解析、subint 循环驱动、ac 批次触发、**SwitchedPower 切块喂入（P6）** | 骨架参照 core.cpp:694-801（zeroAutocorrelations→setValidFlags→setData→setOffsets→resetpcal→process 循环）+ :993-1003（acblockcount/maxacblocks 批次）；对齐校验为新增（data-spec 12 节）；switched power 喂入照 vdiffile.cpp:945-964（段粒度 + increment） |
 | datareader.{h,cpp} | 粗延迟 + VDIF 帧对齐定位 + 顺序读文件 | datastream.cpp:381-394（延迟/第一个 offsetns）、:516-573（采样→字节偏移）、vdiffile.cpp:417-444（帧对齐、framesin×framebytes）；sendbytes = getDataBytes（configuration.cpp，已帧对齐含 guard）；**getLastFileOffset（P6）** 暴露上次读入的文件偏移供喂入重叠剔除 |
-| fenginewriter.{h,cpp} | .sp / pcal.bin / autocorr.bin 写盘 | 布局照 data-spec 5.3；写入序照 core.cpp:1145-1153（finalisepcal→getPcal）、:993-1003（autocorr 批次节奏）、:1260-1265（averageFrequency→getAutocorrelation）；**autocorr.bin 覆盖 total bands（P4a 2026-09-13）**：头/写循环用 getDNumTotalBands、per-band nchan = getDTotalFreqIndex 的 nchan/chanstoavg，zoom 段 weight 从父 recorded band 取（getWeight(false, l)，映射同 core.cpp:1324-1339） |
+| fenginewriter.{h,cpp} | .sp / pcal.bin / autocorr.bin 写盘 | 布局照 data-spec 5.3；写入序照 core.cpp:1145-1153（finalisepcal→getPcal）、:993-1003（autocorr 批次节奏）、:1260-1265（averageFrequency→getAutocorrelation）；**autocorr.bin 覆盖 total bands（P4a 2026-09-13）**：头/写循环用 getDNumTotalBands、per-band nchan = getDTotalFreqIndex 的 nchan/chanstoavg，zoom 段 weight 从父 recorded band 取（getWeight(false, l)，映射同 core.cpp:1324-1339）；**crosspol 段（P7 2026-09-13）**：header v2 + crosspol 标志（writeAutoCorrs && maxproducts>2），批次记录平行段后接 crosspol 段（getAutocorrelation(true, j)/getWeight(true, j)，zoom 的 crosspol weight 从父 band 取 getWeight(true, l)，照 core.cpp:1288-1301/1342-1369） |
 
 ## 关键实现要点（易错，改前必读）
 
@@ -41,6 +41,7 @@ fxcorr-f <batch_id> <station> [workdir]
 - **数据文件起点 = batch 起点**（data-spec 5.2 file-per-batch 布局）：datareader 构造接收 batch 起点的绝对 sec/ns（main.cpp 由 batchstartjob 换算），locate 的字节偏移相对 batch 起点计算（batch 起点 = scan 起点时退化为原语义）。**数据块时间（*sec/*ns）须保持 scan 相对系**（Mode::setData 与 setOffsets 同系）；换算注意 batchstartabsns 是当日秒系、currentscanstartsec 是 scan 相对系（曾混用导致 nearestsample 越界、weight 全 0，2026-09-12 修复并回归对拍 6/6）。
 - zoom band 的 .sp 不落盘（x 侧从父 .sp 切片，P4a 2026-09-13）；**autocorr.bin 已含 zoom 段**（total bands，Mode 的 zoom 自相关是父数组切片、getMode 工厂自动传 numzoombands，f 侧零改动）；多相位中心/脉冲星 binning 不涉及（f 侧本就没有）。
 - **SwitchedPower 已支持（P6 2026-09-13）**：.input DATASTREAM 段 `TCAL FREQUENCY`（Hz，v2d antenna 级 `tcalFreq`）> 0 时 f 侧统计原始 2bit 高电平状态并写 `SWITCHEDPOWER_<mjd>_<sec>_<dsid>` 文本（SwitchedPower 类在 fxcorrcommon，mark5access 解析帧头）；= 0（默认）路径零改动。
+- **交叉极化自相关已支持（P7 2026-09-13）**：autocorr.bin version 2 + header 加 u32 crosspol 标志（= WRITE AUTOCORRS && maxproducts>2，同 core.cpp:1288 条件）；crosspol=1 时每条批次记录 = 平行段（total bands）+ crosspol 段（同构），crosspol 谱/weight 从 Mode 的 autocorrelations[1]/weights[1] 取（getMode 工厂已把 writeautocorrs 传入，Mode 计算零改造），zoom 的 crosspol weight 从父 recorded band 取（getWeight(true, l)，父匹配同平行）。自相关 SWIN 写盘由 fxcorrcommon Visibility 的 autocorrwidth=2 路径零改造处理。
 
 ## 构建与注册
 
@@ -55,3 +56,5 @@ fxcorr-f <batch_id> <station> [workdir]
 - 对拍（fxcorr-x 完成后）：SWIN 逐记录比较通过（数据完整段 6/6 全等，见 impl-plan 2.3 实施记录）。
 
 **switched power（P6）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/tcal/README.md`（2026-09-13 验证过：switched power 前 2 个完整整秒窗与 mpifxcorr 逐位全等、SWIN 回归 6/6、位序对拍 BYTE-IDENTICAL、无 tcal 回归 6/6）。
+
+**交叉极化自相关（P7）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/crosspol/README.md`（2026-09-13 验证过：dual-pol autocorr.bin v2 crosspol=1、SWIN 自相关 4 pol 落位正确；单 pol + WRITE AUTOCORRS 与 mpifxcorr 对拍 6/6、无 WRITE AUTOCORRS 回归 2/2、位序 BYTE-IDENTICAL）。

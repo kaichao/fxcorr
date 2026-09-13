@@ -35,6 +35,10 @@ FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int conf
 	}
 
 	haspcal = (config->getDPhaseCalIntervalHz(configindex, dsindex) > 0);
+	// cross-polar section condition, same as core.cpp:1288
+	// (Mode's crosspol accumulation is switched on by WRITE AUTOCORRS at
+	// construction; maxproducts>2 means the data actually has dual pol)
+	hascrosspol = config->writeAutoCorrs(configindex) && config->getMaxProducts() > 2;
 
 	// one .sp file per recorded band
 	spfiles.resize(nrecordedbands);
@@ -152,12 +156,16 @@ void FEngineWriter::writePcalHeader()
 void FEngineWriter::writeAutocorrHeader()
 {
 	fwrite("FXCAC\0", 1, 6, autocorrfile);
-	u32 version = 1;  fwrite(&version, 1, 4, autocorrfile);
+	u32 version = 2;  fwrite(&version, 1, 4, autocorrfile);
 	u32 nsub = nsubints;  fwrite(&nsub, 1, 4, autocorrfile);
 	// number of AC averaging-batch records per subint (= ceil(blockspersend/acblocks))
 	u32 acb = (blockspersend + acblocks - 1)/acblocks;  fwrite(&acb, 1, 4, autocorrfile);
 	// total bands (recorded + zoom), bandindex in datastream-total order
 	u32 nbands = ntotalbands;  fwrite(&nbands, 1, 4, autocorrfile);
+	// P7: version 2 adds a cross-polar section flag; when set, every batch
+	// record carries the parallel section followed by an identical cross-pol
+	// section (same band order), mirroring core.cpp:1273-1301
+	u32 crosspol = hascrosspol ? 1 : 0;  fwrite(&crosspol, 1, 4, autocorrfile);
 	for(int j=0;j<ntotalbands;j++)
 	{
 		u32 bandindex = j;  fwrite(&bandindex, 1, 4, autocorrfile);
@@ -252,31 +260,40 @@ void FEngineWriter::writeAutocorrelationBatch(Mode *mode)
 	// Zoom bands are slices of the parent autocorrelation array; their weight
 	// is taken from the parent recorded band (Mode::weights only holds recorded
 	// bands, so zoom bands cannot be queried directly).
+	// P7: with WRITE AUTOCORRS && maxproducts>2 the cross-polar section
+	// follows the parallel one (core.cpp:1288-1301 / 1342-1369); both walk
+	// the same total-band order.
 	mode->averageFrequency();
-	for(int j=0;j<ntotalbands;j++)
+	auto writesection = [&](bool crosspol)
 	{
-		const cf32 *ac = mode->getAutocorrelation(false, j);
-		fwrite(ac, sizeof(cf32), acbandnchan[j], autocorrfile);
-
-		f32 w = 0.0f;
-		if(j >= nrecordedbands)
+		for(int j=0;j<ntotalbands;j++)
 		{
-			// core.cpp:1324-1339: weight of the parent recorded band
-			int localfreqindex = config->getDLocalZoomFreqIndex(configindex, dsindex, j-nrecordedbands);
-			int parentfreqindex = config->getDZoomFreqParentFreqIndex(configindex, dsindex, localfreqindex);
-			for(int l=0;l<nrecordedbands;l++)
+			const cf32 *ac = mode->getAutocorrelation(crosspol, j);
+			fwrite(ac, sizeof(cf32), acbandnchan[j], autocorrfile);
+
+			f32 w = 0.0f;
+			if(j >= nrecordedbands)
 			{
-				if(config->getDLocalRecordedFreqIndex(configindex, dsindex, l) == parentfreqindex &&
-				   config->getDZoomBandPol(configindex, dsindex, j-nrecordedbands) == config->getDRecordedBandPol(configindex, dsindex, l))
+				// core.cpp:1324-1339 / 1342-1369: weight of the parent recorded band
+				int localfreqindex = config->getDLocalZoomFreqIndex(configindex, dsindex, j-nrecordedbands);
+				int parentfreqindex = config->getDZoomFreqParentFreqIndex(configindex, dsindex, localfreqindex);
+				for(int l=0;l<nrecordedbands;l++)
 				{
-					w = mode->getWeight(false, l);
+					if(config->getDLocalRecordedFreqIndex(configindex, dsindex, l) == parentfreqindex &&
+					   config->getDZoomBandPol(configindex, dsindex, j-nrecordedbands) == config->getDRecordedBandPol(configindex, dsindex, l))
+					{
+						w = mode->getWeight(crosspol, l);
+					}
 				}
 			}
+			else
+			{
+				w = mode->getWeight(crosspol, j);
+			}
+			fwrite(&w, 1, 4, autocorrfile);
 		}
-		else
-		{
-			w = mode->getWeight(false, j);
-		}
-		fwrite(&w, 1, 4, autocorrfile);
-	}
+	};
+	writesection(false);
+	if(hascrosspol)
+		writesection(true);
 }

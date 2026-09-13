@@ -268,16 +268,18 @@ Header：
 ```
 Header：
   char[6]   magic = "FXCAC\0"
-  u32       version = 1
+  u32       version = 2
   u32       n_subints
   u32       ac_batches（每 subint 的 AC 平均批次记录数 = ceil(blocks_per_send/maxacblocks)）
   u32       n_bands（total bands = recorded + zoom）
+  u32       crosspol（1 = 记录含交叉极化段；0 = 仅平行段。= WRITE AUTOCORRS && maxproducts>2）
   每 band：u32 band_index（datastream-total 序）；u32 num_channels（各 band 各自 nchan/chanstoavg）
 每 subint（ac_batches 条记录，按 fftloop 批序）：
-  每 band：cf32[num_channels]（自相关复数谱）+ f32 weight（本批次累积权重）
+  平行段：每 band：cf32[num_channels]（自相关复数谱）+ f32 weight（本批次累积权重）
+  crosspol 段（仅 crosspol=1）：每 band：cf32[num_channels]（交叉极化自相关）+ f32 weight
 ```
 
-自相关在 f 侧由 `Mode::process` 累积，每 maxacblocks 个 FFT（与 core.cpp:993-1003 同节奏）`averageFrequency()` 平均后落一条记录、随即 `zeroAutocorrelations()`；x 侧把该 subint 的全部记录逐条累加进 SWIN 自相关段（`vectorAdd`，基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。maxacblocks 由 .calc 的 AC AVG INTERVAL 与 subint 结构共同决定（公式同 core.cpp:778-783）。**zoom band（2026-09-13 P4a）**：自相关谱为父 band 平均后数组的切片（mode.cpp:382-385，偏移已除 channelstoaverage），zoom 段的 weight 从父 recorded band 取（Mode 的 weights 只有 recorded 维；映射逻辑同 core.cpp:1324-1339）。
+自相关在 f 侧由 `Mode::process` 累积，每 maxacblocks 个 FFT（与 core.cpp:993-1003 同节奏）`averageFrequency()` 平均后落一条记录、随即 `zeroAutocorrelations()`；x 侧把该 subint 的全部记录逐条累加进 SWIN 自相关段（`vectorAdd`，基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。maxacblocks 由 .calc 的 AC AVG INTERVAL 与 subint 结构共同决定（公式同 core.cpp:778-783）。**zoom band（2026-09-13 P4a）**：自相关谱为父 band 平均后数组的切片（mode.cpp:382-385，偏移已除 channelstoaverage），zoom 段的 weight 从父 recorded band 取（Mode 的 weights 只有 recorded 维；映射逻辑同 core.cpp:1324-1339）。**交叉极化段（2026-09-13 P7）**：crosspol=1 时记录在平行段后接同构的 crosspol 段（顺序同 core.cpp:1273-1301/1342-1369 的 results 布局串联），交叉谱 = 同一 FFT 块内 R×conj(L) 与 L×conj(R) 的累加（Mode 内 autocorrelations[1]，calccrosspolautocorrs 由 WRITE AUTOCORRS 开启）、weight 累加同平行（perbandweights 时为两 band 权重乘积）；x 侧按 header 的 crosspol 标志读段并累加进结果区 crosspol 偏移（平行段 walk 结束处接续），SWIN 写盘由 Visibility 的 autocorrwidth=2 路径处理（polpair = 平行 [p,p] / 交叉 [p,opposite(p)]）。version 1（旧产物，无 crosspol 字段）按无 crosspol 段处理。
 
 ### 5.4 X-Engine 输出（vis/，SWIN）
 

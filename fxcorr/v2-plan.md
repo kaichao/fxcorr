@@ -62,7 +62,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 | P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | 主体在 x 侧（zoom 另需 f 侧 autocorr.bin 补段），按改动量排序；详细设计见 algo-plan.md。P4a zoom ✅ 2026-09-13（对拍 12/12 全等、无 zoom 回归 6/6）；P4b/P4c 待实施 |
 | P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） | ⤴ V3（2026-09-13 挪出）：流式新能力而非串行迁移；上游 vdifnetwork.cpp 现成实现可参照 |
 | P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 | f 侧新类（放 fxcorrcommon），站级纯串行、投入最小；SWITCHEDPOWER_* 落盘（switchedpower.cpp:22-276，参照 mark5access m5tsys.c） |
-| P7 | 交叉极化自相关（WRITE AUTOCORRS / maxproducts>2） | 功能未迁移 | f 落盘 crosspol 段（data-spec 5.3 需增）+ x 累加（core.cpp:1177/1288-1301/1342-1369、visibility.cpp:592-648），两侧联动 |
+| P7 | 交叉极化自相关（WRITE AUTOCORRS / maxproducts>2） | 功能未迁移 | ✅ 2026-09-13（Mode/Visibility 的 crosspol 路径随 fxcorrcommon 零改造就位，改动仅 f 的 autocorr.bin crosspol 段（v2 + flag）、x 的读段累加与 V1 拒绝删除；dual-pol 全链路跑通、单 pol + WRITE AUTOCORRS 对拍 6/6 全等、无 crosspol 回归 2/2、位序 BYTE-IDENTICAL；mpifxcorr 读 2 band 样本交织 VDIF 上游不可用，2 band 对拍以物理验证为准） |
 | P8 | 相位阵（phased array）频率域加权 | 功能未迁移 | x 侧波束加权求和（core.cpp:818-865），f 的 .sp 多站频谱现成；TIMESERIES 输出为上游死代码不迁移 |
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | f 侧 FXCORR_KURTOSIS=1 触发（mode.cpp:1403 API 现成），补 averageFrequency 分支（core.cpp:1181-1187/1378-1429） |
 | P10 | 输入格式补齐 | 功能未迁移 | f 侧 reader：Mark5B（mark5bfile.cpp:412-533）→ LBA 家族 → 其余（VLBA/K5VSSP/MKIV/KVN5B/CODIF）；多线程 VDIF corner-turn 数据重组（vdiffile.cpp:348-473，datamuxer 已在 common）；硬件访问（StreamStor/Mark6）不迁移 |

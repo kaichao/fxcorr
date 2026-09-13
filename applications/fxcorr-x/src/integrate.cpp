@@ -163,14 +163,16 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 			continue;
 		}
 
-		// header: magic + version + nsub + acbatches + nbands + per-band (bandindex, nchan)
+		// header: magic + version + nsub + acbatches + nbands
+		//         [+ crosspol flag (version 2, P7)] + per-band (bandindex, nchan)
 		char magic[6];
-		u32 version, nsub, acbatches, nbands;
+		u32 version, nsub, acbatches, nbands, crosspol = 0;
 		if(fread(magic, 1, 6, file) != 6 || memcmp(magic, "FXCAC\0", 6) != 0 ||
-		   fread(&version, 4, 1, file) != 1 || version != 1 ||
+		   fread(&version, 4, 1, file) != 1 || (version != 1 && version != 2) ||
 		   fread(&nsub, 4, 1, file) != 1 ||
 		   fread(&acbatches, 4, 1, file) != 1 ||
-		   fread(&nbands, 4, 1, file) != 1)
+		   fread(&nbands, 4, 1, file) != 1 ||
+		   (version == 2 && fread(&crosspol, 4, 1, file) != 1))
 		{
 			cerr << "addAutocorrs: bad header in " << autocorrFiles[ds] << endl;
 			fclose(file);
@@ -183,7 +185,8 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 			continue;
 		}
 
-		// per-band channel counts; each ac batch record is sum over bands of (nchan*8 + 4) bytes
+		// per-band channel counts; each ac batch record is sum over bands of
+		// (nchan*8 + 4) bytes per section (parallel + optional cross-pol)
 		int *bandnchan = new int[nbands];
 		long long recordsize = 0;
 		int maxnchan = 0;
@@ -202,8 +205,9 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 			if((int)nchan > maxnchan)
 				maxnchan = (int)nchan;
 		}
+		recordsize *= (long long)(1 + crosspol);
 
-		long long headeroffset = 6 + 4 + 4 + 4 + 4 + (long long)nbands*8;
+		long long headeroffset = 6 + 4 + 4 + 4 + 4 + (long long)(version == 2 ? 4 : 0) + (long long)nbands*8;
 		if(subint < 0 || (u32)subint >= nsub)
 		{
 			cerr << "addAutocorrs: subint " << subint << " out of range (nsub=" << nsub << ")" << endl;
@@ -221,44 +225,53 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 
 		// core.cpp:1273-1302 / 1314-1339: every ac batch record of this subint
 		// is accumulated, over total bands (recorded + zoom); zoom band weights
-		// were already mapped to the parent recorded band by fxcorr-f
+		// were already mapped to the parent recorded band by fxcorr-f.
+		// P7: the cross-pol section follows the parallel one and continues the
+		// same resultindex/weightindex walk (core.cpp:1288-1301 / 1342-1369
+		// concatenates the sections in the results layout)
 		cf32 *acbuf = new cf32[maxnchan];
 		for(u32 rec=0;rec<acbatches;rec++)
 		{
 			int resultindex = config->getCoreResultAutocorrOffset(configindex, ds);
 			int weightindex = config->getCoreResultACWeightOffset(configindex, ds)*2;
-			for(int k=0;k<(int)nbands;k++)
+			auto readsection = [&]()
 			{
-				int freqindex = config->getDTotalFreqIndex(configindex, ds, k);
-				int freqchannels = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
-				if((int)bandnchan[k] != freqchannels)
+				for(int k=0;k<(int)nbands;k++)
 				{
-					cerr << "addAutocorrs: " << autocorrFiles[ds] << " band " << k << " has " << bandnchan[k] << " channels, config expects " << freqchannels << endl;
+					int freqindex = config->getDTotalFreqIndex(configindex, ds, k);
+					int freqchannels = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
+					if((int)bandnchan[k] != freqchannels)
+					{
+						cerr << "addAutocorrs: " << autocorrFiles[ds] << " band " << k << " has " << bandnchan[k] << " channels, config expects " << freqchannels << endl;
+						resultindex += freqchannels;
+						weightindex++;
+						continue;
+					}
+
+					if(fread(acbuf, sizeof(cf32), freqchannels, file) != (size_t)freqchannels)
+					{
+						cerr << "addAutocorrs: short record in " << autocorrFiles[ds] << endl;
+						break;
+					}
+					f32 acweight = 0.0f;
+					if(fread(&acweight, 4, 1, file) != 1)
+					{
+						cerr << "addAutocorrs: short weight in " << autocorrFiles[ds] << endl;
+						break;
+					}
+
+					if(config->isFrequencyUsed(configindex, freqindex) || config->isEquivalentFrequencyUsed(configindex, freqindex))
+					{
+						vectorAdd_cf32_I(acbuf, &subintresults[resultindex], freqchannels);
+						floatresults[weightindex] += acweight;
+					}
 					resultindex += freqchannels;
 					weightindex++;
-					continue;
 				}
-
-				if(fread(acbuf, sizeof(cf32), freqchannels, file) != (size_t)freqchannels)
-				{
-					cerr << "addAutocorrs: short record in " << autocorrFiles[ds] << endl;
-					break;
-				}
-				f32 acweight = 0.0f;
-				if(fread(&acweight, 4, 1, file) != 1)
-				{
-					cerr << "addAutocorrs: short weight in " << autocorrFiles[ds] << endl;
-					break;
-				}
-
-				if(config->isFrequencyUsed(configindex, freqindex) || config->isEquivalentFrequencyUsed(configindex, freqindex))
-				{
-					vectorAdd_cf32_I(acbuf, &subintresults[resultindex], freqchannels);
-					floatresults[weightindex] += acweight;
-				}
-				resultindex += freqchannels;
-				weightindex++;
-			}
+			};
+			readsection();
+			if(crosspol)
+				readsection();
 		}
 		delete [] acbuf;
 		delete [] bandnchan;

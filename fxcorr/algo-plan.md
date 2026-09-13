@@ -580,7 +580,68 @@ f 侧支持 .input DATASTREAM 段的 `TCAL FREQUENCY`（Hz，>0 启用），出 
 
 ---
 
+## P7：交叉极化自相关（WRITE AUTOCORRS / maxproducts>2）
+
+### 是什么
+
+dual-pol 观测（如 RCP+LCP 同频率）时，除平行自相关（RR/LL）外还输出**交叉极化自相关**（RL/LR）：同一 FFT 块内 R 频谱 × conj(L 频谱) 与 L × conj(R) 的累加谱，与平行自相关一起进 SWIN 文件（自相关伪基线 `257*(telescope_index+1)`，polpair 记录 RR/LL/RL/LR）。
+
+### 动机分类
+
+功能未迁移。上游 Mode 已随 fxcorrcommon 迁移时**自带 crosspol 计算**（getMode 工厂把 `conf.writeautocorrs` 直接作为 calccrosspolautocorrs 传入，计算/频率平均/清零全部按 autocorrwidth 循环，零改造），但 f 的 autocorr.bin 只落平行段、x 的 V1 检查直接拒绝 maxproducts>2——链路断在 f/x 两侧的文件接口上。
+
+### 要解决的问题
+
+偏振校准需要的交叉极化自相关缺失，dual-pol 实验无法处理。
+
+### 预期效果
+
+.input CONFIG 段 `WRITE AUTOCORRS TRUE` 且 dual-pol（maxproducts>2）时，fxcorr 全链路 SWIN 含平行 + 交叉自相关记录，与 mpifxcorr 逐记录对拍全等；WRITE AUTOCORRS 默认 FALSE 路径零改动、无 crosspol 回归不变。
+
+### 设计
+
+**上游数据链路全景**：
+
+1. 触发：.input CONFIG 段 `WRITE AUTOCORRS`（TRUE/T 开启）→ `configs[i].writeautocorrs`（configuration.cpp:1290-1291，fxcorrcommon 已迁移零改造）。**Mode 构造**：getMode 工厂直接把 `conf.writeautocorrs` 作为 calccrosspolautocorrs 传 Mode（configuration.cpp:916 等，已迁移）→ `autocorrwidth = 2`（mode.cpp:364-368）。
+2. 计算（mode.cpp:1333-1352，零改造）：Mode::process 内每个 FFT 块，`matchingRecordedBand(i, j)`（freq 索引 == band 的 recordedbandlocalfreqindices，configuration.h:140-141）收集 count 个同频率 band（indices[]）；**count>1 时**（dual-pol 同频率）累加 `autocorrelations[1][indices[0]] += fft[ind0]×conj(conjfft[ind1])` 与对称项；`weights[1][idx]` 累加 dataweight（perbandweights 时取两 band 权重乘积）。单 pol 时 count 恒 =1，crosspol 数组与权重恒 0（天然安全）。
+3. 频率平均/清零按 autocorrwidth 循环（mode.cpp:1385-1400 / 1460-1469，零改造）；zoom 的 crosspol 谱 = 父 band crosspol 数组切片（mode.cpp:379-388 在 autocorrwidth 循环内）。
+4. 拷贝（core.cpp:1288-1301 / 1342-1369）：averageAndSendAutocorrs 在平行段拷贝后，若 `writecrossautocorrs(=writeautocorrs) && maxproducts>2` 再拷 crosspol 段——results 自相关区布局 = **[平行段 total bands][crosspol 段 total bands]** 串联（resultindex 连续递增，isFrequencyUsed 跳过）；weight 区同构（floatresults）。zoom 的 crosspol weight 从父 recorded band 取（getWeight(true, l)，父匹配 = localfreqindex 同 + pol 同，与平行同构）。
+5. Visibility 写盘（visibility.cpp:903-947 / 591-647，fxcorrcommon 零改造）：writeautocorrs 时每 datastream 按 autocorrwidth 循环写自相关 SWIN 记录——j=0 平行（polpair=[p,p]）、j=1 交叉（polpair=[p, getOppositePol(p)]），baselinenumber = 257*(telescopeindex+1)，weight>0 才写；校准段（TSYS=0 走 weights 归一）crosspol 用 getDMatchingBand 的平行 calib 做除数。**结果长度预算已含 crosspol 段**（populateResultLengths 的 bandsperautocorr=2，configuration.cpp:2304/2503-2527，coreresultlength 自动覆盖，f/x 两侧缓冲分配零改动）。
+
+**fxcorr 落点表**：
+
+| 上游环节 | 上游位置 | fxcorr 落点 |
+|---|---|---|
+| WRITE AUTOCORRS 解析 | configuration.cpp:1290-1291 | 零改造（已迁移） |
+| Mode crosspol 计算/平均/清零 | mode.cpp:364/1333-1352/1385-1400/1460-1469 | 零改造（已迁移，getMode 工厂传 writeautocorrs） |
+| crosspol 段拷贝 | core.cpp:1288-1301/1342-1369 | **f：FEngineWriter::writeAutocorrelationBatch** 平行段后加 crosspol 段（getAutocorrelation(true, j)/getWeight(true, j)，zoom weight 父 band 逻辑同平行） |
+| autocorr.bin 布局 | data-spec 5.3 | **f：header 加 u32 crosspol flag + version 升 2**；crosspol 段记录与平行同构（每 band cf32[nchan] + f32 weight） |
+| V1 拒绝 | fxcorr-x main.cpp:158-159 | **删除**（maxproducts>2 放行） |
+| autocorr 累加 | integrate.cpp addAutocorrs | **x：按 flag 读 crosspol 段**，resultindex 从平行段 walk 结束处继续（同 core.cpp 连续递增语义），累加进 subintresults 自相关区与 floatresults weight 区 |
+| SWIN 自相关写盘 + 校准 | visibility.cpp:903-947/591-647 | 零改造（已迁移，autocorrwidth=2 路径现成） |
+
+**关键点（易错，实施必读）**：
+
+1. **crosspol 段存在条件 = writeautocorrs && maxproducts>2**（core.cpp:1288 判 modes[0]->writeCrossAutoCorrs() 即 writeautocorrs；maxproducts>2 是配置性质——dual pol 时 BASELINE 段 numpolproducts=4）。f 写段与 x 读段必须用同一条件（x 按 autocorr.bin header flag 判，不与 .input 重复推导）；单 pol 时 crosspol 恒 0、weight 恒 0（count 永 =1），不写段也不产生 SWIN 记录。
+2. **crosspol 结果区偏移**：x 侧累加 crosspol 段时 resultindex 必须从**平行段 walk 结束处**继续（= getCoreResultAutocorrOffset + Σ平行 used-band nchan，isFrequencyUsed 跳过与平行同序），weightindex 同理——results 布局是平行/cross 串联，不是独立 offset 区。
+3. **zoom crosspol**：谱是父 band crosspol 数组切片（getAutocorrelation(true, j) 直接可用）；weight 从父 recorded band 取（getWeight(true, l)，父匹配条件同平行：localfreqindex 相同 + pol 相同，core.cpp:1342-1369 同构）。
+4. **无独立 valid flags**：crosspol weight=0 即无数据（visibility 判 weights>0 才写），单 band 无效时 dataweight=0 自然传染 crosspol，无需特判。
+5. **对拍数据需 dual-pol 2 band VDIF**：test.vex 单 pol，需新资产（chan_def 加 Lcp 行）。mpifxcorr vdifmux 读 2 band 有历史问题（test2b 2026-09-12 记录读端错乱只出 1 积分），但 P6 帧头修复（2026-09-13）后未重测——**实施第一步先重测 2 band + mpifxcorr 链路**；若仍读不了则对拍降级为 fxcorr 链路自洽性验证（SWIN 自相关记录数值/落位合理性）并记录。
+6. **autocorr.bin 兼容**：version 升 2 + u32 crosspol flag；x 侧读 header 时 version 1 按无 crosspol 段处理（旧 f 产物仍可读）、version 2 按 flag 判——单 pol 无 WRITE AUTOCORRS 的 v2 文件 flag=0，记录布局与 v1 完全一致。
+7. **SWIN 对拍含自相关记录**：mpifxcorr 在 writeautocorrs 时同样写自相关伪基线记录，cmp_swin.py 全记录比较直接覆盖，无需工具改动。
+
+### 验证方法
+
+- 资产 `fxcorr/test/crosspol/`：test-pols.vex（chan_def 加 Lcp 行）+ test-pols.v2d（.input 生成 WRITE AUTOCORRS TRUE）+ README。
+- 2 band（RCP+LCP 同频率）数据生成（fxcorr-sim，tone 参数两 band 给不同频率利于 crosspol 非平凡）→ mpifxcorr 基准（EXECUTE TIME=2 截断）与 fxcorr 全链路对拍：cmp_swin.py 全记录（含自相关伪基线）逐位全等。
+- 无 crosspol 回归：test 配置（单 pol、无 WRITE AUTOCORRS）SWIN 6/6 不变；autocorr.bin 无 crosspol 段时 x 侧照旧。
+- 位序回归：生成器输出 BYTE-IDENTICAL 不变（P6 修复后基线）。
+
+✅ 2026-09-13：**dual-pol 全链路跑通**（test-pols 资产：RCP+LCP 同 200MHz、POL PRODUCTS 4、WRITE AUTOCORRS TRUE）：autocorr.bin v2 crosspol=1（记录 = 平行 2 band + crosspol 2 band，weight>0）；SWIN 72 条 = 6 积分 × 12（1 基线 × 4 pol 互相关 + 自相关伪基线 257/514 各 RR/LL/RL/LR 4 条，顺序同 visibility.cpp:913-944），自相关谱峰全部落 1.5MHz（tone 频率）、交叉谱功率 = 平行谱功率（同 tone 完全相关，物理判据）、weight=1.0。**单 pol + WRITE AUTOCORRS 对拍**：fxcorr 与 mpifxcorr 前 2 积分 6/6 记录逐位全等（含 4 条自相关记录：基线号/时间戳/polpair/weight/可见度——autocorr.bin v2 读法、x 侧累加、Visibility 自相关写盘与上游一致）。**无 WRITE AUTOCORRS 回归**：autocorr.bin v2 crosspol=0、SWIN 对拍 2/2 全等（退化路径不漂移）。**位序回归**：fxcorr-sim 单 band 输出与 gen_test_vdif.py BYTE-IDENTICAL（8032000 字节公共前缀）。**对拍数据链路前置发现（非 P7 代码问题）**：① test2b.vex 的 $TRACKS `track_frame_format = VDIF/8032/2` 帧长写错（2 band 实为 16032）→ vex2difx 生成 DATA FRAME SIZE 8032 → vdifmux 帧长不匹配错乱；改为 16032 后 vdifmux 警告清零、SWIN 头字段正常，但 mpifxcorr 读 2 band 样本交织帧仍只有首积分有效（vdiffile.cpp:538-550 的 setvdifmuxinputchannels(2) corner-turn 路径输出 32032B 帧，与 mark5access 的 2channel 交织解码期望不匹配，上游此路径本不可用），**mpifxcorr 对拍 2 band 仍不可行**，crosspol 对拍以单 pol 场景覆盖（自相关写盘路径共享）+ dual-pol 链路自洽验证；② fxcorr-sim 的 nbands 用 getDNumRecordedFreqs（不同频率数）——dual-pol 同频率时 freq 数=1 而 band 数=2，2bit 校验与 tone/pcal 网格全部按 band 语义使用，改为 getDNumRecordedBands（多频场景两值相等，行为不变；位序回归 BYTE-IDENTICAL 佐证）。
+
+---
+
 ## 相关
 
 - 优先级与验收总览：v2-plan.md 第 5/6 节
-- 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（子集目录与合并约定，12 节）
+- 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（子集目录与合并约定，12 节）、**P7（autocorr.bin 增 crosspol 段与 header 字段，5.3 节）**

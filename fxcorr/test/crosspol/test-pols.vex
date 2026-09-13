@@ -176,7 +176,7 @@ def 2400.00MHz2x4MHz;
 * mode =  1    stations =T1:T2
      sample_rate =   8.000 Ms/sec;  * (2bits/sample)
      chan_def = :  200.00 MHz : U :   4.00 MHz : &CH01 : &BBC01 : &NoCal; *Rcp
-     chan_def = :  205.00 MHz : U :   4.00 MHz : &CH02 : &BBC02 : &NoCal; *Rcp
+     chan_def = :  200.00 MHz : U :   4.00 MHz : &CH02 : &BBC02 : &NoCal; *Lcp
 enddef;
 *------------------------------------------------------------------------------
 $IF;
@@ -184,13 +184,13 @@ $IF;
 def LO@2000MHzRPolNoTone;
 * mode =  1    stations =T1
      if_def = &IF_2N : 2N : R :  2000.00 MHz : U ; * PCall off!   0.0   0.0  NA     0 NA
-     if_def = &IF_2N : 2N : R :  2005.00 MHz : U ; * PCall off!   0.0   0.0  NA     0 NA
+     if_def = &IF_2L : 2L : L :  2000.00 MHz : U ; * PCall off!   0.0   0.0  NA     0 NA
 enddef;
 *
 def LO@1600MHzRPolNoTone;
 * mode =  1    stations =T2
      if_def = &IF_2N : 2N : R :  1600.00 MHz : U ; * PCall off!   0.0   0.0  NA     0 NA
-     if_def = &IF_2N : 2N : R :  1605.00 MHz : U ; * PCall off!   0.0   0.0  NA     0 NA
+     if_def = &IF_2L : 2L : L :  1600.00 MHz : U ; * PCall off!   0.0   0.0  NA     0 NA
 enddef;
 *------------------------------------------------------------------------------
 $BBC;
@@ -198,7 +198,7 @@ $BBC;
 def 1BBCs;
 * mode =  1    stations =T1:T2
      BBC_assign = &BBC01 :  1 : &IF_2N;
-     BBC_assign = &BBC02 :  2 : &IF_2N;
+     BBC_assign = &BBC02 :  2 : &IF_2L;
 enddef;
 *------------------------------------------------------------------------------
 $PHASE_CAL_DETECT;
