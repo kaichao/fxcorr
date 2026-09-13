@@ -47,17 +47,20 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
   - 测试机网络：直连 registry-1.docker.io 超时，`/etc/docker/daemon.json` 已配 registry-mirrors（1panel/daocloud/dockerproxy）。
 - builder 已定 **`--skip=mpifxcorr,difx2profile,vis2screen`**（difx2profile/vis2screen 依赖 mpifxcorr 安装的 fxcorr.pc，一并跳过；均不在容器需求清单）。
 - difx-tools 清单已定：vex2difx、difxcalc（difxcalc11 安装名）、difx2fits；difx2mark4 按需再加。
-- builder 构建命令：`python3 install-difx --noipp --nodoc --skip=mpifxcorr`（--nodoc 免装 doxygen）。
+- builder 构建命令：`python3 install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen`（--nodoc 免装 doxygen）。
 
-## 5. V1 遗留算法改进清单（优先级待细化）
+## 5. V1 遗留算法改进清单（优先级已定稿 2026-09-13）
 
-- `PCAL_*.pcal` 文件生成（pcal 数据已由 f 落盘 pcal.bin，文本文件生成待补）
-- difxmessage 状态/STA 消息（组播）
-- 多相位中心（uvshift 多相位中心路径）
-- zoom band（.sp 切片）
-- 脉冲星 binning
-- 多线程 / 网络输入 / 数据流化
-- 多 x 子集并行（各子集写独立子目录，difx2fits 前合并，data-spec 12 节）
+每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。排序依据：先补齐数据链路完整性（P0/P1），再补算力（P2/P3），后补科学功能（P4 按改动量），最后新能力（P5）。
+
+| 优先级 | 改进项 | 动机分类 | 一句话说明 |
+|---|---|---|---|
+| P0 | `PCAL_*.pcal` 文件生成 | 功能未迁移 | ✅ 2026-09-13（f 按 intTime 聚合 tone 写实验级文本，追加幂等；单 batch 与 mpifxcorr 基准逐字节对拍通过，多 batch 追加/重跑幂等验证通过） |
+| P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 | f/x 发状态；container 降级为落盘文件由编排层转发 |
+| P2 | 多 x 子集并行 | 串行环境新变化 | 基线切子集多进程并行，SWIN 合并（data-spec 12 节） |
+| P3 | 多线程（f/x 进程内并行） | 串行环境新变化 | OpenMP 并行 FFT 批 / 基线循环，与 P2 叠加 |
+| P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | x 侧补齐科学功能，按改动量排序 |
+| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） | 网络流输入，依赖采集环境 |
 
 ## 6. 验收标准（第一版）
 
@@ -72,6 +75,5 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 
 ## 7. 待细化
 
-- 算法改进优先级排序
 - 镜像体积（2026-09-13 已做一轮优化，现状）：builder 2.05GB（不优化）；base 与 fxcorr-f/x/sim 各 213MB；difx-tools 324MB（多出的 share/difxcalc 星历 28MB、gsl/gfortran/cfitsio 运行时 22MB、三 bin ~19MB）。已做：base 只 COPY `lib/*.so*`（去 .a/.la）、share 与 cfitsio 移到 difx-tools。未做：strip 可执行（difx 工具未 strip，vex2difx 15.9MB，strip 可省但需在 COPY 同层做或改 builder，暂不处理）
 - 容器模式执行前缀已定：**单一环境变量开关 `FXCORR_RUN_MODE=container`**，脚本内 `fxc` 封装按工具→镜像映射加 docker run 前缀（workdir 整体挂载、cwd 与宿主直跑一致、FXSIM_NOISE/SEED 透传）

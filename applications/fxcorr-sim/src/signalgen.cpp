@@ -68,7 +68,10 @@ void SignalGen::fillFramePayload(unsigned char *payload, int payloadbytes, int n
 		for(size_t k = 0; k < pcalmhz[band].size(); k++)
 		{
 			double phase = 2.0 * M_PI * pcalmhz[band][k] * (double)i / ratemhz[band];
-			v += 0.1 * sin(phase);
+			// 0.7 like the main tone: a 0.1 amplitude never crosses the 2-bit
+			// quantisation boundaries (|2v| < 0.5 -> always the same level),
+			// so the injected pcal signal vanished entirely in the quantiser
+			v += 0.7 * sin(phase);
 		}
 
 		int q = quantise2bit(v);

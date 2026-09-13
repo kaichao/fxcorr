@@ -8,6 +8,7 @@
 - **data-spec.md**：数据规范（版本 1.1）—— 目录布局、D1-D13 数据类型、模块 I/O、band_XX.sp / pcal.bin / autocorr.bin / SWIN 二进制格式、时间轴与通道/偏振映射、切批约束。**改数据接口/文件格式时必须先同步它**。
 - **impl-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。改实施步骤时改它。
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。改 V2 范围或镜像设计时改它。
+- **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
 - **build.md**：构建手册——集成构建（install-difx）与独立构建（单包 autotools）两条路径、依赖、测试机工作流。改构建体系时改它。
 
@@ -54,6 +55,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `test.v2d` | 配套 vex2difx 配置（antennas=T1,T2，tInt=1，nChan=4096） |
 | `gen_test_vdif.py` | 生成 2bit 单 band VDIF 测试数据（datasim 因上游 IPP 依赖无法 --noipp 构建，此脚本替代；**低位先打包**对齐 mark5access 位序；fxcorr-sim 的位序逐字节对拍参照，对拍已验证 BYTE-IDENTICAL；帧号公式已修为 `n % fps`（原 `n % 8000000 // 32000` 恒为 0，对拍时发现）） |
 | `test2b.vex` / `test2b.v2d` | 2 band 测试配置（test.vex 加 205MHz 第 2 band），fxcorr-sim 多 band 验证资产 |
+| `test-pcal.vex` / `test-pcal.v2d` | 带 phasecal 的测试配置（PHASE_CAL_DETECT tone 列表 `2:3:4:5`、phaseCalInt=1 → .input 4 tones 201-204MHz），PCAL_*.pcal 对拍验证资产（algo-plan P0） |
 | `cmp_swin.py` | SWIN 逐记录比较（74 字节头 + 可见度复数），对拍工具（impl-plan 验收标准 2） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |

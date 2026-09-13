@@ -13,6 +13,7 @@
 
 #include "datareader.h"
 #include "fenginewriter.h"
+#include "pcaltextwriter.h"
 
 using namespace std;
 
@@ -161,14 +162,30 @@ int main(int argc, char **argv)
 	}
 	FEngineWriter writer(outdir, &config, 0, dsindex, nsubints, maxacblocks);
 
+	bool haspcal = (config.getDPhaseCalIntervalHz(0, dsindex) > 0);
+	int subintns = config.getSubintNS(0);
+
+	// experiment-level PCAL text file lives next to the SWIN output
+	// (algo-plan.md P0); f runs first and creates the .difx directory.
+	// Use OUTPUT FILENAME as-is (like fxcorr-x): difxcalc writes it as an
+	// absolute path, run_bench.sh rewrites it relative to the workdir cwd.
+	PcalTextWriter *pcaltext = 0;
+	if(haspcal)
+	{
+		string pcaldir = config.getOutputFilename();
+		if(system(("mkdir -p " + pcaldir).c_str()) != 0)
+		{
+			cerr << "fxcorr-f: cannot create " << pcaldir << endl;
+			return EXIT_FAILURE;
+		}
+		pcaltext = new PcalTextWriter(pcaldir, &config, 0, dsindex);
+	}
+
 	int sendbytes = reader.getSendBytes();
 	u8 *databuf = new u8[sendbytes];
 	int blockspersend = reader.getBlocksPerSend();
 	int flagwords = (blockspersend + FLAGS_PER_INT - 1)/FLAGS_PER_INT;
 	s32 *validflags = new s32[flagwords];
-
-	bool haspcal = (config.getDPhaseCalIntervalHz(0, dsindex) > 0);
-	int subintns = config.getSubintNS(0);
 
 	// data-spec section 12: the batch start must lie on a subint boundary;
 	// tolerance absorbs the f64 representation error of start_mjd (~1 us)
@@ -181,6 +198,18 @@ int main(int argc, char **argv)
 			return EXIT_FAILURE;
 		}
 	}
+
+	// intTime boundaries for the PCAL text file: count subints per intTime
+	// (run_batch.sh validates intTime is a subint multiple and the batch
+	// length is an intTime multiple, so boundaries never split a batch)
+	double inttime = config.getIntTime(0);
+	long long subintsperint = (long long)(inttime*1.0e9/(double)subintns + 0.5);
+	if(subintsperint < 1)
+	{
+		cerr << "fxcorr-f: intTime " << inttime << " s is smaller than one subint (" << subintns << " ns)" << endl;
+		return EXIT_FAILURE;
+	}
+	long long batchstartabsns = (long long)batchstartsec*1000000000LL + (long long)batchstartns;
 
 	for(int s=0;s<nsubints;s++)
 	{
@@ -230,6 +259,8 @@ int main(int argc, char **argv)
 			acblockcount += numffts;
 			if(acblockcount == maxacblocks)
 			{
+				if(haspcal)
+					pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
 				writer.writeAutocorrelationBatch(mode);
 				mode->zeroAutocorrelations();
 				acblockcount = 0;
@@ -237,12 +268,34 @@ int main(int argc, char **argv)
 		}
 		if(acblockcount != 0)
 		{
+			if(haspcal)
+				pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
 			writer.writeAutocorrelationBatch(mode);
 			mode->zeroAutocorrelations();
 		}
 
 		writer.writePcal(mode);
+		if(haspcal)
+		{
+			pcaltext->accumulate(mode);
+			if(((long long)(s+1)) % subintsperint == 0)
+			{
+				// start of the intTime that just completed
+				long long totalns = batchstartabsns + (long long)(s+1-subintsperint)*(long long)subintns;
+				pcaltext->flush(totalns/1000000000LL, (int)(totalns%1000000000LL));
+			}
+		}
 		writer.flushWeights();
+	}
+
+	if(haspcal)
+	{
+		if(pcaltext->hasUnflushed())
+		{
+			cerr << "fxcorr-f: batch " << batchid << " ends with unflushed pcal tones (batch length is not an intTime multiple)" << endl;
+			return EXIT_FAILURE;
+		}
+		delete pcaltext;
 	}
 
 	delete [] databuf;

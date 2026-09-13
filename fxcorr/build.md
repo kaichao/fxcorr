@@ -64,7 +64,7 @@ V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化�
 
 | 子目录 | 镜像 | 基础 | 说明 |
 |---|---|---|---|
-| `fxcorr-builder/` | fxcorr-builder | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr` 全量编译 |
+| `fxcorr-builder/` | fxcorr-builder | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen` 全量编译（后两者依赖 mpifxcorr 安装的 fxcorr.pc，须一并跳过） |
 | `fxcorr-base/` | fxcorr-base | debian:13-slim | 运行时依赖 + 从 builder COPY 的 `/usr/local/difx/lib` 与 `/share`（含 difxcalc 星历数据） |
 | `fxcorr-f/` `fxcorr-x/` `fxcorr-sim/` | 同名 | fxcorr-base | 各自 COPY 一个 bin |
 | `difx-tools/` | difx-tools | fxcorr-base | vex2difx + difxcalc + difx2fits，另补 libgsl28/libgslcblas0 运行时 |

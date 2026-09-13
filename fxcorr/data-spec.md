@@ -247,7 +247,8 @@ Header：
   u32       n_subints
   u32       n_tones（最大 tone 数，取各 band 之和）
   u32       n_bands
-  每 band：u32 band_index；u32 n_tones_this_band；f64 tone_freq_mhz[n_tones]；char pol[n_tones]
+  每 band：u32 band_index；u32 n_tones_this_band；
+           每 tone：f64 tone_freq_mhz + char pol（交错，共 9B/tone）
 每 subint：cf32[n_tones]（各 band tone 依序排列）
 ```
 
@@ -282,7 +283,16 @@ vis/
 - **D10 = SWIN 二进制**：每记录 74 字节头（sync 0xFF00FF00、version、baselinenum、dumpmjd、dumpseconds、configindex、sourceindex、freqindex、polpair(2B)、pulsarbin、weight(double)、uvw[3×double]）+ `freqchannels` 个 cf32 可见度。与 mpifxcorr 的 `Visibility::writeSWIN` 逐字节一致，difx2fits / difx2mark4 零改造直读。
 - SWIN 文件名用**实验级** MJD+开始秒（.input 的 START MJD/SECONDS），**不含 batch_id**——同一实验的所有 batch 追加写入同一组文件（batch 边界与 intTime 对齐保证不碎片化，见第 12 节）。
 - 记录头里 `uvw[3]` 由 fxcorr-x 在写盘时用 Model（.calc + .im）在积分中点求值（`interpolateUVW`）。
-- 脉冲校准数据由 f 落盘（5.3 节 pcal.bin）；`PCAL_*.pcal` 文件生成（每实验每站一个，追加式）列入 V2。
+- 脉冲校准数据由 f 落盘（5.3 节 pcal.bin）；实验级文本文件 `PCAL_<mjd>_<sec>_<station>` 由 f 生成（V2 P0，2026-09-13 完成），格式与 mpifxcorr 逐字节一致、可与基准直接 diff 对拍：
+  ```
+  # DiFX-derived pulse cal data
+  # File version = 1
+  # Start MJD = <mjd>
+  # Start seconds = <sec>
+  # Telescope name = <station>
+  <station> <pcalmjd %17.11f> <intTime/86400 %13.11f> <dsindex> <n_recorded_bands> <max_tones> [<tonefreq %12g> <pol> <re %12.5e> <im %12.5e>]...
+  ```
+  每 intTime 一行（tone 值 = intTime 内 subint 累加 × 可见度层校准缩放，LSB 写原值 / USB im 取负，不足 max_tones 补 ` -1 0 0 0`，全零不写行）；追加幂等（按行时间戳替换），跨 batch 追加。
 - 自相关以基线号 `257*(telescope_index+1)` 写入 `s0000.b0000` 文件。
 
 batch.json（D9）已并入 `batches/<batch_id>.json` 单文件全字段，见 5.3 节。
