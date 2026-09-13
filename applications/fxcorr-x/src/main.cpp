@@ -158,8 +158,6 @@ int main(int argc, char **argv)
 		return fail(monitor, "fxcorr-x: phased arrays are not supported in V1");
 	if(config.getMaxProducts() > 2)
 		return fail(monitor, "fxcorr-x: cross-polar autocorrelations (maxproducts > 2) are not supported in V1");
-	if(model->getNumPhaseCentres(scan) > 1)
-		return fail(monitor, "fxcorr-x: multi phase centre uvshifting is not supported in V1");
 
 	// AC_INIT version of fxcorr-x
 	monitor.status(DIFX_STATE_STARTING, "Version 0.1.0", 0.0, 0, 0, 0.0, 0.0);
@@ -246,7 +244,7 @@ int main(int argc, char **argv)
 		autocorrFiles[ds] = sdir + "/autocorr.bin";
 	}
 
-	XmacEngine xmac(&config, configindex);
+	XmacEngine xmac(&config, configindex, model, scan);
 
 	// batch start expressed as job-relative seconds (same as fxcorr-f main)
 	long long scanstartsec = (long long)model->getScanStartSec(scan, config.getStartMJD(), config.getStartSeconds());
@@ -309,6 +307,9 @@ int main(int argc, char **argv)
 		double sreld = subintstart - (double)scanstartsec;
 		int expectedsec = (int)floor(sreld);
 		int expectedns = (int)((sreld - (double)expectedsec)*1.0e9 + 0.5);
+		// scan-relative seconds of the subint start, same time base as the
+		// upstream delay interpolator (offsets[1] + offsets[2]/1e9)
+		double offsetsec = (double)expectedsec + (double)expectedns/1.0e9;
 		for(int ds=0;ds<numdatastreams;ds++)
 		{
 			// every band view (recorded + zoom) must read its subint; zoom
@@ -349,7 +350,7 @@ int main(int argc, char **argv)
 			if(xcblockcount == maxxcblocks)
 			{
 				double nsoffset = (xcshiftcount*maxxcblocks + ((double)maxxcblocks)/2.0)*blockns;
-				xmac.uvshiftAndAverage(nsoffset, maxxcblocks*blockns, subintresults);
+				xmac.uvshiftAndAverage(offsetsec, nsoffset, maxxcblocks*blockns, subintresults);
 				xcblockcount = 0;
 				xcshiftcount++;
 			}
@@ -357,7 +358,7 @@ int main(int argc, char **argv)
 		if(xcblockcount != 0)
 		{
 			double nsoffset = (xcshiftcount*maxxcblocks + ((double)xcblockcount)/2.0)*blockns;
-			xmac.uvshiftAndAverage(nsoffset, xcblockcount*blockns, subintresults);
+			xmac.uvshiftAndAverage(offsetsec, nsoffset, xcblockcount*blockns, subintresults);
 		}
 
 		// baseline weights -> floatresults section (core.cpp:1065-1107, no locks)

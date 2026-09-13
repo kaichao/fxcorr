@@ -20,7 +20,7 @@ fxcorr-x <batch_id> [workdir]
 |---|---|---|
 | main.cpp | batch.json 解析、V1 边界检查、逐 subint 驱动（xcblockcount/maxxcblocks 批次、尾批、时间推进） | core.cpp:657-784（批控制）、:985-991 / :1055-1060（uvshift 触发）；fxmanager.cpp:650-698 的单 Visibility 串行替代 |
 | spreader.{h,cpp} | .sp 读取：256 字节头校验 + 按 subint fseek 读头/flags/weights/spectra（线性 FFT 序）；**zoom 切片视图（P4a 2026-09-13）**：构造参数 (channeloffset, nchanoverride) 时每 FFT 块只读父 .sp 的切片段，spectra()/numChannels() 语义不变 | 布局见 data-spec 5.3；对应 fxcorr-f 的 FEngineWriter |
-| xmac.{h,cpp} | XMAC 批循环 + baselineweight 累加 + uvshiftAndAverage | core.cpp:867-982（删 pulsar/phased array）、:1005-1052、:1431-1938（单相位中心、单线程：无 rotator、无锁、无 decorr 段）；vis2 逐块 `vectorConj_cf32` 后 `vectorAddProduct_cf32`（等价 getConjugatedFreqs）；zoom band 由 config 表驱动零改动（band index = ds total 序，readers 已含 zoom 视图） |
+| xmac.{h,cpp} | XMAC 批循环 + baselineweight 累加 + uvshiftAndAverage（含多相位中心） | core.cpp:867-982（删 pulsar/phased array）、:1005-1052、:1431-1938（单线程、无锁）；**多相位中心（P4b）**：差分延迟 + rotator 生成 + 旋转 + 结果区步进 + decorr 段照 :1636-1725/:1746-1815/:1877-1923，工作区分配照 :416-433，shiftdecorr 写段照 :1090-1105；vis2 逐块 `vectorConj_cf32` 后 `vectorAddProduct_cf32`（等价 getConjugatedFreqs）；zoom band 由 config 表驱动零改动（band index = ds total 序，readers 已含 zoom 视图） |
 | integrate.{h,cpp} | 单 Visibility（numvis=1）：addData 满 intTime → writedata → increment；autocorr.bin 逐批次累加进 results 自相关段/acweight 段 | fxmanager.cpp:168-185（构造+polnames）、:114-133（todiskbuffer 预算）；core.cpp:1260-1370（autocorr 累加，**P4a 2026-09-13 起覆盖 total bands**：nbands 校验 getDNumTotalBands、freqindex 用 getDTotalFreqIndex、acbuf 取最大 nchan，zoom 的 weight 已是 f 侧换算好的父 band 值） |
 
 ## 关键实现要点（易错，改前必读）
@@ -29,6 +29,7 @@ fxcorr-x <batch_id> [workdir]
 - **uvshiftAndAverage 简化版**：nsoffset/nswidth 参数保留但单相位中心下不用（rotator/decorr 全跳过）；频谱平均段照 core.cpp:1829-1853（virtualplacement/bin 平均，非 d260 老版）。
 - **自相关批次节奏**：autocorr.bin 每 subint 存 ac_batches=ceil(bps/maxacblocks) 条记录（f 侧每批次 averageFrequency+zero），x 侧必须**全部读入逐条累加**，与 mpifxcorr 的 averageAndSendAutocorrs 节奏一致——否则 weight 与数值都对不上。
 - **zoom 两条易错点（P4a，2026-09-13 实测教训）**：① x 侧**每 subint 的时间戳校验循环必须遍历全部 band 视图**（readers[ds].size()，含 zoom 视图）——只读 recorded 时 zoom 视图的 specbuf 恒 0、互相关全零而自相关正常（f 侧 autocorr.bin 独立落盘），首轮对拍 zoom 段 max rel 1.0 即此因；② BASELINE 段的 `D/STREAM A/B BAND` 行 key 序号是 **pol product 序号**不是 freq 序号（configuration.cpp:1016-1019 按 k 取行），自造 .input 时写错会导致 zoom band 静默解析为 0 且无报错。
+- **多相位中心三条易错点（P4b，algo-plan P4b 关键点）**：① **时间基准**：calculateDelayInterpolator 的 offsettime = offsetsec + nsoffset/1e9，offsetsec 是 subint 起点的 **scan 相对秒**（main.cpp 由 expectedsec/expectedns 合成，勿用当日秒系）；② **单源退化必须逐位一致**：延迟/rotator/decorr/写段全部由 numphasecentres>1 条件包裹（照 core.cpp:1636/1699/1887），单源路径与 P4b 前实现完全相同；③ **decorr 段结果区布局**：floatresults 的 shiftdecorr 段在 bweight 段之后、每 (freq,baseline) 连续 numphasecentres 个 f32，offset 用 getCoreResultBShiftDecorrOffset 勿手算。
 - **weight 语义链**：.sp weights = 每 FFT 块 dataWeight（槽式回填，见 fxcorr-f CLAUDE.md）→ baselineweight = Σ weight1×weight2 → floatresults（bweightoffset×2 处）；autocorr weight = 各批次 getWeight 累加 → acweightoffset×2 处。writedata 内部除以 fftsperintegration 归一。
 - **V1 启动边界检查**（main.cpp）：单 scan、单相位中心、maxproducts≤2、intTime 为 subintNS 整数倍、无 pulsar/phased array；batch 起点 subint 边界校验（容差 1µs，同 fxcorr-f）。
 - **executeseconds 语义**（Visibility::writedata 停写判定）：executeseconds 以 **scan 起点**为基准（mpifxcorr EXECUTE TIME 语义），batch 起点偏移 initsec 时须 `executeseconds = batch时长 + initsec + 1`，否则 batch 起点非 scan 起点的 batch 全部静默不写盘（2026-09-12 修复，batch 起点 scan 起点时退化为原语义、对拍回归 6/6）。
@@ -36,7 +37,7 @@ fxcorr-x <batch_id> [workdir]
 
 ## V1 边界
 
-- 输入仅 fxcorr-f 的 .sp（**zoom band 已支持（P4a 2026-09-13）**：x 侧按 .input 的 zoom 定义对父 .sp 做通道切片视图，无新文件）；多相位中心/脉冲星/STA/PCAL 文件生成均不做（V2）。
+- 输入仅 fxcorr-f 的 .sp（**zoom band 已支持（P4a 2026-09-13）**：x 侧按 .input 的 zoom 定义对父 .sp 做通道切片视图，无新文件；**多相位中心已支持（P4b）**：.im 的 NUM PHASE CENTRES 驱动，每源一套 .s 文件，写盘零改造）；脉冲星/STA/PCAL 文件生成均不做（V2）。
 - 无流式：整 batch 逐 subint 顺序读 .sp（每 subint 各站各 band 一次 fseek），谱数据按 subint 常驻（blockspersend×nchan cf32/站/band）。
 
 ## 构建与注册
@@ -46,7 +47,7 @@ fxcorr-x <batch_id> [workdir]
 
 ## 测试
 
-- 资产与对拍工具在 `fxcorr/test/`：根目录共享件 cmp_swin.py（SWIN 逐记录比较，验收标准 2）；**zoom 检验资产（P4a）** 在 `fxcorr/test/zoom/`：gen_test_zoom.py（从 test.input 生成 test-zoom.input + EXECUTE TIME 截断变体）、cmp_swin_zoom.py（按 SWIN 头 freqindex 分拆多 nchan 对拍）、README.md（检验步骤与验证记录）。
+- 资产与对拍工具在 `fxcorr/test/`：根目录共享件 cmp_swin.py（SWIN 逐记录比较，验收标准 2）；**zoom 检验资产（P4a）** 在 `fxcorr/test/zoom/`：gen_test_zoom.py（从 test.input 生成 test-zoom.input + EXECUTE TIME 截断变体）、cmp_swin_zoom.py（按 SWIN 头 freqindex 分拆多 nchan 对拍）、README.md（检验步骤与验证记录）；**多相位中心检验资产（P4b）** 在 `fxcorr/test/mpc/`：test-mpc.v2d（addPhaseCentre 走 vex2difx 原生链路）、README.md（检验步骤/验收判据/验证记录，含 .im 的 SRC 索引语义）。
 - 测试机 /root/fxcortest/：f 侧产物 fengine/58948_25200/ → `fxcorr-x 58948_25200` → config/test.difx/DIFX_*.s0000.b0000；对拍 mpifxcorr 用 EXECUTE TIME 截断到完整积分段（test-mpi2.input，EXECUTE TIME=2）。
 - 已验证：2 站 4 秒实验 4 subint（2 积分）SWIN 与 mpifxcorr 逐记录全等（6/6，可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS 成功；多 batch 第 2 个 batch（起点 = scan 起点 + 1.024s，test-sim 配置 8 subints）4 积分 12 条记录全链路跑通。
 

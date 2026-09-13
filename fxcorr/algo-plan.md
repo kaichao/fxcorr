@@ -432,6 +432,8 @@ x 侧支持 .input 多 SOURCE 相位中心（.im 的 NUM PHASE CENTRES 驱动）
 - 自造多源 .input/.im（2-3 相位中心、.im 的 NUM PHASE CENTRES + SOURCE 列表）：mpifxcorr 基准 vs fxcorr 对拍，每相位中心 .s0000/.s0001… 逐记录全等（含 sourceindex、decorr 后 weight、UVW 头）。
 - 单源回归：test 配置 6/6 对拍不变（退化路径）。
 
+✅ 2026-09-13：多源对拍 **8/8 记录全等**（.s0000 6/6 + .s0001 2/2，自相关按上游语义只写指向中心源文件）、源间差异确认（src/uvw/可见度 rel 1.5e-02/weight decorr 均不同，rotator 非平凡）、单源回归 6/6。检验资产（test-mpc.v2d 走 vex2difx 原生 addPhaseCentre 链路）与可复现步骤见 `fxcorr/test/mpc/README.md`；.im 的 SRC 索引语义（SRC 0 = 指向中心、SRC 1..N = 相位中心，PHS CTR 0 可能即指向中心）见该 README。
+
 ### P4c：脉冲星 binning
 
 #### 是什么
