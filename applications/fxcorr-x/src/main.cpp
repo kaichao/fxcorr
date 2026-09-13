@@ -10,6 +10,7 @@
 
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/model.h>
+#include <fxcorrcommon/polyco.h>
 #include <fxcorrcommon/architecture.h>
 #include <fxcorrcommon/difxmonitor.h>
 
@@ -152,8 +153,6 @@ int main(int argc, char **argv)
 	int configindex = config.getScanConfigIndex(scan);
 	if(configindex < 0)
 		return fail(monitor, "fxcorr-x: no configuration for scan 0");
-	if(config.pulsarBinOn(configindex))
-		return fail(monitor, "fxcorr-x: pulsar binning is not supported in V1");
 	if(config.phasedArrayOn(configindex))
 		return fail(monitor, "fxcorr-x: phased arrays are not supported in V1");
 	if(config.getMaxProducts() > 2)
@@ -310,6 +309,23 @@ int main(int argc, char **argv)
 		// scan-relative seconds of the subint start, same time base as the
 		// upstream delay interpolator (offsets[1] + offsets[2]/1e9)
 		double offsetsec = (double)expectedsec + (double)expectedns/1.0e9;
+
+		// pulsar: pick the polyco covering this subint and set its time
+		// (core.cpp:496-508, day-of-year seconds time base - NOT the same as
+		// offsetsec, which is scan-relative and used by the delay model)
+		Polyco *currentpolyco = 0;
+		if(config.pulsarBinOn(configindex))
+		{
+			double sec = double(config.getStartSeconds() + scanstartsec + expectedsec) + ((double)expectedns)/1000000000.0;
+			currentpolyco = Polyco::getCurrentPolyco(configindex, config.getStartMJD(), sec/86400.0, config.getPolycos(configindex), config.getNumPolycos(configindex), false);
+			if(currentpolyco == NULL)
+			{
+				ostringstream oss;
+				oss << "fxcorr-x: could not locate a polyco to cover time " << config.getStartMJD() + sec/86400.0;
+				return fail(monitor, oss.str());
+			}
+			currentpolyco->setTime(config.getStartMJD(), sec/86400.0);
+		}
 		for(int ds=0;ds<numdatastreams;ds++)
 		{
 			// every band view (recorded + zoom) must read its subint; zoom
@@ -344,13 +360,13 @@ int main(int argc, char **argv)
 			if(numffts > numbufferedffts)
 				numffts = numbufferedffts;
 
-			xmac.xmacBatch(fftloop, readers);
+			xmac.xmacBatch(fftloop, readers, currentpolyco);
 			xmac.accumulateWeights(fftloop, readers);
 			xcblockcount += numffts;
 			if(xcblockcount == maxxcblocks)
 			{
 				double nsoffset = (xcshiftcount*maxxcblocks + ((double)maxxcblocks)/2.0)*blockns;
-				xmac.uvshiftAndAverage(offsetsec, nsoffset, maxxcblocks*blockns, subintresults);
+				xmac.uvshiftAndAverage(offsetsec, nsoffset, maxxcblocks*blockns, currentpolyco, subintresults);
 				xcblockcount = 0;
 				xcshiftcount++;
 			}
@@ -358,7 +374,7 @@ int main(int argc, char **argv)
 		if(xcblockcount != 0)
 		{
 			double nsoffset = (xcshiftcount*maxxcblocks + ((double)xcblockcount)/2.0)*blockns;
-			xmac.uvshiftAndAverage(offsetsec, nsoffset, xcblockcount*blockns, subintresults);
+			xmac.uvshiftAndAverage(offsetsec, nsoffset, xcblockcount*blockns, currentpolyco, subintresults);
 		}
 
 		// baseline weights -> floatresults section (core.cpp:1065-1107, no locks)

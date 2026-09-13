@@ -9,9 +9,16 @@ using namespace std;
 XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 	config(conf), model(m), scan(sc), configindex(cindex),
 	numphasecentres(model->getNumPhaseCentres(scan)),
+	pulsarbin(config->pulsarBinOn(configindex)),
+	scrunchoutput(pulsarbin && config->scrunchOutputOn(configindex)),
+	numpulsarbins(pulsarbin ? config->getNumPulsarBins(configindex) : 0),
+	threadbinloop(pulsarbin ? config->getNumPulsarBins(configindex) : 1),
+	corebinloop((pulsarbin && !config->scrunchOutputOn(configindex)) ? config->getNumPulsarBins(configindex) : 1),
 	freqtablelength(0), numbaselines(0), numdatastreams(0),
 	numBufferedFFTs(0), blockspersend(0), xmacstridelength(0),
+	blockns(0.0),
 	threadresultlength(0), threadcrosscorrs(0), baselineweight(0), baselineshiftdecorr(0), conjbuf(0),
+	bins(0), pulsarscratchspace(0), pulsaraccumspace(0),
 	maxchan(0), maxrotatestrideplussteplength(0),
 	chanfreqs(0), rotator(0), rotated(0), argument(0), shifterrorcount(0)
 {
@@ -21,6 +28,7 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 	numBufferedFFTs = config->getNumBufferedFFTs(configindex);
 	blockspersend = config->getBlocksPerSend(configindex);
 	xmacstridelength = config->getXmacStrideLength(configindex);
+	blockns = double(config->getSubintNS(configindex))/double(blockspersend);
 	threadresultlength = config->getMaxThreadResultLength();
 
 	threadcrosscorrs = vectorAlloc_cf32(threadresultlength);
@@ -28,6 +36,64 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 	// conjbuf sized for the widest freq in the table
 	maxchan = config->getMaxNumChannels();
 	conjbuf = vectorAlloc_cf32(maxchan);
+
+	// pulsar scratchspace (core.cpp:407-453, 1940-2064): bins per buffered
+	// FFT, xmac multiply buffer, and (scrunch only) per-bin accumulation
+	if(pulsarbin)
+	{
+		pulsarscratchspace = vectorAlloc_cf32(xmacstridelength);
+		bins = new s32**[numBufferedFFTs];
+		for(int i=0;i<numBufferedFFTs;i++)
+		{
+			bins[i] = new s32*[freqtablelength];
+			for(int f=0;f<freqtablelength;f++)
+			{
+				if(config->isFrequencyUsed(configindex, f))
+					bins[i][f] = vectorAlloc_s32(config->getFNumChannels(f));
+				else
+					bins[i][f] = 0;
+			}
+		}
+		if(scrunchoutput)
+		{
+			// createPulsarVaryingSpace (core.cpp:2019-2062), forced to a
+			// single pulsar ephemeris (source slot 0) like the upstream
+			pulsaraccumspace = new cf32******[freqtablelength];
+			for(int f=0;f<freqtablelength;f++)
+			{
+				if(!config->isFrequencyUsed(configindex, f))
+				{
+					pulsaraccumspace[f] = 0;
+					continue;
+				}
+				pulsaraccumspace[f] = new cf32*****[config->getNumXmacStrides(configindex, f)];
+				for(int x=0;x<config->getNumXmacStrides(configindex, f);x++)
+				{
+					pulsaraccumspace[f][x] = new cf32****[numbaselines];
+					for(int i=0;i<numbaselines;i++)
+					{
+						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						if(localfreqindex < 0)
+						{
+							pulsaraccumspace[f][x][i] = 0;
+							continue;
+						}
+						pulsaraccumspace[f][x][i] = new cf32***[1]; //just 1 source for now!
+						pulsaraccumspace[f][x][i][0] = new cf32**[config->getBNumPolProducts(configindex, i, localfreqindex)];
+						for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
+						{
+							pulsaraccumspace[f][x][i][0][j] = new cf32*[numpulsarbins];
+							for(int k=0;k<numpulsarbins;k++)
+							{
+								pulsaraccumspace[f][x][i][0][j][k] = vectorAlloc_cf32(xmacstridelength);
+								vectorZero_cf32(pulsaraccumspace[f][x][i][0][j][k], xmacstridelength);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// multi phase centre scratchspace (core.cpp:416-433), sized over all
 	// configs exactly like the upstream allocation
@@ -47,12 +113,25 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 		argument = vectorAlloc_f32(3*maxrotatestrideplussteplength);
 	}
 
-	// baselineweight[f][j][p] (single pulsar bin), allocated per numpolproducts
-	baselineweight = new f32**[freqtablelength];
+	// baselineweight[f][b][j][p] (b = pulsar bin, single slot otherwise),
+	// allocated per numpolproducts like allocateConfigSpecificThreadArrays
+	baselineweight = new f32***[freqtablelength];
 	baselineshiftdecorr = new f32**[freqtablelength];
 	for(int i=0;i<freqtablelength;i++)
 	{
-		baselineweight[i] = new f32*[numbaselines];
+		baselineweight[i] = new f32**[corebinloop];
+		for(int b=0;b<corebinloop;b++)
+		{
+			baselineweight[i][b] = new f32*[numbaselines];
+			for(int j=0;j<numbaselines;j++)
+			{
+				int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
+				if(localfreqindex >= 0)
+					baselineweight[i][b][j] = new f32[config->getBNumPolProducts(configindex, j, localfreqindex)];
+				else
+					baselineweight[i][b][j] = 0;
+			}
+		}
 		if(config->isFrequencyUsed(configindex, i) && config->getMaxPhaseCentres(configindex) > 1)
 		{
 			// allocateConfigSpecificThreadArrays (core.cpp:2135-2148)
@@ -68,14 +147,6 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 		}
 		else
 			baselineshiftdecorr[i] = 0;
-		for(int j=0;j<numbaselines;j++)
-		{
-			int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
-			if(localfreqindex >= 0)
-				baselineweight[i][j] = new f32[config->getBNumPolProducts(configindex, j, localfreqindex)];
-			else
-				baselineweight[i][j] = 0;
-		}
 	}
 }
 
@@ -87,11 +158,57 @@ XmacEngine::~XmacEngine()
 	vectorFree(rotator);
 	vectorFree(rotated);
 	vectorFree(argument);
+	if(pulsarbin)
+	{
+		vectorFree(pulsarscratchspace);
+		for(int i=0;i<numBufferedFFTs;i++)
+		{
+			for(int f=0;f<freqtablelength;f++)
+				if(bins[i][f])
+					vectorFree(bins[i][f]);
+			delete [] bins[i];
+		}
+		delete [] bins;
+		if(scrunchoutput)
+		{
+			// reverse of createPulsarVaryingSpace's allocation (core.cpp:1969-1999)
+			for(int f=0;f<freqtablelength;f++)
+			{
+				if(!pulsaraccumspace[f])
+					continue;
+				for(int x=0;x<config->getNumXmacStrides(configindex, f);x++)
+				{
+					for(int i=0;i<numbaselines;i++)
+					{
+						if(!pulsaraccumspace[f][x][i])
+							continue;
+						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
+						{
+							for(int k=0;k<numpulsarbins;k++)
+								vectorFree(pulsaraccumspace[f][x][i][0][j][k]);
+							delete [] pulsaraccumspace[f][x][i][0][j];
+						}
+						delete [] pulsaraccumspace[f][x][i][0];
+						delete [] pulsaraccumspace[f][x][i];
+					}
+					delete [] pulsaraccumspace[f][x];
+				}
+				delete [] pulsaraccumspace[f];
+			}
+			delete [] pulsaraccumspace;
+		}
+	}
 	for(int i=0;i<freqtablelength;i++)
 	{
+		for(int b=0;b<corebinloop;b++)
+		{
+			for(int j=0;j<numbaselines;j++)
+				delete [] baselineweight[i][b][j];
+			delete [] baselineweight[i][b];
+		}
 		for(int j=0;j<numbaselines;j++)
 		{
-			delete [] baselineweight[i][j];
 			if(baselineshiftdecorr[i] && baselineshiftdecorr[i][j])
 				vectorFree(baselineshiftdecorr[i][j]);
 		}
@@ -104,17 +221,20 @@ XmacEngine::~XmacEngine()
 
 void XmacEngine::zeroSubint()
 {
-	// core.cpp:722-759 (single bin)
+	// core.cpp:722-759
 	vectorZero_cf32(threadcrosscorrs, threadresultlength);
 	for(int i=0;i<freqtablelength;i++)
 	{
 		if(config->isFrequencyUsed(configindex, i))
 		{
-			for(int j=0;j<numbaselines;j++)
+			for(int b=0;b<corebinloop;b++)
 			{
-				int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
-				if(localfreqindex >= 0)
-					vectorZero_f32(baselineweight[i][j], config->getBNumPolProducts(configindex, j, localfreqindex));
+				for(int j=0;j<numbaselines;j++)
+				{
+					int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
+					if(localfreqindex >= 0)
+						vectorZero_f32(baselineweight[i][b][j], config->getBNumPolProducts(configindex, j, localfreqindex));
+				}
 			}
 			if(numphasecentres > 1)
 			{
@@ -130,11 +250,24 @@ void XmacEngine::zeroSubint()
 	}
 }
 
-void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &readers)
+void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &readers, Polyco *currentpolyco)
 {
 	int status;
 
-	// core.cpp:867-982, non-pulsar branch; resultindex accumulation mirrors
+	// if necessary, work out the pulsar bins (core.cpp:803-812).  The FFT
+	// index i starts from 0 (no upstream startblock); offsetmins is in the
+	// subint-local minute base.
+	if(pulsarbin)
+	{
+		for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
+		{
+			int i = fftloop*numBufferedFFTs + fftsubloop;
+			double offsetmins = ((double)i)*blockns/60000000000.0;
+			currentpolyco->getBins(offsetmins, bins[fftsubloop]);
+		}
+	}
+
+	// core.cpp:867-982; resultindex accumulation mirrors
 	// Configuration::populateResultLengths() so threadcrosscorrs offsets agree
 	// with getThreadResultFreqOffset/getThreadResultBaselineOffset.
 	int resultindex = 0;
@@ -181,13 +314,64 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 							if(status != vecNoErr)
 								cerr << "Error conjugating vis2, baseline " << j << ", status " << status << endl;
 
-							status = vectorAddProduct_cf32(vis1, conjbuf, &(threadcrosscorrs[resultindex+p*xmacstridelength]), xmacstrideremain);
-							if(status != vecNoErr)
-								cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
+							if(pulsarbin)
+							{
+								// core.cpp:914-957: multiply into scratch space, then bin
+								int ds1recordbandindex = config->getBDataStream1RecordBandIndex(configindex, j, localfreqindex, p);
+								int ds2recordbandindex = config->getBDataStream2RecordBandIndex(configindex, j, localfreqindex, p);
+								f32 weight1 = readers[ds1index][ds1recordbandindex]->weights()[i];
+								f32 weight2 = readers[ds2index][ds2recordbandindex]->weights()[i];
+								f32 bweight = weight1*weight2/freqchannels;
+
+								status = vectorMul_cf32(vis1, conjbuf, pulsarscratchspace, xmacstrideremain);
+								if(status != vecNoErr)
+									cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
+
+								// if scrunching, add into temp accumulate space, otherwise add into normal space
+								if(scrunchoutput)
+								{
+									f64 *binweights = currentpolyco->getBinWeights();
+									int destchan = xmacstart;
+									for(int l=0;l<xmacstrideremain;l++)
+									{
+										// the first zero (the source slot) is because we are limiting to one pulsar ephemeris for now
+										int destbin = bins[fftsubloop][f][destchan];
+										pulsaraccumspace[f][x][j][0][p][destbin][l].re += pulsarscratchspace[l].re;
+										pulsaraccumspace[f][x][j][0][p][destbin][l].im += pulsarscratchspace[l].im;
+										// Negative bin weights are generally used when scrunching to estimate and
+										// remove slowly-time-varying signal; ignore them in the baseline weight
+										if(binweights[destbin] > 0.0)
+											baselineweight[f][0][j][p] += bweight*binweights[destbin];
+										destchan++;
+									}
+								}
+								else
+								{
+									int destchan = xmacstart;
+									for(int l=0;l<xmacstrideremain;l++)
+									{
+										int destbin = bins[fftsubloop][f][destchan];
+										int cindex = resultindex + (destbin*config->getBNumPolProducts(configindex, j, localfreqindex) + p)*xmacstridelength + l;
+										threadcrosscorrs[cindex].re += pulsarscratchspace[l].re;
+										threadcrosscorrs[cindex].im += pulsarscratchspace[l].im;
+										baselineweight[f][destbin][j][p] += bweight;
+										destchan++;
+									}
+								}
+							}
+							else
+							{
+								status = vectorAddProduct_cf32(vis1, conjbuf, &(threadcrosscorrs[resultindex+p*xmacstridelength]), xmacstrideremain);
+								if(status != vecNoErr)
+									cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
+							}
 						}
 					}
-					// core.cpp:970-977 (non-pulsar): advance to next baseline's xmac slice
-					resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
+					// core.cpp:970-977: advance to next baseline's xmac slice
+					if(pulsarbin && !scrunchoutput)
+						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*numpulsarbins*xmacstridelength;
+					else
+						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
 				}
 			}
 		}
@@ -196,6 +380,9 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 
 void XmacEngine::accumulateWeights(int fftloop, const vector<vector<SpReader *> > &readers)
 {
+	if(pulsarbin)
+		return; // weights are updated inside the XMAC pulsar branch (core.cpp:924/945/954)
+
 	// core.cpp:1005-1052, non-pulsar branch
 	for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
 	{
@@ -227,7 +414,7 @@ void XmacEngine::accumulateWeights(int fftloop, const vector<vector<SpReader *> 
 							{
 								f32 weight1 = readers[ds1index][ds1recordbandindex]->weights()[i];
 								f32 weight2 = readers[ds2index][ds2recordbandindex]->weights()[i];
-								baselineweight[f][j][p] += weight1*weight2;
+								baselineweight[f][0][j][p] += weight1*weight2;
 							}
 						}
 					}
@@ -237,8 +424,46 @@ void XmacEngine::accumulateWeights(int fftloop, const vector<vector<SpReader *> 
 	}
 }
 
-void XmacEngine::uvshiftAndAverage(double offsetsec, double nsoffset, double nswidth, cf32 *subintresults)
+void XmacEngine::uvshiftAndAverage(double offsetsec, double nsoffset, double nswidth, Polyco *currentpolyco, cf32 *subintresults)
 {
+	// first scale the pulsar data if necessary (core.cpp:1438-1475)
+	if(pulsarbin && scrunchoutput)
+	{
+		f64 *binweights = currentpolyco->getBinWeights();
+
+		for(int f=0;f<freqtablelength;f++)
+		{
+			if(config->isFrequencyUsed(configindex, f))
+			{
+				int freqchannels = config->getFNumChannels(f);
+				int numxmacstrides = config->getNumXmacStrides(configindex, f);
+				for(int x=0;x<numxmacstrides;x++)
+				{
+					int xmacstrideremain = min(freqchannels-x*xmacstridelength, xmacstridelength);
+					for(int i=0;i<numbaselines;i++)
+					{
+						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						if(localfreqindex >= 0)
+						{
+							for(int s=0;s<1;s++) //forced to single pulsar ephemeris for now
+							{
+								for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
+								{
+									for(int k=0;k<numpulsarbins;k++)
+									{
+										int status = vectorMulC_f32_I((f32)(binweights[k]), (f32*)(pulsaraccumspace[f][x][i][s][j][k]), 2*xmacstrideremain);
+										if(status != vecNoErr)
+											cerr << "Error trying to scale for scrunch!!! " << status << endl;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// core.cpp:1530-1563 with threadid==0 (startfreq/startbaseline both 0,
 	// so every used (freq, baseline) pair is processed exactly once)
 	for(int f=0;f<freqtablelength;f++)
@@ -246,15 +471,50 @@ void XmacEngine::uvshiftAndAverage(double offsetsec, double nsoffset, double nsw
 		if(config->isFrequencyUsed(configindex, f))
 		{
 			for(int i=0;i<numbaselines;i++)
-				uvshiftAndAverageBaselineFreq(offsetsec, nsoffset, nswidth, f, i, subintresults);
+				uvshiftAndAverageBaselineFreq(offsetsec, nsoffset, nswidth, currentpolyco, f, i, subintresults);
 		}
 	}
 
 	// clear the cross-corr results for the next averaging period (core.cpp:1560-1563)
 	vectorZero_cf32(threadcrosscorrs, threadresultlength);
+
+	// clear the pulsar accumulation vector if necessary (core.cpp:1565-1602)
+	if(pulsarbin && scrunchoutput)
+	{
+		for(int f=0;f<freqtablelength;f++)
+		{
+			if(config->isFrequencyUsed(configindex, f))
+			{
+				int freqchannels = config->getFNumChannels(f);
+				int numxmacstrides = config->getNumXmacStrides(configindex, f);
+				for(int x=0;x<numxmacstrides;x++)
+				{
+					int xmacstrideremain = min(freqchannels-x*xmacstridelength, xmacstridelength);
+					for(int i=0;i<numbaselines;i++)
+					{
+						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						if(localfreqindex >= 0)
+						{
+							for(int s=0;s<1;s++) //forced to single pulsar ephemeris for now
+							{
+								for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
+								{
+									for(int k=0;k<numpulsarbins;k++)
+									{
+										//zero the accumulation space for next time
+										vectorZero_cf32(pulsaraccumspace[f][x][i][s][j][k], xmacstrideremain);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
-void XmacEngine::uvshiftAndAverageBaselineFreq(double offsetsec, double nsoffset, double nswidth, int freqindex, int baseline, cf32 *subintresults)
+void XmacEngine::uvshiftAndAverageBaselineFreq(double offsetsec, double nsoffset, double nswidth, Polyco *currentpolyco, int freqindex, int baseline, cf32 *subintresults)
 {
 	int localfreqindex, targetfreqindex, freqchannels, targetfreqchannels;
 	int channelinc, targetchannelinc, stridestoaverage, averagesperstride, averagelength, numstrides;
@@ -397,28 +657,41 @@ void XmacEngine::uvshiftAndAverageBaselineFreq(double offsetsec, double nsoffset
 			threadindex = threadstart + x*config->getCompleteStrideLength(configindex, freqindex);
 			xmacstrideremain = min(freqchannels-x*xmacstridelength, xmacstridelength);
 
-			for(int k=0;k<config->getBNumPolProducts(configindex, baseline, localfreqindex);k++)
+			for(int b=0;b<threadbinloop;b++)
 			{
-				coreoffset = (k*targetfreqchannels + x*xmacstridelength)/targetchannelinc;
-
-				const cf32 *srcpointer;
-				if(numphasecentres > 1 && fabs(applieddelay) > 1.0e-20)
+				for(int k=0;k<config->getBNumPolProducts(configindex, baseline, localfreqindex);k++)
 				{
-					// rotate into the scratch buffer (core.cpp:1789-1808)
-					srcpointer = &(threadcrosscorrs[threadindex]);
-					for(int r=0;r<rotatesperstride;r++)
+					if(corebinloop > 1)
+						coreoffset = ((b*config->getBNumPolProducts(configindex, baseline, localfreqindex)+k)*targetfreqchannels + x*xmacstridelength)/targetchannelinc;
+					else
+						coreoffset = (k*targetfreqchannels + x*xmacstridelength)/targetchannelinc;
+
+					const cf32 *srcpointer;
+					if(numphasecentres > 1 && fabs(applieddelay) > 1.0e-20)
 					{
-						status = vectorMul_cf32(rotator, &(srcpointer[r*rotatestridelen]), &(rotated[r*rotatestridelen]), rotatestridelen);
-						if(status != vecNoErr)
-							cerr << "Error in phase shift, multiplication1!!! " << status << endl;
-						status = vectorMulC_cf32_I(rotator[rotatestridelen+r+x*rotatesperstride], &(rotated[r*rotatestridelen]), rotatestridelen);
-						if(status != vecNoErr)
-							cerr << "Error in phase shift, multiplication2!!! " << status << endl;
+						// rotate into the scratch buffer (core.cpp:1789-1808)
+						if(pulsarbin && scrunchoutput)
+							srcpointer = pulsaraccumspace[freqindex][x][baseline][0][k][b];
+						else
+							srcpointer = &(threadcrosscorrs[threadindex]);
+						for(int r=0;r<rotatesperstride;r++)
+						{
+							status = vectorMul_cf32(rotator, &(srcpointer[r*rotatestridelen]), &(rotated[r*rotatestridelen]), rotatestridelen);
+							if(status != vecNoErr)
+								cerr << "Error in phase shift, multiplication1!!! " << status << endl;
+							status = vectorMulC_cf32_I(rotator[rotatestridelen+r+x*rotatesperstride], &(rotated[r*rotatestridelen]), rotatestridelen);
+							if(status != vecNoErr)
+								cerr << "Error in phase shift, multiplication2!!! " << status << endl;
+						}
+						srcpointer = rotated;
 					}
-					srcpointer = rotated;
-				}
-				else
-					srcpointer = &(threadcrosscorrs[threadindex]);
+					else
+					{
+						if(pulsarbin && scrunchoutput)
+							srcpointer = pulsaraccumspace[freqindex][x][baseline][0][k][b];
+						else
+							srcpointer = &(threadcrosscorrs[threadindex]);
+					}
 
 				// spectrally average (or not) and accumulate into the subint results
 				coredest = coreindex+coreoffset;
@@ -450,6 +723,7 @@ void XmacEngine::uvshiftAndAverageBaselineFreq(double offsetsec, double nsoffset
 				}
 				//advance to next xmac channel group
 				threadindex += xmacstridelength;
+			}
 			}
 		}
 
@@ -522,10 +796,13 @@ void XmacEngine::copyBaselineWeights(f32 *floatresults)
 				if(localfreqindex >= 0)
 				{
 					int resultindex = config->getCoreResultBWeightOffset(configindex, f, i)*2;
-					for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
+					for(int b=0;b<corebinloop;b++)
 					{
-						floatresults[resultindex] += baselineweight[f][i][j];
-						resultindex++;
+						for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
+						{
+							floatresults[resultindex] += baselineweight[f][b][i][j];
+							resultindex++;
+						}
 					}
 				}
 			}

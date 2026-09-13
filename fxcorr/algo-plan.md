@@ -496,6 +496,8 @@ x 侧支持 .input PULSAR BINNING + pulsar 配置文件，出 .b 文件（SCRUNC
 - 自造小配置：PULSAR BINNING TRUE + 2-4 bins + 覆盖观测时段的短 polyco（自造 .polyco）+ SCRUNCH OUTPUT 两种取值：mpifxcorr 基准 vs fxcorr 对拍，各 .b 文件逐记录全等（含 PULSAR BIN 头字段、weight 归一）。
 - 无 pulsar 回归：test 配置 6/6 对拍不变。
 
+✅ 2026-09-13：非 scrunch 对拍 **14/14 记录全等**（.b0000 6/6 + .b0001-.b0003 各 2/2）、scrunch 对拍 6/6、binning 生效确认（pbin/weight/可见度各 bin 均不同）、无 pulsar 回归 6/6。检验资产（gen_test_pulsar.py：.input 变体 + pulsar config + 自造 tempo polyco）与可复现步骤见 `fxcorr/test/pulsar/README.md`；实施中实测的坑（scrunch 的 accumspace 须在 uvshiftAndAverage 尾部清零，否则可见度按积分序放大）已入 fxcorr-x CLAUDE.md 关键要点。
+
 ---
 
 ## P5：网络输入 / 数据流化
