@@ -65,6 +65,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `zoom/README.md` | P4a 检验步骤（完整可复现命令）+ 验收判据 + 验证记录 |
 | `mpc/test-mpc.v2d` / `mpc/README.md` | P4b 多相位中心检验资产（addPhaseCentre=TEST2 走 vex2difx 原生链路）+ 检验步骤/验收判据/验证记录 |
 | `pulsar/gen_test_pulsar.py` / `pulsar/README.md` | P4c 脉冲星 binning 检验资产（.input 变体 + pulsar config + 自造 tempo polyco，--scrunch/--negative-weight 变体）+ 检验步骤/验收判据/验证记录 |
+| `tcal/test-tcal.v2d` / `tcal/README.md` | P6 SwitchedPower 检验资产（两站 tcalFreq=80 → .input TCAL FREQUENCY）+ 检验步骤/验收判据/验证记录（含生成器帧头两个 bug 的记录：legacy 位、vdifio/mark5access 字布局） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 

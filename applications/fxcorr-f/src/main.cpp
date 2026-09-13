@@ -12,6 +12,7 @@
 #include <fxcorrcommon/mpifxcorr.h>	// FLAGS_PER_INT
 #include <fxcorrcommon/architecture.h>
 #include <fxcorrcommon/difxmonitor.h>
+#include <fxcorrcommon/switchedpower.h>
 
 #include "datareader.h"
 #include "fenginewriter.h"
@@ -292,6 +293,35 @@ int main(int argc, char **argv)
 		pcaltext = new PcalTextWriter(pcaldir, &config, 0, dsindex);
 	}
 
+	// experiment-level SWITCHEDPOWER text file (algo-plan.md P6): TCAL
+	// FREQUENCY > 0 enables the per-second switched power statistics, written
+	// next to the SWIN output like the PCAL text file.  frequency = 0 (the
+	// default) keeps this path entirely off.
+	SwitchedPower *switchedpower = 0;
+	u8 *spblock = 0;
+	int spreadbytes = 0;
+	int spblockfill = 0;
+	int switchedpowerincrement = 1;
+	int spblockcount = 0;	// global block counter, upstream keeps one too
+	long long prevfileoffset = -1;	// end of the last subint fed (batch-relative)
+	if(config.getDSwitchedPowerFrequency(dsindex) > 0)
+	{
+		string spdir = config.getOutputFilename();
+		if(system(("mkdir -p " + spdir).c_str()) != 0)
+			return fail(monitor, "fxcorr-f: cannot create " + spdir);
+		switchedpower = new SwitchedPower(&config, 0, dsindex);
+
+		// feed granularity, same as upstream (vdiffile.cpp:945-964): one block
+		// per datasegment of readbytes = (databufferfactor/numdatasegments)
+		// * maxdata bytes, frame aligned; the fraction of blocks actually fed
+		// follows the data rate (vdiffile.cpp:405-415)
+		spreadbytes = (config.getDDataBufferFactor()/config.getDNumDataSegments())*config.getMaxDataBytes(dsindex);
+		spblock = new u8[spreadbytes];
+		float datarate = (float)config.getFrameBytes(0, dsindex)*(float)config.getFramesPerSecond(0, dsindex)*8.0f/1.0e6f;
+		if(datarate >= 512.0f)
+			switchedpowerincrement = (int)(datarate/512.0f + 0.1f);
+	}
+
 	int sendbytes = reader.getSendBytes();
 	u8 *databuf = new u8[sendbytes];
 	int blockspersend = reader.getBlocksPerSend();
@@ -340,6 +370,41 @@ int main(int argc, char **argv)
 		// station-based processing of one subint (core.cpp:694-801, V1 single-threaded)
 		int datasec = 0, datans = 0;
 		int bytes = reader.readSubint(scan, offsetsec, offsetns, databuf, sendbytes, &datasec, &datans);
+
+		// P6: accumulate subint bytes into datasegment-sized blocks and feed
+		// the switched power detector (vdiffile.cpp:945-964).  Subint reads
+		// carry frame-aligned guard overlap (sendbytes > one subint of frames),
+		// so skip the bytes already covered by the previous subint to keep the
+		// block frame-continuous -- upstream feeds the continuous vdifmux
+		// stream, which has no overlap.
+		if(switchedpower && bytes > 0)
+		{
+			long long curstart = reader.getLastFileOffset();
+			long long skip = prevfileoffset - curstart;
+			if(skip < 0 || skip > bytes)
+				skip = 0;
+			prevfileoffset = curstart + bytes;
+
+			int remain = bytes - (int)skip;
+			int off = (int)skip;
+			while(remain > 0)
+			{
+				int take = spreadbytes - spblockfill;
+				if(take > remain)
+					take = remain;
+				memcpy(spblock + spblockfill, databuf + off, take);
+				spblockfill += take;
+				off += take;
+				remain -= take;
+				if(spblockfill == spreadbytes)
+				{
+					++spblockcount;
+					if(spblockcount % switchedpowerincrement == 0)
+						switchedpower->feed(spblock, spblockfill);
+					spblockfill = 0;
+				}
+			}
+		}
 
 		// P1: input datarate diagnostics, upstream datastream.cpp:631-634
 		monitor.diagnosticDataConsumed(bytes);
@@ -419,6 +484,17 @@ int main(int argc, char **argv)
 			return fail(monitor, "fxcorr-f: batch " + batchid + " ends with unflushed pcal tones (batch length is not an intTime multiple)");
 		delete pcaltext;
 	}
+
+	// P6: feed the final partial block (upstream feeds short trailing
+	// segments the same way), then close, which flushes the last window
+	if(switchedpower && spblockfill > 0)
+	{
+		++spblockcount;
+		if(spblockcount % switchedpowerincrement == 0)
+			switchedpower->feed(spblock, spblockfill);
+	}
+	delete switchedpower;	// dtor: close() -> flush() of the tail window
+	delete [] spblock;
 
 	delete [] databuf;
 	delete [] validflags;

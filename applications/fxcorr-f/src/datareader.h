@@ -43,6 +43,10 @@ public:
 	/** Fills per-FFT-block valid flags (one bit each) from the bytes actually read. */
 	void fillValidFlags(s32 *flags, int validbytes) const;
 
+	/** File offset of the last readSubint call, relative to the batch start
+	 * (the frame-aligned, delay-corrected position). */
+	long long getLastFileOffset() const { return lastfileoffset; }
+
 private:
 	// computes frame-aligned file offset and data start time for a subint
 	bool locate(int scan, int offsetsec, int offsetns, int *sec, int *ns, long long *fileoffset);
@@ -69,6 +73,7 @@ private:
 	long long currentscanstartsec;	// absolute second of the scan this file holds
 	int currentscan;
 	long long batchstartabsns;	// absolute ns of the batch start (file origin)
+	long long lastfileoffset;	// file offset of the last readSubint (batch-relative)
 };
 
 #endif

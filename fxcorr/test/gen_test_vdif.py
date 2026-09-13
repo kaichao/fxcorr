@@ -56,12 +56,16 @@ def main():
             frame = n % fps   # frame number within the second (VDIF word2)
             header = struct.pack(
                 "<IIIIIIII",
-                (sec & 0x3FFFFFFF) | (1 << 30),        # word0: seconds low 30 bits, sync=1, valid
-                (sec >> 30) & 0x3FFFFFFF,              # word1: seconds high 30 bits
-                (32 << 24) | (frame & 0xFFFFFF),       # word2: epoch 32 (2000.0), frame number
-                (1 << 30) | framelength8,              # word3: VDIF version 1, log2(1 chan)=0, frame length
-                (2 << 26) | (0 << 24),                 # word4: nbits code 2=2bit, iscomplex=0, thread=0, station=0
-                (0 << 24),                             # word5: EDV=0
+                (sec & 0x3FFFFFFF),                    # word0: [29:0] seconds; bit30 legacymode=0
+                                                       # (legacy would mean 16-byte header), bit31 invalid=0
+                (0 << 24) | (frame & 0xFFFFFF),        # word1: [29:24] ref epoch (0 = 2000.0, matches the
+                                                       # word0 seconds counted from 2000.0; mark5access epoch
+                                                       # index 0 -> mjdepochs[0] = 51544), [23:0] frame number
+                (1 << 29) | framelength8,              # word2: [31:29] VDIF version 1, [28:24] log2 nchan = 0,
+                                                       # [23:0] frame length in 8-byte units
+                (0 << 16) | (0 << 6) | (2 << 1) | 0,   # word3: station=0, thread=0, nbits=2, iscomplex=0
+                0,
+                0,
                 0,
                 0,
             )

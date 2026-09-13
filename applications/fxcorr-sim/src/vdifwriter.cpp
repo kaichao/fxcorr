@@ -54,12 +54,21 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 	long long sec = startsec + (framestart + nframes) * (long long)nsampframe / ratehz;
 	int frame = (int)((framestart + nframes) % framespersecond);
 
+	// header layout follows vdifio/mark5access (not the VDIF 2010 spec):
+	// word0 [29:0] seconds (bit30 legacymode=0 -> 32-byte header, bit31 invalid=0),
+	// word1 [29:24] ref epoch + [23:0] frame number, word2 [31:29] version + [23:0]
+	// frame length in 8-byte units, word3 station/thread/nbits/iscomplex.
+	// mark5access parses this layout (switched power path); the old "spec" layout
+	// put the length in word3, which mark5access read as frame number * 8 and
+	// blanked every frame after the first -- see fxcorr/test/tcal/README.md.
 	unsigned int header[8];
-	header[0] = (unsigned int)(sec & 0x3FFFFFFF) | (1u << 30);
-	header[1] = (unsigned int)((sec >> 30) & 0x3FFFFFFF);
-	header[2] = (32u << 24) | (unsigned int)(frame & 0xFFFFFF);
-	header[3] = (1u << 30) | ((unsigned int)log2nchan << 24) | (unsigned int)framelength8;
-	header[4] = (2u << 26) | (0u << 24);
+	header[0] = (unsigned int)(sec & 0x3FFFFFFF);
+	// epoch 0 = 2000.0, matching the word0 seconds counted from 2000.0
+	// (mark5access mjdepochs[0] = 51544); see fxcorr/test/tcal/README.md
+	header[1] = (0u << 24) | (unsigned int)(frame & 0xFFFFFF);
+	header[2] = (1u << 29) | (unsigned int)framelength8;
+	header[3] = (0u << 16) | (0u << 6) | (2u << 1) | 0u;
+	header[4] = 0;
 	header[5] = 0;
 	header[6] = 0;
 	header[7] = 0;

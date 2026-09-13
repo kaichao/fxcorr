@@ -15,6 +15,7 @@ h_sources = \
 	model.h \
 	datamuxer.h \
 	alert.h \
+	switchedpower.h \
 	architecture.h \
 	fraction.h \
 	mpifxcorr.h \
@@ -35,6 +36,7 @@ cpp_sources = \
 	model.cpp \
 	datamuxer.cpp \
 	alert.cpp \
+	switchedpower.cpp \
 	difxmonitor.cpp
 
 # installed under $(includedir)/fxcorrcommon to avoid clashing with the

@@ -522,6 +522,64 @@ f（与 fxcorr-sim）支持网络流输入（VDIF over UDP），固定时长 bat
 
 ---
 
+## P6：SwitchedPower（TCAL 噪声功率）
+
+### 是什么
+
+按**整秒窗口**统计每站原始 2bit 数据的**高电平状态比例**，按 TCAL 开关频率分 on/off 两组相位，输出噪声二极管功率曲线文本 `SWITCHEDPOWER_<mjd>_<sec>_<dsid>`（每行 mjd0 mjd1 + 每通道 powerOn sigmaOn powerOff sigmaOff），用于 Tsys/增益校准。
+
+### 动机分类
+
+功能未迁移。上游 DataStream 节点读原始数据时同步统计（SwitchedPower::feed，switchedpower.cpp），V1 拆分后无人统计，链路停在半路。
+
+### 要解决的问题
+
+TCAL 观测（噪声二极管按频率切换，如 VLBA 80Hz）的功率曲线缺失，Tsys 校准做不了。
+
+### 预期效果
+
+f 侧支持 .input DATASTREAM 段的 `TCAL FREQUENCY`（Hz，>0 启用），出 SWITCHEDPOWER 文本与 mpifxcorr 逐行一致；TCAL FREQUENCY=0（默认）路径零改动。
+
+### 设计
+
+**上游数据链路全景**：
+
+1. 触发：.input DATASTREAM 段 `TCAL FREQUENCY`（可选行，Hz；v2d antenna 级 `tcalFreq` 经 vex2difx 生成）。Configuration 解析已迁移（configuration.cpp:1575-1579，fxcorrcommon 零改造），0 = 关闭。
+2. 构造（vdiffile.cpp:50-58）：spf>0 时每 datastream 一个 SwitchedPower(conf, mpiid)，datastreamId = mpiid-1，filepath = OUTPUT FILENAME，frequency = spf。
+3. 喂入（vdiffile.cpp:945-964）：diskToMemory 每读一段（readbytes = databufferfactor×maxbytes/numdatasegments，帧对齐；datarate<512Mbps 时 switchedpowerincrement=1）→ 构造 mark5_stream_memory(段字节) + new_mark5_format_generic_from_string(formatname) → mark5_stream_fix_mjd → feed。formatname 由 genMk5FormatName 生成（vdiffile.cpp:568；nthreads=1 时 vdifmux outputFrameSize=输入帧大小）。
+4. 统计（switchedpower.cpp:191-276）：mark5_stream_get_frame_time 取块起点时间；phase 从起点秒内 ns×frequency×2e-9 起编号（phase%2==0 为 on），每半周期 mark5_stream_count_high_states（format_vdif 的 lookup 表统计 2bit 高态数），块尾不满半周期处 break。
+5. 窗口（interval=1s 硬编码，init 赋值、无 .input 键）：feed 顶部（sec/interval 变化）与相位循环内（整秒边界）两处 flush 前窗口再开新窗口；close 时 flush 尾窗。
+6. 输出（flush，switchedpower.cpp:124-187）：一行 = mjd0（precision 14）mjd1 + 每通道 powerOn sigmaOn powerOff sigmaOff（precision 8）；power = high_state_fraction_to_power(f)（mark5access 2bit 功率换算），sigma = binomial df ± 换算；nOn/nOff 不足 0.5 个半周期输出 0 0 0 0。文件名 `SWITCHEDPOWER_%05d_%06d_%d`（0-based dsid），ios::app。
+
+**fxcorr 落点表**：
+
+| 上游环节 | 上游位置 | fxcorr 落点 |
+|---|---|---|
+| TCAL FREQUENCY 解析 | configuration.cpp:1575-1579 | 零改造（已迁移） |
+| SwitchedPower 类 | switchedpower.{h,cpp} | fxcorrcommon（去 MPI：构造 (conf, dsindex)，datastreamId = mpiid-1 = dsindex；mark5access 依赖已就位） |
+| formatname 生成 | vdiffile.cpp:568（genMk5FormatName） | fxcorrcommon：SwitchedPower 构造时生成（format, nrecordedbands, bw, nbits, sampling, getFrameBytes, decimation, alignment, nthreads） |
+| 段字节喂入 | vdiffile.cpp:945-964 | f：main 每 subint 读入后按 readbytes 块切分喂 feed（块缓冲累计） |
+| mark5_stream 构造 | vdiffile.cpp:954-961 | fxcorrcommon：feed(u8*, nbytes) 内部构造 memory stream（f 零 mark5access 依赖） |
+| 输出路径 | switchedpower.cpp:59 | f：OUTPUT FILENAME 目录（P0 PcalTextWriter 同模式 mkdir -p） |
+
+**关键点（易错，实施必读）**：
+
+1. **喂入节奏是逐位一致的前提**：上游每 readbytes = (databufferfactor/numdatasegments)×maxbytes 段喂一次（test 配置 256/64 = 4×maxbytes ≈ 4 subint 量，帧对齐），V1 subint 读入量是 sendbytes（1×）——**必须独立切块、每满一块喂一次，不能按 subint 喂**。feed 内 phase 从块起点帧头时间算起，半周期统计分组由切分点决定，切分点不同则 nOn/nOff 计数不同、sigma 必炸。
+2. **块起点时间从帧头读**（mark5_stream_get_frame_time），非外部传入——字节连续 + 块起点帧对齐即与上游同源；首块 = batch 起点帧（粗延迟修正后，与上游 bufferindex 同起点）。
+3. **尾部**：batch 尾残余块（< readbytes）照上游尾段一样喂一次 short buffer；close() 由 SwitchedPower 析构 flush 尾窗。
+4. **interval 恒 1s**、frequency=0 时整个类不创建；V1 格式仍限 VDIF/VDIFL（datareader 已拒其他）。
+5. **对拍窗口**：fxcorr-f 跑 batch（2.097s）vs mpifxcorr EXECUTE TIME=2 截断 → 时间窗不同；逐行 diff 只比较共同覆盖的整秒行，fxcorr 多出的尾窗行单独验证（时间戳/数值合理性）。
+6. **输出同目录冲突**：SWITCHEDPOWER 与 PCAL 一样走 OUTPUT FILENAME 目录且 ios::app——对拍两侧错开目录（mpifxcorr sed OUTPUT FILENAME 到 bench/，同 P0 对拍做法）。
+
+### 验证方法
+
+- test.v2d antenna 段加 `tcalFreq=80` → vex2difx 出 TCAL FREQUENCY 行 → mpifxcorr 基准（EXECUTE TIME=2 截断）与 fxcorr-f 两站对拍：各站 SWITCHEDPOWER_* 文本逐行 diff（共同时间窗），power/sigma 全等（文本 diff，同 P0 判据）。
+- 无 tcal 回归：test 配置（无 TCAL FREQUENCY）SWIN 6/6 对拍不变。
+
+✅ 2026-09-13：switched power 对拍**前 2 个完整整秒窗逐位全等**（两站 ds0/ds1 文本 diff 无差异；尾窗按各自数据终点，mpifxcorr vdifmux 多读 12ms）、SWIN 回归 6/6、位序对拍 BYTE-IDENTICAL、无 tcal 回归 6/6。检验资产（test-tcal.v2d + README）见 `fxcorr/test/tcal/`。实施中实测的坑：① subint 读入的帧对齐 guard 重叠必须剔除（否则块内帧号不连续、mark5access validate 全 fail）；② 测试数据生成器（gen_test_vdif.py/fxcorr-sim）帧头两个 bug——legacy 位误置、字布局用 VDIF 官方 spec 而非 vdifio/mark5access 布局（主路径 vdifmux 不查这些字段故从未暴露），已修复并回归。
+
+---
+
 ## 相关
 
 - 优先级与验收总览：v2-plan.md 第 5/6 节

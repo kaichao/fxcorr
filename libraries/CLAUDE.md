@@ -41,7 +41,7 @@ libraries/<name>/
 
 ## fxcorrcommon（已建成）
 
-- 源 = mpifxcorr 的 `libfxcorr_a_SOURCES` 11 文件（configuration/pcal/mathutil/sysutil/mode/mk5mode/polyco/visibility/model/datamuxer/alert）+ 公共头 architecture.h/mpifxcorr.h/fraction.h（去 MPI 改动见 `mpifxcorr/CLAUDE.md` 与 fxcorr/impl-plan 2.1）。
+- 源 = mpifxcorr 的 `libfxcorr_a_SOURCES` 11 文件（configuration/pcal/mathutil/sysutil/mode/mk5mode/polyco/visibility/model/datamuxer/alert）+ 公共头 architecture.h/mpifxcorr.h/fraction.h（去 MPI 改动见 `mpifxcorr/CLAUDE.md` 与 fxcorr/impl-plan 2.1）；**2026-09-13 加 switchedpower.{h,cpp}（P6）**：SwitchedPower 类去 MPI 拷贝（构造 (conf, configindex, dsindex)、datastreamId = mpiid-1 = dsindex），feed 接口下沉为 feed(u8*, nbytes)（内部构造 mark5_stream_memory + formatname，fxcorr-f 零 mark5access 依赖）。
 - 依赖（configure.ac 探测）：difxmessage >= 2.9.0、mark5access >= 1.7、vdifio >= 1.6、codifio >= 0.2（CODIF_HEADER_BYTES 必需）；IPP 可选否则 fftw3+fftw3f；mark6sg/mark5ipc/dirlist 零引用不探测。
 - 头装 `$(includedir)/fxcorrcommon/` 子目录（避免与 mpifxcorr 同名头冲突）；**pcal.h 引用 fraction.h，fraction.h 必须进安装头清单**（曾误归 internal 导致 fxcorr-f 编译失败）。
 - 实用工厂：`Configuration::getMode(configindex, dsindex)`（各 Mode 子类创建，fxcorr-f 直接用，无需暴露 clock offsets 等内部 getter）。

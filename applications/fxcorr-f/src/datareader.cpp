@@ -14,7 +14,8 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 	framebytes(0), payloadbytes(0), framespersecond(0), sendbytes(0),
 	blockspersend(0), intclockseconds(0), numfiles(0), datafilenames(0),
 	currentfile(-1), currentscanstartsec(0), currentscan(0),
-	batchstartabsns(batchstartsec*1000000000LL + (long long)batchstartns)
+	batchstartabsns(batchstartsec*1000000000LL + (long long)batchstartns),
+	lastfileoffset(0)
 {
 	// V1 restriction: local VDIF files only (datasim output), one mux thread
 	Configuration::dataformat format = config->getDataFormat(configindex, dsindex);
@@ -143,6 +144,7 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 		*ns = 0;
 		return 0;
 	}
+	lastfileoffset = fileoffset;
 
 	input.seekg(fileoffset, ios::beg);
 	if(!input.good())
