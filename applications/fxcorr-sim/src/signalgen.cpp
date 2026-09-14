@@ -248,7 +248,9 @@ bool FreqStationGen::init(const vector<double> &bandfreqmhz,
                           const CommonSignal::Grid &grid,
                           double noisesigma_, unsigned long seed,
                           const string &station, int vpsamps_, bool adaptive_,
-                          double flux, double sefd)
+                          double flux, double sefd,
+                          const vector<vector<double> > &pcaltonehz,
+                          double pcalcombmhz, long long ratehz_)
 {
 	ready = false;
 	noisesigma = noisesigma_;
@@ -267,6 +269,16 @@ bool FreqStationGen::init(const vector<double> &bandfreqmhz,
 	if(vpsamps <= 0 || grid.slicesperblock <= 0)
 	{
 		cerr << "fxcorr-sim: invalid frame/block structure" << endl;
+		return false;
+	}
+	if(pcalcombmhz < 0.0)
+	{
+		cerr << "fxcorr-sim: FXSIM_PCAL must be a positive interval in MHz" << endl;
+		return false;
+	}
+	if(!pcaltonehz.empty() && pcaltonehz.size() != bandfreqmhz.size())
+	{
+		cerr << "fxcorr-sim: pcal tone grid must be per band" << endl;
 		return false;
 	}
 	numsamps = grid.numsamps;
@@ -293,6 +305,14 @@ bool FreqStationGen::init(const vector<double> &bandfreqmhz,
 		bd.flux = flux;
 		bd.sefd = sefd;
 		bd.startfreqmhz = bandfreqmhz[b];
+		// pcal injection setup (P4): grid tones are given per band; the
+		// comb interval is shared.  The phase accumulation rate is the real
+		// sample rate (2x the complex rate); default = 2*bandwidth MHz,
+		// datasim's own 2*d_bandwidth convention.
+		if(!pcaltonehz.empty())
+			bd.pcalhz = pcaltonehz[b];
+		bd.pcalcomb = pcalcombmhz;
+		bd.ratehz = ratehz_ > 0 ? (double)ratehz_ : 2.0 * bandbwmhz[b] * 1.0e6;
 		// a frame must be a whole number of slices so frame/block and
 		// frame/slice boundaries coincide
 		if(vpsamps % bd.blksize != 0)
@@ -588,6 +608,50 @@ void FreqStationGen::fillFramePayload(unsigned char *payload, int payloadbytes, 
 		bd.buffreqtemp[0][0] = bd.buffreqtemp[0][1] = 0.0f;
 		bd.buffreqtemp[vpsamps][0] = bd.buffreqtemp[vpsamps][1] = 0.0f;
 		fftwf_execute(bd.planbwd2n);
+
+		// pcal injection (P4), at datasim applyphasecal's position: on the
+		// real samples after the whole correction chain, outside the delay
+		// path (datasim and the legacy path both add pcal after delay
+		// injection, so the tones do not move with the geometric delay).
+		//   grid tones (.input PHASE CAL): 0.7 amplitude, continuous phase
+		//     from the batch start (legacy semantics; a 0.1 amplitude never
+		//     crosses the 2-bit quantisation boundaries)
+		//   comb (FXSIM_PCAL): datasim -p semantics, 1/500 amplitude, tones
+		//     at k*interval MHz for k < bandwidth/interval (the complex
+		//     bandwidth in MHz, i.e. ratehz/2e6).  datasim's phase uses
+		//     sidx % (2*d_bandwidth) at the real rate 2*d_bandwidth MHz - a
+		//     period of exactly 1 s, a whole number of comb cycles for
+		//     integer-MHz comb/bandwidth - so the continuous phase below
+		//     reproduces it exactly.
+		if(!bd.pcalhz.empty() || bd.pcalcomb > 0.0)
+		{
+			long long ireal = frameglobal * 2LL * vpsamps;
+			for(int m = 0; m < 2 * vpsamps; m++)
+			{
+				double v = bd.realc[m][0];
+				long long i = ireal + m;
+				for(size_t k = 0; k < bd.pcalhz.size(); k++)
+					v += 0.7 * sin(2.0 * M_PI * bd.pcalhz[k] * (double)i / bd.ratehz);
+				if(bd.pcalcomb > 0.0)
+				{
+					int nt = (int)(bd.ratehz * 0.5 / (bd.pcalcomb * 1.0e6));
+					for(int c = 0; c < nt; c++)
+						v += 1.0 / 500.0 * sin(2.0 * M_PI * c * bd.pcalcomb * 1.0e6
+						                       * (double)i / bd.ratehz);
+				}
+				bd.realc[m][0] = v;
+			}
+			if(bd.pcalcomb > 0.0)
+			{
+				// frame-edge taper (datasim applyphasecal tail): smooth the
+				// boundary the comb would otherwise leave between frames
+				bd.realc[0][0] = 0.0;
+				bd.realc[1][0] *= 0.5;
+				bd.realc[2][0] *= 0.8;
+				bd.realc[2 * vpsamps - 1][0] *= 0.5;
+				bd.realc[2 * vpsamps - 2][0] *= 0.8;
+			}
+		}
 
 		// the imaginary part of the 2N IDFT output is ~0 (the Hermitian
 		// symmetry of a real signal); take the real part, quantise and pack

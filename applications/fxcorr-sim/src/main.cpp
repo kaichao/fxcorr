@@ -258,10 +258,33 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 		st->batchstartscanrel = (double)(batchstartns - scanstartsec * 1000000000LL) / 1.0e9;
 	}
 
+	// pcal tones from the .input PHASE CAL config, converted to baseband
+	// frequencies (the same grid configuration.cpp counts when it reads
+	// .input); shared by both paths - the legacy time-domain injection and
+	// the new frequency-domain injection in FreqStationGen::fillFramePayload
+	st->pcalhz.assign(st->nbands, vector<double>());
+	if(config.getDPhaseCalIntervalHz(0, st->dsindex) > 0)
+	{
+		for(int b = 0; b < st->nbands; b++)
+		{
+			int fq = config.getDRecordedFreqIndex(0, st->dsindex, b);
+			double bandedge = config.getFreqTableFreq(fq) * 1.0e6;   // MHz -> Hz
+			bool lsb = config.getFreqTableLowerSideband(fq);
+			int nt = config.getDRecordedFreqNumPCalTones(0, st->dsindex, b);
+			for(int k = 0; k < nt; k++)
+			{
+				double rf = config.getDRecordedFreqPCalToneFreqHz(0, st->dsindex, b, k);
+				double base = lsb ? (bandedge - rf) : (rf - bandedge);
+				if(base >= 0.0 && base < st->bandbwmhz[b] * 1.0e6)
+					st->pcalhz[b].push_back(base);
+			}
+		}
+	}
+
 	if(!legacy)
 		return true;
 
-	// --- legacy extras: tone, pcal and the FXSIM_DELAY model context ---
+	// --- legacy extras: tone and the FXSIM_DELAY model context ---
 
 	// tones: 0 values = no tone, 1 value = all bands, nbands values = per band
 	st->tonehz.assign(st->nbands, 0.0);
@@ -280,27 +303,6 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 		cerr << "fxcorr-sim: tone count must be 0, 1 or the band count (" << st->nbands
 		     << "), got " << tonemhzarg.size() << endl;
 		return false;
-	}
-
-	// pcal tones from the .input PHASE CAL config, converted to baseband
-	// frequencies (the same grid configuration.cpp counts when it reads .input)
-	st->pcalhz.assign(st->nbands, vector<double>());
-	if(config.getDPhaseCalIntervalHz(0, st->dsindex) > 0)
-	{
-		for(int b = 0; b < st->nbands; b++)
-		{
-			int fq = config.getDRecordedFreqIndex(0, st->dsindex, b);
-			double bandedge = config.getFreqTableFreq(fq) * 1.0e6;   // MHz -> Hz
-			bool lsb = config.getFreqTableLowerSideband(fq);
-			int nt = config.getDRecordedFreqNumPCalTones(0, st->dsindex, b);
-			for(int k = 0; k < nt; k++)
-			{
-				double rf = config.getDRecordedFreqPCalToneFreqHz(0, st->dsindex, b, k);
-				double base = lsb ? (bandedge - rf) : (rf - bandedge);
-				if(base >= 0.0 && base < st->bandbwmhz[b] * 1.0e6)
-					st->pcalhz[b].push_back(base);
-			}
-		}
 	}
 
 	// FXSIM_DELAY (legacy): per-band tone RF frequency (band edge +/- the
@@ -484,6 +486,19 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	bool adaptive = false;
 	if(const char *adenv = getenv("FXSIM_ADAPTIVE"))
 		adaptive = (strcmp(adenv, "1") == 0);
+	// FXSIM_PCAL: datasim -p comb interval in MHz (tones at k*interval MHz,
+	// 1/500 amplitude, frame-edge taper); the .input PHASE CAL grid tones are
+	// always injected on the new path (st.pcalhz, 0.7 amplitude)
+	double pcalcomb = 0.0;
+	if(const char *penv = getenv("FXSIM_PCAL"))
+	{
+		pcalcomb = atof(penv);
+		if(!(pcalcomb > 0.0))
+		{
+			cerr << "fxcorr-sim: FXSIM_PCAL must be a positive interval in MHz" << endl;
+			return EXIT_FAILURE;
+		}
+	}
 
 	CommonSignal::Grid grid;
 	int specres = parseSpecres();
@@ -502,7 +517,8 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	int vpsamps = st.bytesperbandframe * 2;
 	FreqStationGen gen;
 	if(!gen.init(st.bandfreqmhz, st.bandbwmhz, grid, noisesigma, seed,
-	             st.station, vpsamps, adaptive, flux, sefd))
+	             st.station, vpsamps, adaptive, flux, sefd, st.pcalhz,
+	             pcalcomb, st.ratehz))
 		return EXIT_FAILURE;
 	if(dodgen)
 		gen.enableDelayInjection(model, 0, config.getDModelFileIndex(0, st.dsindex),

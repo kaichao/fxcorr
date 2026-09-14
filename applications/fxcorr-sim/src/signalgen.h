@@ -133,6 +133,14 @@ public:
 	// vpsamps: complex baseband samples per band per frame
 	//   (= bytes per band per frame * 2, the 2x oversampling of 2-bit real)
 	// adaptive: datasim d_tmul-style running-rms quantiser threshold
+	// pcaltonehz: per-band baseband pcal tone frequencies in Hz (.input
+	//   PHASE CAL grid, 0.7 amplitude like the legacy path)
+	// pcalcombmhz: FXSIM_PCAL comb interval in MHz (datasim -p semantics:
+	//   tones at k*interval MHz for k < bandwidth/interval, 1/500
+	//   amplitude, frame-edge taper); 0 = off
+	// ratehz: real sample rate in Hz for the pcal phase accumulation
+	//   (= 2x the complex rate); 0 = derive as 2*bandwidth MHz (datasim's
+	//   own 2*d_bandwidth convention)
 	FreqStationGen();
 	~FreqStationGen();
 
@@ -140,7 +148,10 @@ public:
 	          const std::vector<double> &bandbwmhz,
 	          const CommonSignal::Grid &grid,
 	          double noisesigma, unsigned long seed, const std::string &station,
-	          int vpsamps_, bool adaptive, double flux = 0.0, double sefd = 0.0);
+	          int vpsamps_, bool adaptive, double flux = 0.0, double sefd = 0.0,
+	          const std::vector<std::vector<double> > &pcaltonehz =
+	              std::vector<std::vector<double> >(),
+	          double pcalcombmhz = 0.0, long long ratehz_ = 0);
 
 	// Geometric delay injection (P2, datasim updatevalues + processdata
 	// semantics): every frame the .im model delay is evaluated at the frame
@@ -193,6 +204,9 @@ private:
 		fftwf_complex *procbuf;          // vpsamps frame workspace
 		fftwf_complex *buffreqtemp;      // 2*vpsamps Hermitian spectrum
 		fftwf_complex *realc;            // 2*vpsamps 2N IDFT output
+		std::vector<double> pcalhz;      // baseband grid pcal tones, Hz
+		double pcalcomb;                 // comb interval MHz (0 = off)
+		double ratehz;                   // real sample rate, Hz (pcal phase)
 		std::mt19937 engine;
 		std::normal_distribution<double> gauss;
 		long long sampcount;             // adaptive quantiser statistics

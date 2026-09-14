@@ -1,6 +1,6 @@
 # fxcorr-sim 分布式架构（单二进制 `fxcorr-sim`）
 
-2026-09-14 定稿（前身：tmp/fxcorr-sim-distributed-architecture.md 草稿）。本文定 fxcorr-sim 的分布式形态与公共信号模型；调用方式/实现要点/测试记录见 `applications/fxcorr-sim/CLAUDE.md`，命令行手册见 `usage.md`，common/ 产物格式见 `data-spec.md`。
+2026-09-14 定稿（前身：tmp/fxcorr-sim-distributed-architecture.md 草稿）。本文定 fxcorr-sim 的分布式形态与公共信号模型；命令行手册（参数/环境变量/示例）见 `usage.md`，源文件地图/实现要点见 `applications/fxcorr-sim/CLAUDE.md`，验证记录见 `applications/fxcorr-sim/VERIFICATION.md`，common/ 产物格式见 `data-spec.md`。
 
 ## 1. 定位与目标
 
@@ -38,15 +38,15 @@ fxcorr-sim         <batch_id> [workdir]
   config/  batches/<batch_id>.json
 
 [任务 1 — 仅一次]
-  fxcorr-sim common --workdir W --batch B
+  fxcorr-sim common B W
         │
         ▼
   common/B/  + 完成标记（meta.json status=done）
         │
         ├─────────────────┬──────────────────┐
         ▼                 ▼                  ▼
-fxcorr-sim station    station             station
-  --station STA1        STA2                STAk
+fxcorr-sim station  station             station
+  B STA1 W           B STA2 W            B STAk W
         │                 │                  │
         ▼                 ▼                  ▼
   raw/STA1/...       raw/STA2/...       raw/STAk/...
@@ -55,7 +55,7 @@ fxcorr-sim station    station             station
 ### 3.2 单机默认
 
 ```
-fxcorr-sim --workdir W --batch B
+fxcorr-sim B W
   → 内部: run_common(); for s in stations: run_station(s);
 ```
 
@@ -94,7 +94,7 @@ V_i = g_i · S(t − τ_i) · e^{jφ_i} + n_i
 - Ormsby 频域边缘滤波（0, 1/2, 4/5, 1…1, 4/5, 1/2）→ IDFT 出复基带缓冲
 - τ_i 注入（已实现，datasim updatevalues + processdata 语义）：每帧 .im 模型求 delay/rate，fracsamperror 累积超半复样本整样本移位（帧窗口在滚动基带缓冲上移动），频域亚样本校正（e^{j·2π·bandwidth·idx/vpsamps·fracerr}），时域条纹旋转（band 起始频率，fraction_of 小数相位）；FXSIM_DELAY=0 时校正链恒等（字节回归判据）
 - 复转实：Hermitian 2N IDFT 取实部 → 2bit 量化打包（复用 quantise2bit + FXSIM_ADAPTIVE）→ VDIF 写盘
-- pcal 注入（.input PHASE CAL 网格，station 端，新路径未实现——P4 排期）
+- pcal 注入（station 端，realc 量化前 = datasim applyphasecal 同构位置，延迟链之后）：.input PHASE CAL 网格 tone（幅度 0.7、batch 起点连续相位，与 legacy 共用网格读取）＋ FXSIM_PCAL 梳齿（datasim `-p` 语义：k·interval MHz、1/500 幅度、帧边 taper）——P4 已完成
 
 ### 数据量事实（设计依据，2026-09-14 分析）
 
@@ -125,17 +125,12 @@ workdir/
 
 ## 7. CLI 要点
 
-```text
-fxcorr-sim common  <batch_id> [workdir]
-fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]
-fxcorr-sim         <batch_id> [workdir]
-```
+（参数/环境变量/示例的完整手册见 `usage.md` fxcorr-sim 段；此处只记设计约束）
 
 - 位置参数风格与 fxcorr-f / fxcorr-x 一致；workdir 语义沿用（位置参数 > `FXCORR_WORKDIR` > `.`）
 - 站列表（默认模式）：来自 `.input` 全部 datastream（与 run_batch.sh 同语义）
 - `station` 模式：公共未就绪（meta.json 缺失或 status≠done）则报错退出
-- `station` 模式带 tone_mhz 位置参数 = legacy 模式：完全旧合成路径（tone/pcal/FXSIM_DELAY/FXSIM_FLUX/FXSIM_SEFD/FXSIM_ADAPTIVE 全部原样），供字节对拍回归
-- 环境变量：`FXSIM_SEED`（公共种子，两入口共用）、`FXSIM_NOISE`（station 端噪声 σ，flux ≤ 0 路径）、`FXSIM_ADAPTIVE`（station 端量化）、`FXSIM_SPECRES`（specRes 缩放）、`FXSIM_LINE`（谱线 freq,amp,rms，freq 绝对 MHz、rms 网格点）、`FXSIM_FLUX`/`FXSIM_SEFD`（datasim 定标链，flux > 0 启用）、`FXSIM_DELAY`（延迟注入，默认开，0 关）
+- `station` 模式带 tone_mhz 位置参数 = legacy 模式：完全旧合成路径（tone/pcal/FXSIM_DELAY/FXSIM_FLUX/FXSIM_SEFD/FXSIM_ADAPTIVE 全部原样），供字节对拍回归；旧路径不再接新特性
 
 ## 8. 计算与并行
 
@@ -167,22 +162,40 @@ fxcorr-sim
 | tone 位置参数 | legacy 专属；新路径下 tone 由 P2 谱线机制（common 端频域注入）提供，跨站天然相干 |
 | FXSIM_FLUX/FXSIM_SEFD | station 端 SEFD 定标（datasim fabricatedata 语义），已实现（flux > 0 启用） |
 | FXSIM_DELAY | 新路径：频域链延迟注入（procptr/fracsample/条纹旋转）默认开、`0` 关；legacy 保留纯相位版 |
-| FXSIM_ADAPTIVE / pcal / 量化打包 | station 端，沿用 |
+| FXSIM_ADAPTIVE / pcal / 量化打包 | station 端，沿用（pcal 新路径 P4 已实现，见阶段表） |
 | `datasim` | 物理参考；逻辑拆进 `run_common` / `run_station`，IPP→fftw3f |
 | `fxcorr-f` / `fxcorr-x` | 只读 `raw/` + config，零感知 |
-| 编排脚本（make_testdata.sh / run_batch.sh） | 数据生成步骤改两段式：common 一次 → 逐站 station（P0-5） |
+| 编排脚本（make_testdata.sh / run_batch.sh） | 数据生成步骤改两段式：common 一次 → 逐站 station（P0） |
 
-## 11. 阶段
+## 11. datasim 特性差距（2026-09-14 定稿）
+
+定位差异：datasim 仿真「可相关出条纹的 VLBI 观测」（科学信号 + 几何模型注入）；fxcorr-sim 新架构以频域公共信号 + 分层注入对齐此语义，落盘形态按 (batch, station) 任务模型重排。特性归属（datasim → fxcorr-sim）：
+
+| datasim 特性 | 归属 | 状态 |
+|---|---|---|
+| 公共频域信号 + 子带切分（跨站相干来源） | common 端（频域 S 落盘共享） | **P0 已完成**（commonsignal） |
+| 站噪声 + SEFD/通量定标（fabricatedata） | station 端 | **P2 已完成**：flux > 0 走 datasim 链（×√F → +√SEFD gencplx 噪声 → ÷√(F+SEFD) 折入 scale），flux ≤ 0 保留 σ 语义（scale = 0.5/(√(1+σ²)·√blksize)）；两路径在 F=1/SEFD=0/σ=0 逐位一致 |
+| 几何延迟/条纹注入（procptr+fracsample+条纹旋转） | station 端 | **P2 已完成**：datasim updatevalues + processdata 语义，默认开、FXSIM_DELAY=0 关（tone 纯相位版保留于 legacy） |
+| 谱线 -l（gengaussianfilter） | common 端 | **P2 已完成**（FXSIM_LINE，gengaussianfilter 照抄：√amp·exp(−π²δ²/2rms²)、re=im 同乘、越界报错） |
+| specres -r（specRes 缩放） | common 端 | **P2 已完成**（FXSIM_SPECRES，datasim `specRes /= specres` 语义，缩放后一致性检查照跑） |
+| pcal 注入 | station 端 | **P4 已完成**（.input PHASE CAL 网格两路径共用，幅度 0.7；新路径另有 FXSIM_PCAL datasim 梳齿 1/500 + 帧边 taper） |
+| 量化阈值自适应（quantize d_tmul） | station 端打包层 | 已实现（FXSIM_ADAPTIVE，四电平版） |
+| 测试模式 -t / MPI 并行 / 多站一次生成+zipper/cat | — | 等价覆盖：batch.json 定时长、batch 编排分片、(batch,station) 任务 + band 交织帧直接生成 |
+| 依赖（GSL/IPP/MPI） | — | mt19937+Box-Muller / fftw3f / 无 MPI（fxcorr-sim 已链接 fftw3f，零新依赖） |
+
+历史分析（A/B 类分类、方案 A 修上游 datasim 的讨论）见第 10 节与 git 历史。
+
+## 12. 阶段
 
 | 阶段 | 内容 |
 |------|------|
-| P0 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：子命令框架 + 默认串行；频域 S 落盘（common）；station 读 S 加噪量化出 VDIF；legacy 模式挂接（字节对拍 BYTE-IDENTICAL）；编排脚本两段式；文档同步；测试机验证（跨站相干两站 FXSIM_NOISE=0 逐位一致、σ=1.0 相关系数 0.444 vs 理论 0.5、新路径全链路 SWIN） |
-| P1 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：make_testdata.sh `-p P` 本地并行 + `--nodes` ssh 节点映射分发 station 任务；测试机验证（p1reg）——3 batch × 2 站并行生成、远程/本地逐位一致、失败传播非零退出、并行产物全链路 SWIN 12 记录 |
-| P2 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：SEFD/通量定标（station 端，datasim fabricatedata 链）；延迟注入完整链（procptr/fracsample/条纹旋转，默认开）；谱线 FXSIM_LINE + specres FXSIM_SPECRES（common 端） |
+| P0 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/VERIFICATION.md）**：子命令框架 + 默认串行；频域 S 落盘（common）；station 读 S 加噪量化出 VDIF；legacy 模式挂接（字节对拍 BYTE-IDENTICAL）；编排脚本两段式；文档同步；测试机验证（跨站相干两站 FXSIM_NOISE=0 逐位一致、σ=1.0 相关系数 0.444 vs 理论 0.5、新路径全链路 SWIN） |
+| P1 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/VERIFICATION.md）**：make_testdata.sh `-p P` 本地并行 + `--nodes` ssh 节点映射分发 station 任务；测试机验证（p1reg）——3 batch × 2 站并行生成、远程/本地逐位一致、失败传播非零退出、并行产物全链路 SWIN 12 记录 |
+| P2 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/VERIFICATION.md）**：SEFD/通量定标（station 端，datasim fabricatedata 链）；延迟注入完整链（procptr/fracsample/条纹旋转，默认开）；谱线 FXSIM_LINE + specres FXSIM_SPECRES（common 端） |
 | P3 | **已完成（2026-09-14，评估不实施 + 附带修复）**：性能基线实测（test 配置 2.097s batch）：common 0.84s、station 2.45s/站（0.86× 实时）、fxcorr-f 0.46s、fxcorr-x 0.09s——sim station 虽是流水线最慢单任务（f 的 5.3×），但离线造数无压力、P1 的 (batch,station) 进程级并行已覆盖多核场景，**进程内并行判定不需要**；datasim 功能对照（通读 2748 行源码逐项比对）结论：核心功能全覆盖，遗漏 2 项——新路径 pcal（→P4）、带间隙多 band 网格（本阶段已修：deriveGrid span 改为 max(freq+bw)−min(freq) 实际覆盖，datasim 原算法对间隙布局静默越界不照抄；附带修 per-band 帧结构 ÷nbands bug，test2b 全链路验证通过、单 band 回归 BYTE-IDENTICAL，详见 applications/fxcorr-sim/CLAUDE.md） |
-| P4 | **排期（未实施）**：新路径 pcal 相位校准注入（datasim `-p` 梳齿语义 vs .input PHASE CAL tone 网格，参考 legacy 已实现路径；帧边 taper 随之） |
+| P4 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/VERIFICATION.md）**：新路径 pcal 相位校准注入双语义——.input PHASE CAL tone 网格（0.7 幅度、batch 起点连续相位，网格读取与 legacy 共用）＋ FXSIM_PCAL datasim `-p` 梳齿（k·interval MHz、1/500 幅度、帧边 taper）；注入点 = realc 量化前（datasim applyphasecal 同构，延迟链之后）。验证：网格 4 tones（201-204MHz）PCAL 与 mpifxcorr 同一 raw 提取**逐字节一致**、SWIN 6/6 全等；梳齿 1MHz 峰两站两积分 4/4 检出、taper 525 帧首样本恒 2；无 pcal 默认回归 BYTE-IDENTICAL |
 
-## 12. 约束
+## 13. 约束
 
 - 一个二进制，逻辑两阶段；分布式靠编排调用 `common` / `station`，程序内不用 MPI
 - 默认模式仅限单机（或明确单任务）一键生成
@@ -190,6 +203,6 @@ fxcorr-sim
 - 公共文件格式单独定版本；改格式必须先同步 `data-spec.md`（新增 common/ 产物节后即为规范来源）
 - legacy 模式只做回归，不做新特性
 
-## 13. 一句话
+## 14. 一句话
 
 **`fxcorr-sim` 单入口：`common` 写共享公共信号，`station` 按站读公共并写 raw；不加子命令则本机串行 common+多站；集群上 common 一次、station 多节点并行。**

@@ -54,6 +54,7 @@ run_in_container()
 	[ -n "${FXSIM_LINE+x}" ] && envargs+=(-e FXSIM_LINE="$FXSIM_LINE")
 	[ -n "${FXSIM_FLUX+x}" ] && envargs+=(-e FXSIM_FLUX="$FXSIM_FLUX")
 	[ -n "${FXSIM_SEFD+x}" ] && envargs+=(-e FXSIM_SEFD="$FXSIM_SEFD")
+	[ -n "${FXSIM_PCAL+x}" ] && envargs+=(-e FXSIM_PCAL="$FXSIM_PCAL")
 	docker run --rm "${envargs[@]}" -v "$WORKDIR:$WORKDIR" -w "$(pwd)" "$img:latest" "$tool" "$@"
 }
 fxc()
