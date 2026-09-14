@@ -405,8 +405,8 @@ common/
 ```
 
 - 编号：D15；产生者：`fxcorr-sim common <batch_id>`（每个 batch 一次）；消费者：`fxcorr-sim station`（各站任务只读，不改写）。格式单独定版本，**改文件格式必须先同步本节并递增 version**。
-- **信号语义**（datasim gencplx 移植）：量化前频域公共信号——覆盖全站 `[minStartFreq, maxStartFreq+maxBW]` 的复基带频谱时间流，每 `stime = 1/specRes` µs 一个 `numSamps` 点复频谱 slice（STDEV=1 高斯复噪声，实虚独立）；各站 station 端按自己 band 的 (startIdx, blksize) 切频段、加站噪声、逆 DFT 出复基带（切出的频段逐位相同 = 跨站相干来源）。
-- **网格参数**（由全站 band 布局推导，datasim getSpecRes 移植）：`specRes` = 全站 band 频率差/带宽的 GCD（0.5 MHz 起、二分至 1/2^10，找不到报错）；`numSamps = maxChanFreq/specRes`（全站 band 覆盖跨度）；`minStartFreq` = 全站最低 band 频率。band 频率须落在网格（`(freq−minStartFreq)/specRes` 整数，common 端校验）。
+- **信号语义**（datasim gencplx 移植）：量化前频域公共信号——覆盖全站 `[minStartFreq, maxStartFreq+maxBW]` 的复基带频谱时间流，每 `stime = 1/specRes` µs 一个 `numSamps` 点复频谱 slice（STDEV=1 高斯复噪声，实虚独立）；各站 station 端按自己 band 的 (startIdx, blksize) 切频段、加站噪声、逆 DFT 出复基带（切出的频段逐位相同 = 跨站相干来源）。可选谱线（FXSIM_LINE）：gencplx 后逐 slice 乘高斯滤波器（√amp·exp(−π²δ²/2rms²)，δ = 网格点距，re=im 同乘）。
+- **网格参数**（由全站 band 布局推导，datasim getSpecRes 移植）：`specRes` = 全站 band 频率差/带宽的 GCD（0.5 MHz 起、二分至 1/2^10，找不到报错）；`numSamps = maxChanFreq/specRes`（全站 band 覆盖跨度）；`minStartFreq` = 全站最低 band 频率。可选 specRes 缩放（FXSIM_SPECRES，正整数）：网格 ÷N 后一致性检查照跑（datasim --specres 语义）。band 频率须落在网格（`(freq−minStartFreq)/specRes` 整数，common 端校验）。
 - **meta.json 字段**：
 
 | 字段 | 说明 |
@@ -418,6 +418,7 @@ common/
 | `nblocks` | 块文件数（batch 末块按 batch 时长截断） |
 | `seed` | 公共信号种子（与站无关；站噪声种子 = f(seed, station) 由 station 端派生） |
 | `batch_id` / `start_mjd` | 归属批量与时间起点 |
+| `line_freq_mhz` / `line_amp` / `line_rms` | 谱线参数（FXSIM_LINE，2026-09-14 P2 新增可选字段，version 仍为 1 向后兼容；全 0 = 无谱线；rms 单位 = 网格点数） |
 | `status` | `running` / `done`（先写数据再置 done，station 以 done 为就绪判据） |
 
 - **数据文件布局**：`data_XX.bin` 内按 slice 顺序平铺——每 slice `numSamps` 个复数（re,im 各 float32 小端交替），slice 内频点序 = 网格升序（minStartFreq 起）；块 XX 覆盖 batch 第 `XX×0.5s` 起的 0.5s。

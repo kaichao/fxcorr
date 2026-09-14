@@ -70,7 +70,15 @@ static void usage()
 	     << "  fxcorr-sim         <batch_id> [workdir]\n"
 	     << "      serial: common + every station in .input (single machine only)\n"
 	     << "  env (new path): FXSIM_NOISE (default 0.02, 0 disables), FXSIM_SEED,\n"
-	     << "      FXSIM_ADAPTIVE (1 = running-rms quantiser), FXCORR_WORKDIR\n"
+	     << "      FXSIM_ADAPTIVE (1 = running-rms quantiser), FXSIM_SPECRES\n"
+	     << "      (grid scaling factor, positive integer), FXSIM_LINE (spectral\n"
+	     << "      line freq,amp,rms - freq in MHz, rms in grid points),\n"
+	     << "      FXSIM_FLUX/FXSIM_SEFD (Jy; flux > 0 enables the datasim\n"
+	     << "      scaling chain x sqrt(F) + sqrt(SEFD) noise / sqrt(F+SEFD),\n"
+	     << "      replacing FXSIM_NOISE; SEFD is one value or a per-station\n"
+	     << "      comma list, default 1000), FXSIM_DELAY (0 = disable the full\n"
+	     << "      delay chain: model delay + fractional sample correction +\n"
+	     << "      fringe rotation, on by default), FXCORR_WORKDIR\n"
 	     << "  env (legacy path): FXSIM_DELAY (1 = inject .calc geometric delay\n"
 	     << "      into the tone phase), FXSIM_FLUX/FXSIM_SEFD (Jy; both set =\n"
 	     << "      SNR scaling), plus the new-path variables above\n";
@@ -231,6 +239,20 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 	// runs to the next frame boundary and fxcorr-f reads only the batch span.
 	st->nframestotal = (durationns + st->framens - 1) / st->framens;
 
+	// delay model context (new path P2 and the legacy FXSIM_DELAY path):
+	// the phase-centre choice and the batch start in scan-relative seconds
+	// (the frame the delay model expects, same as fxcorr-f datareader.cpp)
+	st->batchstartscanrel = 0.0;
+	st->srcindex = 0;
+	if(model->getNumPhaseCentres(0) == 1 && !model->isPointingCentreCorrelated(0))
+		st->srcindex = 1;
+	{
+		long long scanstartsec = (long long)model->getScanStartSec(0, config.getStartMJD(), config.getStartSeconds());
+		double jobstart = (double)config.getStartMJD() + (double)config.getStartSeconds() / 86400.0;
+		long long batchstartns = (long long)floor((bi.startmjd - jobstart) * 86400.0 * 1.0e9 + 0.5);
+		st->batchstartscanrel = (double)(batchstartns - scanstartsec * 1000000000LL) / 1.0e9;
+	}
+
 	if(!legacy)
 		return true;
 
@@ -276,23 +298,12 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 		}
 	}
 
-	// FXSIM_DELAY: per-band tone RF frequency (band edge +/- the baseband
-	// tone offset, sideband-corrected) and the delay model time frame
-	// (scan-relative seconds, the same one fxcorr-f datareader.cpp passes to
-	// calculateDelayInterpolator)
+	// FXSIM_DELAY (legacy): per-band tone RF frequency (band edge +/- the
+	// baseband tone offset, sideband-corrected) for the tone-phase delay
+	// injection; the shared delay model context is set above
 	st->tonerfhz.assign(st->nbands, 0.0);
-	st->batchstartscanrel = 0.0;
-	st->srcindex = 0;
 	if(getenv("FXSIM_DELAY") && strcmp(getenv("FXSIM_DELAY"), "1") == 0)
 	{
-		// phase centre vs pointing centre, same logic as
-		// fxcorr-f datareader.cpp:301-303
-		if(model->getNumPhaseCentres(0) == 1 && !model->isPointingCentreCorrelated(0))
-			st->srcindex = 1;
-		long long scanstartsec = (long long)model->getScanStartSec(0, config.getStartMJD(), config.getStartSeconds());
-		double jobstart = (double)config.getStartMJD() + (double)config.getStartSeconds() / 86400.0;
-		long long batchstartns = (long long)floor((bi.startmjd - jobstart) * 86400.0 * 1.0e9 + 0.5);
-		st->batchstartscanrel = (double)(batchstartns - scanstartsec * 1000000000LL) / 1.0e9;
 		for(int b = 0; b < st->nbands; b++)
 		{
 			int fq = config.getDRecordedFreqIndex(0, st->dsindex, b);
@@ -306,10 +317,50 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 
 // ---- common subcommand: derive the grid and write the shared signal ----
 
+// FXSIM_SPECRES / FXSIM_LINE parsing, shared by the common and station
+// entries so both derive the same grid (a station's expected grid must
+// match the one the common signal was generated with)
+static int parseSpecres()
+{
+	int specres = 1;
+	if(const char *sre = getenv("FXSIM_SPECRES"))
+	{
+		char *end;
+		long v = strtol(sre, &end, 10);
+		if(end == sre || *end != '\0' || v < 1)
+		{
+			cerr << "fxcorr-sim: FXSIM_SPECRES must be a positive integer" << endl;
+			return -1;
+		}
+		specres = (int)v;
+	}
+	return specres;
+}
+
+static int parseLine(CommonSignal::LineSpec *line)
+{
+	if(const char *le = getenv("FXSIM_LINE"))
+	{
+		if(sscanf(le, "%lf,%lf,%lf", &line->freqmhz, &line->amp, &line->rms) != 3)
+		{
+			cerr << "fxcorr-sim: FXSIM_LINE must be freq,amp,rms (MHz)" << endl;
+			return -1;
+		}
+	}
+	return 0;
+}
+
 static int doCommon(Configuration &config, const BatchInfo &bi)
 {
+	int specres = parseSpecres();
+	if(specres < 0)
+		return EXIT_FAILURE;
+	CommonSignal::LineSpec line;
+	if(parseLine(&line) != 0)
+		return EXIT_FAILURE;
+
 	CommonSignal::Grid grid;
-	if(!CommonSignal::deriveGrid(config, &grid))
+	if(!CommonSignal::deriveGrid(config, &grid, specres))
 		return EXIT_FAILURE;
 
 	// total slice count: the batch duration rounded up to a frame boundary,
@@ -346,7 +397,8 @@ static int doCommon(Configuration &config, const BatchInfo &bi)
 	if(const char *sd = getenv("FXSIM_SEED"))
 		seed = strtoul(sd, 0, 10);
 
-	if(!CommonSignal::generate(grid, totalslices, seed, bi.workdir, bi.batchid, bi.startmjd))
+	if(!CommonSignal::generate(grid, totalslices, seed, bi.workdir, bi.batchid, bi.startmjd,
+	                            line))
 		return EXIT_FAILURE;
 	return EXIT_SUCCESS;
 }
@@ -356,19 +408,71 @@ static int doCommon(Configuration &config, const BatchInfo &bi)
 static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi,
                         const StationSetup &st)
 {
-	// legacy-only switches must not be silently ignored on the new path
-	if((getenv("FXSIM_DELAY") && strcmp(getenv("FXSIM_DELAY"), "0") != 0) ||
-	   getenv("FXSIM_FLUX") || getenv("FXSIM_SEFD"))
+	// full delay chain (P2): enabled by default (datasim semantics, the
+	// complete V_i = S(t - tau) e^{j phi} model); FXSIM_DELAY=0 restores the
+	// delay-free identity chain
+	bool dodgen = true;
+	if(getenv("FXSIM_DELAY") && strcmp(getenv("FXSIM_DELAY"), "0") == 0)
+		dodgen = false;
+	double noisesigma = 0.02;
+	bool noiseexplicit = false;
+	if(const char *ns = getenv("FXSIM_NOISE"))
 	{
-		cerr << "fxcorr-sim: FXSIM_DELAY/FXSIM_FLUX/FXSIM_SEFD are legacy-path "
-		        "only; the new path injects delay/SEFD scaling in P2.  For the "
-		        "legacy path pass tone_mhz arguments (fxcorr-sim station ... "
-		        "<tone_mhz>)" << endl;
+		noisesigma = atof(ns);
+		noiseexplicit = true;
+	}
+
+	// FXSIM_FLUX / FXSIM_SEFD (P2, datasim fabricatedata chain): flux > 0
+	// enables the chain and replaces the FXSIM_NOISE path.  SEFD takes one
+	// value for all stations or a comma-separated list indexed by .input
+	// datastream order (datasim -s), defaulting to 1000 (datasim's default)
+	// when flux is set without it.
+	double flux = 0.0;
+	if(const char *fe = getenv("FXSIM_FLUX"))
+	{
+		flux = atof(fe);
+		if(flux < 0.0)
+		{
+			cerr << "fxcorr-sim: FXSIM_FLUX must be non-negative" << endl;
+			return EXIT_FAILURE;
+		}
+	}
+	double sefd = 0.0;
+	if(const char *se = getenv("FXSIM_SEFD"))
+	{
+		if(strchr(se, ',') != 0)
+		{
+			// per-station list, indexed by datastream order
+			vector<double> sefds;
+			stringstream ss(se);
+			string tok;
+			while(getline(ss, tok, ','))
+				sefds.push_back(atof(tok.c_str()));
+			if((int)sefds.size() <= st.dsindex)
+			{
+				cerr << "fxcorr-sim: FXSIM_SEFD list has " << sefds.size()
+				     << " entries, station " << st.station << " is datastream "
+				     << st.dsindex << endl;
+				return EXIT_FAILURE;
+			}
+			sefd = sefds[st.dsindex];
+		}
+		else
+			sefd = atof(se);
+		if(sefd < 0.0)
+		{
+			cerr << "fxcorr-sim: FXSIM_SEFD must be non-negative" << endl;
+			return EXIT_FAILURE;
+		}
+	}
+	else if(flux > 0.0)
+		sefd = 1000.0;
+	if(flux > 0.0 && noiseexplicit)
+	{
+		cerr << "fxcorr-sim: FXSIM_NOISE is ignored when FXSIM_FLUX enables the "
+		        "datasim scaling chain (use FXSIM_SEFD for the station noise)" << endl;
 		return EXIT_FAILURE;
 	}
-	double noisesigma = 0.02;
-	if(const char *ns = getenv("FXSIM_NOISE"))
-		noisesigma = atof(ns);
 	unsigned long seed = 20260912UL;
 	if(const char *sd = getenv("FXSIM_SEED"))
 		seed = strtoul(sd, 0, 10);
@@ -377,7 +481,10 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 		adaptive = (strcmp(adenv, "1") == 0);
 
 	CommonSignal::Grid grid;
-	if(!CommonSignal::deriveGrid(config, &grid))
+	int specres = parseSpecres();
+	if(specres < 0)
+		return EXIT_FAILURE;
+	if(!CommonSignal::deriveGrid(config, &grid, specres))
 		return EXIT_FAILURE;
 
 	// the common signal must be complete before a station starts
@@ -390,9 +497,12 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	int vpsamps = st.bytesperbandframe * 2;
 	FreqStationGen gen;
 	if(!gen.init(st.bandfreqmhz, st.bandbwmhz, grid, noisesigma, seed,
-	             st.station, vpsamps, adaptive))
+	             st.station, vpsamps, adaptive, flux, sefd))
 		return EXIT_FAILURE;
-	(void)model;   // the delay model enters the frame chain in P2
+	if(dodgen)
+		gen.enableDelayInjection(model, 0, config.getDModelFileIndex(0, st.dsindex),
+		                         st.srcindex, st.batchstartscanrel,
+		                         (double)st.framens / 1.0e9);
 
 	// output raw/<station>/<station>_<batch_id>.vdif (data-spec 5.2)
 	string outdir = bi.workdir + "/raw/" + st.station;

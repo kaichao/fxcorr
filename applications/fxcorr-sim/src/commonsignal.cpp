@@ -61,8 +61,13 @@ static bool collectBands(Configuration &config,
 	return true;
 }
 
-bool deriveGrid(Configuration &config, Grid *grid)
+bool deriveGrid(Configuration &config, Grid *grid, int specresfac)
 {
+	if(specresfac < 1)
+	{
+		cerr << "fxcorr-sim: FXSIM_SPECRES must be a positive integer" << endl;
+		return false;
+	}
 	vector<double> freqs, bws;
 	if(!collectBands(config, &freqs, &bws))
 		return false;
@@ -94,6 +99,11 @@ bool deriveGrid(Configuration &config, Grid *grid)
 		        "and bandwidths are not on a 1/2^n MHz grid down to 1/1024 MHz)" << endl;
 		return false;
 	}
+
+	// FXSIM_SPECRES: divide the GCD grid by the scaling factor (datasim.cpp
+	// "specRes /= setupinfo.specres"); every consistency check below then
+	// runs on the scaled grid
+	specres /= (double)specresfac;
 
 	// coverage span: datasim getMaxChanFreq (band-0 bandwidth * band count,
 	// i.e. each station's bands are contiguous), the maximum over stations
@@ -145,7 +155,7 @@ bool deriveGrid(Configuration &config, Grid *grid)
 
 static bool writeMeta(const Grid &grid, long long totalslices, unsigned long seed,
                       const string &dir, const string &batchid, double startmjd,
-                      const char *status)
+                      const LineSpec &line, const char *status)
 {
 	long long blockfloats = (long long)grid.numsamps * 2 * grid.slicesperblock;
 	long long nblocks = (totalslices + grid.slicesperblock - 1) / grid.slicesperblock;
@@ -163,6 +173,9 @@ static bool writeMeta(const Grid &grid, long long totalslices, unsigned long see
 	   << "\t\"seed\": " << seed << ",\n"
 	   << "\t\"batch_id\": \"" << batchid << "\",\n"
 	   << "\t\"start_mjd\": " << startmjd << ",\n"
+	   << "\t\"line_freq_mhz\": " << line.freqmhz << ",\n"
+	   << "\t\"line_amp\": " << line.amp << ",\n"
+	   << "\t\"line_rms\": " << line.rms << ",\n"
 	   << "\t\"status\": \"" << status << "\"\n"
 	   << "}\n";
 	string path = dir + "/meta.json";
@@ -203,7 +216,8 @@ static bool writeBlockFile(const string &path, const float *data, long long nflo
 }
 
 bool generate(const Grid &grid, long long totalslices, unsigned long seed,
-              const string &outdir, const string &batchid, double startmjd)
+              const string &outdir, const string &batchid, double startmjd,
+              const LineSpec &line)
 {
 	string dir = outdir + "/common/" + batchid;
 	string mkdircommand = "mkdir -p " + dir;
@@ -213,8 +227,39 @@ bool generate(const Grid &grid, long long totalslices, unsigned long seed,
 		return false;
 	}
 
+	// spectral line filter (datasim gengaussianfilter): amplitude sqrt(amp),
+	// centre at (freq - grid origin) / specres grid points, rms in grid
+	// points; re and im components share the value
+	vector<float> linefilter;
+	if(line.freqmhz > 0.0)
+	{
+		double freqidx = (line.freqmhz - grid.minstartfreqmhz) / grid.specresmhz;
+		if(line.amp <= 0.0 || line.rms <= 0.0)
+		{
+			cerr << "fxcorr-sim: FXSIM_LINE amp and rms must be positive" << endl;
+			return false;
+		}
+		if(freqidx < 0.0 || freqidx >= (double)grid.numsamps)
+		{
+			cerr << "fxcorr-sim: spectral line at " << line.freqmhz
+			     << " MHz is outside the common signal band ("
+			     << grid.minstartfreqmhz << " .. "
+			     << grid.minstartfreqmhz + (double)grid.numsamps * grid.specresmhz
+			     << " MHz)" << endl;
+			return false;
+		}
+		double amplitude = sqrt(line.amp);
+		linefilter.resize((size_t)grid.numsamps);
+		for(int i = 0; i < grid.numsamps; i++)
+		{
+			double delta = (double)i - freqidx;
+			linefilter[(size_t)i] = (float)(amplitude *
+				exp(-M_PI * M_PI * delta * delta / (2.0 * line.rms * line.rms)));
+		}
+	}
+
 	// running first: a station seeing this meta knows the batch is not ready
-	if(!writeMeta(grid, totalslices, seed, dir, batchid, startmjd, "running"))
+	if(!writeMeta(grid, totalslices, seed, dir, batchid, startmjd, line, "running"))
 		return false;
 
 	// deterministic per-run noise stream, reseeded once
@@ -237,6 +282,20 @@ bool generate(const Grid &grid, long long totalslices, unsigned long seed,
 		for(long long i = 0; i < nfloats; i++)
 			block[(size_t)i] = (float)gauss(engine);
 
+		// spectral line: multiply the filter onto every slice
+		if(!linefilter.empty())
+		{
+			for(long long t = 0; t < slices; t++)
+			{
+				long long base = t * 2LL * grid.numsamps;
+				for(int i = 0; i < grid.numsamps; i++)
+				{
+					block[(size_t)(base + 2LL * i)] *= linefilter[(size_t)i];
+					block[(size_t)(base + 2LL * i + 1)] *= linefilter[(size_t)i];
+				}
+			}
+		}
+
 		// block visibility: write to <name>.tmp, then rename
 		char name[32];
 		snprintf(name, sizeof(name), "data_%02lld.bin", n);
@@ -244,7 +303,7 @@ bool generate(const Grid &grid, long long totalslices, unsigned long seed,
 			return false;
 	}
 
-	if(!writeMeta(grid, totalslices, seed, dir, batchid, startmjd, "done"))
+	if(!writeMeta(grid, totalslices, seed, dir, batchid, startmjd, line, "done"))
 		return false;
 	cerr << "wrote " << dir << ": " << nblocks << " block(s), "
 	     << totalslices << " slices" << endl;

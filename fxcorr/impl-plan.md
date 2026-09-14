@@ -140,10 +140,11 @@ for subint in batch:
 **make_testdata.sh** —— 构建 data-spec 布局的标准测试数据。
 
 ```
-./make_testdata.sh [workdir] [tone_mhz ...]     # 环境变量 FXSIM_NOISE / FXSIM_SEED 透传
+./make_testdata.sh [workdir] [tone_mhz ...]     # 环境变量 FXSIM_NOISE/SEED/ADAPTIVE/SPECRES/LINE/FLUX/SEFD 透传
+./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]   # P1 并行/多节点分发
 ```
 
-步骤：① config/ 的 .vex/.v2d → `vex2difx` → `difxcalc` 出 .input/.calc/.im（产物已存在则跳过，幂等）；② 从 .input 推导 batch 参数（START MJD/SECONDS、subintNS），`batch_id = MJD_秒`（START 秒向下取整）；③ 写 `batches/<batch_id>.json`（全字段一次写全：时间/结构 + stations + 可选 station_groups + baselines/integration_sec/n_channels/polarizations/difx_dir，start_mjd 写精确 repr）；④ 数据生成两段式（2026-09-14 新架构，fxcorr-sim-arch.md）：`fxcorr-sim common <batch_id> <workdir>` 一次 → 逐站 `fxcorr-sim station <batch_id> <station> <workdir>`（station 带 tone_mhz 参数 = legacy 模式）生成 raw VDIF；⑤ 软链 `raw/<station>/<station>_<batch_id>.vdif` 到 .input DATA TABLE 文件名；⑥ stdout 打印 batch_id。多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节）用 `-n N` 选项生成连续 N 个 batch 的 batch.json，数据生成逐 batch 重复 ④。
+步骤：① config/ 的 .vex/.v2d → `vex2difx` → `difxcalc` 出 .input/.calc/.im（产物已存在则跳过，幂等）；② 从 .input 推导 batch 参数（START MJD/SECONDS、subintNS），`batch_id = MJD_秒`（START 秒向下取整）；③ 写 `batches/<batch_id>.json`（全字段一次写全：时间/结构 + stations + 可选 station_groups + baselines/integration_sec/n_channels/polarizations/difx_dir，start_mjd 写精确 repr）；④ 数据生成两段式（2026-09-14 新架构，fxcorr-sim-arch.md）：`fxcorr-sim common <batch_id> <workdir>` 一次 → 逐站 `fxcorr-sim station <batch_id> <station> <workdir>`（station 带 tone_mhz 参数 = legacy 模式）生成 raw VDIF；station 任务按 (batch, station) 展开成命令行列表分发（P1）：`-p P` 本地 `xargs -P` 并行（默认 1 = 串行），`--nodes` 映射的站改 ssh 远程执行（共享存储假设，workdir 全节点同路径可见），任一任务失败非零退出、重跑幂等（VDIF 已存在跳过）；⑤ 软链 `raw/<station>/<station>_<batch_id>.vdif` 到 .input DATA TABLE 文件名；⑥ stdout 打印 batch_id。多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节）用 `-n N` 选项生成连续 N 个 batch 的 batch.json，数据生成逐 batch 重复 ④。
 
 **make_testdata.sh 实施记录（2026-09-12 完成，fxcorr/make_testdata.sh）**：
 
@@ -151,6 +152,13 @@ for subint in batch:
 - 实现 -n 多 batch 时发现并修复的三个既有 bug：**fxcorr-sim 整秒 snap 放宽**为帧边界整除（vdifwriter 帧号从秒内偏移起算，1µs 内近整秒仍归整秒——simcmp BYTE-IDENTICAL 回归通过）；**fxcorr-f 数据文件起点 = batch 起点**（原按 scan 起点定位，多 batch 偏移后读错位置；修复后 batch 1 对拍回归 6/6）；**fxcorr-x executeseconds 加 initsec 偏移**（原停写判定按 scan 起点基准，batch 起点偏移时静默不写盘）。
 - 实测踩坑（均写入 applications/*/CLAUDE.md 或 memory）：**mpifxcorr vdifmux 读不了带噪 2bit 数据**（FXSIM_NOISE>0 时 databytesperpacket 错乱、0 积分输出，NOISE=0 正常）——对拍数据须 `FXSIM_NOISE=0` 生成；f 数据块时间与 batch 起点换算的坐标系混用（当日秒系 vs scan 相对系）曾导致 .sp weight 全 0。
 - 验收（测试机，全部通过）：全新目录跑通单 batch 全流程（config/raw/batches/软链/batch.json 字段全对）；`-n 2` 两个 batch.json 时间连续（start_mjd 差 1.024s）、n_subints 自动 8、软链指最后 batch；batch 2（起点 scan+1.024s）f/x 全链路 4 积分 12 条；NOISE=0 数据 test.input 配置与 mpifxcorr cmp_swin **6/6 全等**；fxcorr-sim simcmp 位序 BYTE-IDENTICAL 回归。
+
+**make_testdata.sh 并行分发实施记录（2026-09-14 完成，P1）**：
+
+- `-p P` / `--nodes` 两个选项（默认 1 / 空 = 原串行行为不变）：station 任务 (batch, station) 展开成命令行列表（每行一条，本地直跑或 ssh 远程），`xargs -0 -P "$PAR" -n 1 bash -c` 分发；common 阶段保持每 batch 串行一次（权威单份，arch 4 节单实例规则）。远程行用全路径 fxcorr-sim + `LD_LIBRARY_PATH=$DIFXROOT/lib`（ssh 非交互 shell 无 setup.bash），FXSIM_NOISE/SEED/ADAPTIVE/SPECRES/LINE/FLUX/SEFD 存在才透传（P2 起全列表；FXSIM_DELAY 由程序默认开、不显式传），ssh 加 `BatchMode=yes` + `StrictHostKeyChecking=accept-new`（防交互卡死/首次 host key 拒连）。container 模式与 -p/--nodes 互斥报错（容器编排归 V2 scalebox）。
+- 失败传播：任一任务非零 → xargs 退出 123/124 → `set -e` 终止；幂等跳过（VDIF 已存在）在任务列表构造期做。
+- 实现中发现并修的两个 bug：① `--nodes` 长选项须**任意位置**摘出（getopts 不支持长选项，最初只摘开头位置，`-n 3 --nodes ...` 报 illegal option）；② 任务列表为空时 GNU xargs 仍执行一次 `bash -c`（空参数报错 → 误判 123），加 `if [ -s "$TASKS" ]` 显式挡（BSD xargs 无此行为，跨平台一致）。
+- 验收（测试机 p1reg，全部通过）：`-n 3 -p 4` 3 batch × 2 站并行生成全成功；**节点表路径** `--nodes "localhost:T1 localhost:T2"`（测试机 root 配了 localhost 免密 ssh）ssh 远程产物 vs 本地串行重生成 **BYTE-IDENTICAL**（同 seed 确定性 + 并发读 common 无冲突）；**失败传播** nosuchhost 节点 → rc=124 非零退出、产物未写、恢复后重生成成功；幂等回归全跳过 rc=0；并行产物 run_batch.sh 全链路 SWIN 12 记录（4 积分 × 3 基线、weight 0.956/1.0）。
 
 **run_bench.sh** —— mpifxcorr 基准（对拍基准生成器，不是独立产品线）。
 

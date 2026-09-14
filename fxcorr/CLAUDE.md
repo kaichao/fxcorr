@@ -35,14 +35,14 @@
 调用示例：
 
 ```bash
-./fxcorr/make_testdata.sh [workdir] [tone_mhz ...]   # -n N 连续 N 个 batch；FXSIM_NOISE/SEED、BATCH_NSUBINTS 环境变量
+./fxcorr/make_testdata.sh [workdir] [tone_mhz ...]   # -n N 连续 N 个 batch；-p P station 本地并行；--nodes "host:st1,st2" ssh 分发；FXSIM_NOISE/SEED/ADAPTIVE/SPECRES/LINE/FLUX/SEFD（DELAY 由程序默认开）、BATCH_NSUBINTS 环境变量
 ./fxcorr/run_bench.sh [workdir]            # 出基准 SWIN 到 bench/（对拍基准，NP 覆盖 mpirun 进程数）
 ./fxcorr/run_batch.sh 60512_45000         # fxcorr 流水线（batch.json 须已由 make_testdata.sh 写好）
 ```
 
 **容器模式**（V2，验收 4/5 已过）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装按工具→镜像映射（fxcorr-f/x/sim、vex2difx/difxcalc/difx2fits→difx-tools）加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd)` 前缀，FXSIM_NOISE/SEED 透传；默认 host = 宿主直跑（V1 行为不变）。run_batch.sh 调用时 cwd 须在 workdir（软链相对解析）。
 
-make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。
+make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出、container 模式互斥；详见 impl-plan 2.4 实施记录。
 
 run_bench.sh 实现要点（实测）：batch 定位走 DATA TABLE 软链 target 的 batch_id（fallback batches/ 最新 json）；EXECUTE TIME 截断 = `floor(initsec + (N−1)×intTime) + 1`（mpifxcorr 停写判定按积分起点、整秒字段，N = batch 时长/intTime 不整除即报错）；OUTPUT FILENAME sed 指 `bench/<exp>.difx`；mpirun 在 workdir 内跑（DATA TABLE 相对路径）、root 加 --allow-run-as-root、`LD_LIBRARY_PATH=$DIFXROOT/lib`；mpifxcorr 拒绝覆盖已有 SWIN（脚本先 rm -rf）。batch 时长 < 1s 无整秒解（mpifxcorr 多写 weight-0 积分），默认配置 2.097s 无碍。
 

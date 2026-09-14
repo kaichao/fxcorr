@@ -3,17 +3,24 @@
 #
 # 步骤：① config/ 前处理（vex2difx + difxcalc，幂等）→ ② 从 .input 推导 batch 参数
 # → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ fxcorr-sim 两段式生成 raw VDIF
-# （无 tone：每 batch 先 common 一次、再逐站 station；带 tone：legacy 逐站）
+# （无 tone：每 batch 先 common 一次、station 任务并行分发；带 tone：legacy 逐站）
 # → ⑤ 软链 <DATA TABLE 文件名> 到最后 batch 的 VDIF → ⑥ stdout 打印 batch_id。
 #
-# 用法：./make_testdata.sh [-n N] [workdir] [tone_mhz ...]
+# 用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]
 #
 #   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）；
 #                 多 batch 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）
+#   -p P          station 任务本地并行度（默认 1 = 串行，P1：common 一次后
+#                 (batch,station) 任务 xargs 并行分发）
+#   --nodes MAP   ssh 节点映射（P1）：把站分发到远程节点跑 station（共享存储假设，
+#                 workdir 全节点同路径可见），未列出站回落本地；每 entry
+#                 host:st1,st2，可多个 entry 空格分隔
 #   workdir       项目根目录（默认 .）
 #   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone（新频域路径）；1 个 = 全 band
 #                 同频（legacy 时域路径）；nbands 个 = 逐 band
-#   环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
+#   环境变量：FXSIM_NOISE/SEED/ADAPTIVE/SPECRES/LINE/FLUX/SEFD 透传 fxcorr-sim
+#   （FXSIM_DELAY 由程序默认开）；BATCH_NSUBINTS 覆盖每 batch subint 数；
+#   FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 set -euo pipefail
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
@@ -43,6 +50,10 @@ run_in_container()
 	local envargs=()
 	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
 	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")
+	[ -n "${FXSIM_SPECRES+x}" ] && envargs+=(-e FXSIM_SPECRES="$FXSIM_SPECRES")
+	[ -n "${FXSIM_LINE+x}" ] && envargs+=(-e FXSIM_LINE="$FXSIM_LINE")
+	[ -n "${FXSIM_FLUX+x}" ] && envargs+=(-e FXSIM_FLUX="$FXSIM_FLUX")
+	[ -n "${FXSIM_SEFD+x}" ] && envargs+=(-e FXSIM_SEFD="$FXSIM_SEFD")
 	docker run --rm "${envargs[@]}" -v "$WORKDIR:$WORKDIR" -w "$(pwd)" "$img:latest" "$tool" "$@"
 }
 fxc()
@@ -57,19 +68,35 @@ fxc()
 usage()
 {
 	cat >&2 <<'EOF'
-用法：./make_testdata.sh [-n N] [workdir] [tone_mhz ...]
+用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]
   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）
+  -p P          station 任务本地并行度（默认 1 = 串行）
+  --nodes MAP   ssh 节点映射 host:st1,st2（多 entry 空格分隔；未列出站本地跑）
   workdir       项目根目录（默认 .）
   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone；1 个 = 全 band 同频；nbands 个 = 逐 band
-  环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
+  环境变量：FXSIM_NOISE/SEED/ADAPTIVE/SPECRES/LINE/FLUX/SEFD 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 EOF
 	exit "${1:-2}"
 }
 
+# --nodes 长选项先从参数序列摘出（任意位置；getopts 不支持长选项）
+NODEMAP=""
+ARGS=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--nodes) shift; [ $# -gt 0 ] || usage; NODEMAP=$1; shift ;;
+		--) shift; ARGS+=("$@"); break ;;
+		*) ARGS+=("$1"); shift ;;
+	esac
+done
+set -- "${ARGS[@]}"
+
 NBATCH=1
-while getopts "n:h" opt; do
+PAR=1
+while getopts "n:p:h" opt; do
 	case "$opt" in
 		n) NBATCH=$OPTARG ;;
+		p) PAR=$OPTARG ;;
 		h) usage 0 ;;
 		*) usage ;;
 	esac
@@ -77,6 +104,14 @@ done
 shift $((OPTIND - 1))
 if ! [[ $NBATCH =~ ^[1-9][0-9]*$ ]]; then
 	echo "make_testdata.sh: -n must be a positive integer" >&2
+	exit 2
+fi
+if ! [[ $PAR =~ ^[1-9][0-9]*$ ]]; then
+	echo "make_testdata.sh: -p must be a positive integer" >&2
+	exit 2
+fi
+if [ "$FXCORR_RUN_MODE" = "container" ] && { [ "$PAR" -gt 1 ] || [ -n "$NODEMAP" ]; }; then
+	echo "make_testdata.sh: -p/--nodes need FXCORR_RUN_MODE=host (container orchestration is V2 scalebox)" >&2
 	exit 2
 fi
 
@@ -118,7 +153,7 @@ fi
 # ---- ②③ 解析 .input、推导 batch 参数、写 batches/<batch_id>.json ----
 # python3：f64 精确 repr（start_mjd）、MJD 转历表（start_time）、数组字段拼装
 OUT=$(mktemp)
-trap 'rm -f "${OUT:-}"' EXIT
+trap 'rm -f "${OUT:-}" "${TASKS:-}"' EXIT
 export NBATCH INPUT
 python3 - "$WORKDIR" <<'PYEOF' > "$OUT"
 import json, math, os, re, sys
@@ -208,9 +243,11 @@ for st, fn in zip(stations, datafiles):
     print('%s %s' % (st, fn))
 PYEOF
 
-# ---- ④ fxcorr-sim 两段式（新路径）：每 batch 先 common（一次），再逐站 station ----
+# ---- ④ fxcorr-sim 两段式（新路径）：每 batch 先 common（一次），station 任务并行分发 ----
 # 带 tone 参数 = legacy 时域合成路径（对拍回归），无 common 阶段；
 # 无 tone = 新频域路径（公共信号 + 站噪声）。VDIF 已存在则跳过，幂等。
+# 分发（P1）：(batch, station) 任务列表 → xargs -P（-p P，默认 1 = 串行）；
+# --nodes 映射的站改 ssh 远程执行（共享存储假设：workdir 全节点同路径可见）。
 # $OUT：前段每行一个 batch_id，"--" 之后每行 "站名 文件名"
 BATCHES=()
 while IFS= read -r line && [ "$line" != "--" ]; do
@@ -222,6 +259,47 @@ while read -r st fn; do
 	DSFILE+=("$fn")
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
 
+# station → 节点映射（--nodes）；未列出站留空 = 本地
+declare -A NODE_OF
+for entry in $NODEMAP; do
+	host=${entry%%:*}
+	sts=${entry#*:}
+	if [ -z "$host" ] || [ -z "$sts" ]; then
+		echo "make_testdata.sh: bad --nodes entry '$entry' (want host:st1,st2)" >&2
+		exit 2
+	fi
+	for s in ${sts//,/ }; do
+		NODE_OF[$s]=$host
+	done
+done
+
+# 远程站命令：ssh 非交互 shell 无 setup.bash，用全路径 fxcorr-sim +
+# LD_LIBRARY_PATH（$DIFXROOT/lib，默认 /usr/local/difx）；FXSIM_* 透传（存在才传）；
+# BatchMode 防交互卡死，accept-new 首次 host key 自动接受。
+FXCSIM=$(command -v fxcorr-sim || echo fxcorr-sim)
+ENVS=()
+[ -n "${FXSIM_NOISE+x}" ] && ENVS+=("FXSIM_NOISE=$FXSIM_NOISE")
+[ -n "${FXSIM_SEED+x}" ] && ENVS+=("FXSIM_SEED=$FXSIM_SEED")
+[ -n "${FXSIM_ADAPTIVE+x}" ] && ENVS+=("FXSIM_ADAPTIVE=$FXSIM_ADAPTIVE")
+[ -n "${FXSIM_SPECRES+x}" ] && ENVS+=("FXSIM_SPECRES=$FXSIM_SPECRES")
+[ -n "${FXSIM_LINE+x}" ] && ENVS+=("FXSIM_LINE=$FXSIM_LINE")
+[ -n "${FXSIM_FLUX+x}" ] && ENVS+=("FXSIM_FLUX=$FXSIM_FLUX")
+[ -n "${FXSIM_SEFD+x}" ] && ENVS+=("FXSIM_SEFD=$FXSIM_SEFD")
+# 输出一条 station 任务命令行（本地直跑或 ssh 远程），xargs 按行执行
+stationcmd()
+{
+	local bid=$1 st=$2
+	local host=${NODE_OF[$st]:-}
+	local args="station '$bid' '$st' '$WORKDIR' ${TONES[*]}"
+	if [ -n "$host" ]; then
+		printf 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new %q %q\n' \
+			"$host" "cd '$WORKDIR' && env ${ENVS[*]} LD_LIBRARY_PATH=${DIFXROOT:-/usr/local/difx}/lib:\"\$LD_LIBRARY_PATH\" '$FXCSIM' $args"
+	else
+		printf '%q %s\n' "$FXCSIM" "$args"
+	fi
+}
+
+TASKS=$(mktemp)
 for bid in "${BATCHES[@]}"; do
 	if [ "${#TONES[@]}" -eq 0 ]; then
 		fxc fxcorr-sim common "$bid" "$WORKDIR"
@@ -232,10 +310,15 @@ for bid in "${BATCHES[@]}"; do
 		if [ -s "$WORKDIR/$out" ]; then
 			echo "make_testdata.sh: skip existing $out" >&2
 		else
-			fxc fxcorr-sim station "$bid" "$st" "$WORKDIR" ${TONES[@]+"${TONES[@]}"}
+			stationcmd "$bid" "$st" >> "$TASKS"
 		fi
 	done
 done
+# 任务并行执行；任一失败 xargs 退出 123 → set -e 终止脚本。
+# 空列表时跳过（GNU xargs 空输入仍会执行一次命令，BSD 不会，跨平台显式挡）
+if [ -s "$TASKS" ]; then
+	xargs -0 -P "$PAR" -n 1 bash -c < <(tr '\n' '\0' < "$TASKS")
+fi
 
 # ---- ⑤ 软链 <DATA TABLE 文件名> → 最后 batch 的 VDIF ----
 # .input 的 DATA TABLE 每个 datastream 只有一个文件名，软链只能指向一个 batch；

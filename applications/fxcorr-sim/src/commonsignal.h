@@ -36,19 +36,37 @@ struct Grid
 	long long slicesperblock; // slices per 0.5 s block (500000 / stimeus)
 };
 
+// Spectral line parameters (FXSIM_LINE, datasim --specline / util.cpp
+// gengaussianfilter semantics): a Gaussian line at freqmhz (absolute MHz)
+// with amplitude sqrt(amp) and rms in grid points, multiplied onto every
+// slice of the common signal.  freqmhz <= 0 disables the line.
+struct LineSpec
+{
+	double freqmhz;
+	double amp;
+	double rms;
+	LineSpec() : freqmhz(0.0), amp(0.0), rms(0.0) {}
+};
+
 // Derive the grid from config; returns false (with a message on stderr) if
-// the band layout is not representable on a power-of-two grid.
-bool deriveGrid(Configuration &config, Grid *grid);
+// the band layout is not representable on a power-of-two grid.  specresfac
+// (FXSIM_SPECRES, datasim --specres semantics: the GCD grid divided by the
+// scaling factor, datasim.cpp "specRes /= setupinfo.specres") must be a
+// positive integer; every consistency check runs on the scaled grid.
+bool deriveGrid(Configuration &config, Grid *grid, int specresfac = 1);
 
 // Generate the common signal for one batch:
 //   outdir/common/<batchid>/meta.json  +  data_XX.bin (one file per 0.5 s
 //   block, XX zero-padded).  Block files are written to <name>.tmp and
 //   renamed; meta.json starts with status "running" and flips to "done"
 //   after the last block, which is what makes the batch visible to stations.
-//   Deterministic in (seed, totalslices, grid) only - no station input.
+//   Deterministic in (seed, totalslices, grid, line) only - no station input.
+//   With a line configured the Gaussian filter is applied per slice right
+//   after gencplx (datasim.cpp generation loop); a line frequency outside
+//   the grid span is rejected.
 bool generate(const Grid &grid, long long totalslices, unsigned long seed,
               const std::string &outdir, const std::string &batchid,
-              double startmjd);
+              double startmjd, const LineSpec &line = LineSpec());
 
 // Station-side reader.  open() parses meta.json and rejects it unless the
 // batch id matches and status is "done"; the grid fields must agree with the

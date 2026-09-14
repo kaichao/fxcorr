@@ -90,11 +90,11 @@ V_i = g_i · S(t − τ_i) · e^{jφ_i} + n_i
 ```
 
 - 读同一份 S，切自己 band 的频段（startIdx/blksize 由站 band 频率/带宽对 specRes 网格换算）
-- 加本站噪声 n_i（SEFD/σ，P2 接入 FXSIM_FLUX/FXSIM_SEFD datasim fabricatedata 语义：×√F → +√SEFD 站噪声 → ÷√(F+SEFD)；P0 先 FXSIM_NOISE σ 语义）
+- 加本站噪声 n_i（SEFD/σ，datasim fabricatedata 语义：×√F → +√SEFD 站噪声 → ÷√(F+SEFD)；FXSIM_FLUX > 0 启用（替代 FXSIM_NOISE 路径），SEFD 单值或按 datastream 序逗号列表，默认 1000；P0 的 FXSIM_NOISE σ 语义保留为 flux ≤ 0 路径）
 - Ormsby 频域边缘滤波（0, 1/2, 4/5, 1…1, 4/5, 1/2）→ IDFT 出复基带缓冲
-- τ_i 注入点（P2，datasim updatevalues 语义）：procptr 整数采样移位 + 频域 fracsample 校正 + 时域条纹旋转（2π·f·(delay+rate·t)）；P0 无延迟时该校正链为恒等，可跳过 DFT↔IDFT 往返（结构上留插口）
+- τ_i 注入（已实现，datasim updatevalues + processdata 语义）：每帧 .im 模型求 delay/rate，fracsamperror 累积超半复样本整样本移位（帧窗口在滚动基带缓冲上移动），频域亚样本校正（e^{j·2π·bandwidth·idx/vpsamps·fracerr}），时域条纹旋转（band 起始频率，fraction_of 小数相位）；FXSIM_DELAY=0 时校正链恒等（字节回归判据）
 - 复转实：Hermitian 2N IDFT 取实部 → 2bit 量化打包（复用 quantise2bit + FXSIM_ADAPTIVE）→ VDIF 写盘
-- pcal 注入（.input PHASE CAL 网格，station 端）
+- pcal 注入（.input PHASE CAL 网格，station 端，新路径待后续阶段）
 
 ### 数据量事实（设计依据，2026-09-14 分析）
 
@@ -135,7 +135,7 @@ fxcorr-sim         <batch_id> [workdir]
 - 站列表（默认模式）：来自 `.input` 全部 datastream（与 run_batch.sh 同语义）
 - `station` 模式：公共未就绪（meta.json 缺失或 status≠done）则报错退出
 - `station` 模式带 tone_mhz 位置参数 = legacy 模式：完全旧合成路径（tone/pcal/FXSIM_DELAY/FXSIM_FLUX/FXSIM_SEFD/FXSIM_ADAPTIVE 全部原样），供字节对拍回归
-- 环境变量：`FXSIM_SEED`（公共种子，两入口共用）、`FXSIM_NOISE`（station 端噪声 σ）、`FXSIM_ADAPTIVE`（station 端量化）、`FXSIM_SPECRES`（specRes 缩放，P2）、`FXSIM_LINE`（谱线 freq,amp,rms，P2）
+- 环境变量：`FXSIM_SEED`（公共种子，两入口共用）、`FXSIM_NOISE`（station 端噪声 σ，flux ≤ 0 路径）、`FXSIM_ADAPTIVE`（station 端量化）、`FXSIM_SPECRES`（specRes 缩放）、`FXSIM_LINE`（谱线 freq,amp,rms，freq 绝对 MHz、rms 网格点）、`FXSIM_FLUX`/`FXSIM_SEFD`（datasim 定标链，flux > 0 启用）、`FXSIM_DELAY`（延迟注入，默认开，0 关）
 
 ## 8. 计算与并行
 
@@ -165,8 +165,8 @@ fxcorr-sim
 |------|------|
 | 当前 `fxcorr-sim`（tone/噪声/pcal 时域合成） | 演进为本设计；旧路径整体保留为 station 子命令的 legacy 模式（字节对拍回归依赖） |
 | tone 位置参数 | legacy 专属；新路径下 tone 由 P2 谱线机制（common 端频域注入）提供，跨站天然相干 |
-| FXSIM_FLUX/FXSIM_SEFD | station 端 SEFD 定标（datasim fabricatedata 语义），P2 |
-| FXSIM_DELAY | 被频域链延迟注入取代（procptr/fracsample/条纹旋转），P2；legacy 保留纯相位版 |
+| FXSIM_FLUX/FXSIM_SEFD | station 端 SEFD 定标（datasim fabricatedata 语义），已实现（flux > 0 启用） |
+| FXSIM_DELAY | 新路径：频域链延迟注入（procptr/fracsample/条纹旋转）默认开、`0` 关；legacy 保留纯相位版 |
 | FXSIM_ADAPTIVE / pcal / 量化打包 | station 端，沿用 |
 | `datasim` | 物理参考；逻辑拆进 `run_common` / `run_station`，IPP→fftw3f |
 | `fxcorr-f` / `fxcorr-x` | 只读 `raw/` + config，零感知 |
@@ -177,8 +177,8 @@ fxcorr-sim
 | 阶段 | 内容 |
 |------|------|
 | P0 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：子命令框架 + 默认串行；频域 S 落盘（common）；station 读 S 加噪量化出 VDIF；legacy 模式挂接（字节对拍 BYTE-IDENTICAL）；编排脚本两段式；文档同步；测试机验证（跨站相干两站 FXSIM_NOISE=0 逐位一致、σ=1.0 相关系数 0.444 vs 理论 0.5、新路径全链路 SWIN） |
-| P1 | 共享存储上 common 一次 + 多节点 station 编排脚本（测试机多任务验证） |
-| P2 | SEFD/通量定标（station 端）；延迟注入完整链（procptr/fracsample/条纹旋转）；谱线 -l + specres -r（common 端） |
+| P1 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：make_testdata.sh `-p P` 本地并行 + `--nodes` ssh 节点映射分发 station 任务；测试机验证（p1reg）——3 batch × 2 站并行生成、远程/本地逐位一致、失败传播非零退出、并行产物全链路 SWIN 12 记录 |
+| P2 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：SEFD/通量定标（station 端，datasim fabricatedata 链）；延迟注入完整链（procptr/fracsample/条纹旋转，默认开）；谱线 FXSIM_LINE + specres FXSIM_SPECRES（common 端） |
 | P3 | 按需再考虑进程内并行 |
 
 ## 12. 约束
