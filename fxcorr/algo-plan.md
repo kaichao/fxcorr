@@ -17,16 +17,16 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 | P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 |
 | P2 | 多 x 子集并行 | 串行环境新变化（⤴ V3，2026-09-13 挪出） |
 | P3 | 多线程（f/x 进程内并行） | 串行环境新变化（⤴ V3，2026-09-13 挪出） |
-| P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 |
+| P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | ✅ 2026-09-13（P4a zoom 对拍 12/12、P4b 多源对拍 8/8、P4c 非 scrunch 14/14 + scrunch 6/6，各无开关回归 6/6；详见 P4 节） |
 | P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力，⤴ V3，2026-09-13 挪出） |
-| P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 |
-| P7 | 交叉极化自相关（WRITE AUTOCORRS） | 功能未迁移 |
+| P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 | ✅ 2026-09-13（f 侧 SwitchedPower 类 + SWITCHEDPOWER_* 落盘；前 2 个完整整秒窗与 mpifxcorr 逐位全等、SWIN 回归 6/6、无 tcal 回归 6/6；详见 P6 节） |
+| P7 | 交叉极化自相关（WRITE AUTOCORRS） | 功能未迁移 | ✅ 2026-09-13（autocorr.bin v2 + crosspol 段全链路；单 pol + WRITE AUTOCORRS 对拍 6/6、无开关回归 2/2、位序 BYTE-IDENTICAL；详见 P7 节） |
 | P8 | 相位阵频率域加权合并 | 功能未迁移 | ✅ 2026-09-13（x 侧 BeamEngine 波束加权求和 + beam.bin 落盘（上游输出端死代码、格式自定）；两种权重逐位 PASS、回归 6/6；详见 P8 节） |
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | ✅ 2026-09-13（f 侧 FXCORR_KURTOSIS=1 触发 + STA 平均分支；CHANS TO AVG 1/4 两轮 STA+kurtosis 对拍 318 条逐位全等、无开关回归 6/6；顺手修 P1 遗留 stride bug） |
 | P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 | ✅ 2026-09-14（五路径 reader；Mark5B/多线程 VDIF 对拍 6/6、LBA 自洽验证 PASS、五格式审查、VDIF 回归 6/6；详见 P10 节实施记录） |
 | P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 | ✅ 2026-09-14（locate 加 delay 重对齐（跳块/tosubtract 含上游 quirk/整数 ns 对齐）+ fillValidFlags count 语义；delay≠0 对拍 6/6 全等、cmp5 回归 6/6；详见 P11 节实施记录） |
 
-P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，均已补节细化（P6-P10 已实施，P11 设计节 2026-09-14 补齐）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
+P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，均已补节细化并实施（P6-P10 2026-09-13，P11 2026-09-14）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
 
 对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P6/P8 SWIN 对拍、P2/P3（V3 实现时）与单 x 全量结果全等。
 

@@ -15,44 +15,67 @@
 
 ## fxcorr-sim
 
+架构：单二进制三入口（`common` 共享公共信号 / `station` 单站生成 / 无子命令本机串行），设计见 `fxcorr-sim-arch.md`。**实施状态（2026-09-14）**：新架构 P0 已完成并验证（下述即现行接口）；旧 4 参调用（`fxcorr-sim <batch_id> <station> [workdir] [tone_mhz...]`）已废止，报错提示改用 station 子命令。SEFD 定标/延迟注入完整链/谱线+specres 属 P2 未实现。
+
 ```
-fxcorr-sim <batch_id> <station> [workdir] [tone_mhz ...]
+fxcorr-sim common  <batch_id> [workdir]                    # 只生成公共信号
+fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]   # 读公共信号，生成一个站
+fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串行 common + 全站 station
 ```
 
 | 参数 | 说明 |
 |---|---|
-| `batch_id` | 批量标识（`60512_45000` 或 `20260908_123000`），用于读 batch.json 与输出命名 |
-| `station` | 站名（如 `T1`），输出目录 `raw/<station>/` 与文件名前缀 |
+| `batch_id` | 批量标识（`60512_45000` 或 `20260908_123000`），用于读 batch.json、common/ 与输出命名 |
+| `station` | 站名（如 `T1`），输出目录 `raw/<station>/` 与文件名前缀（station 子命令） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
-| `tone_mhz ...` | 基带 tone 频率（MHz，0 个 = 无 tone；1 个 = 所有 band 同频；nbands 个 = 逐 band） |
+| `tone_mhz ...` | **仅 station 子命令**，0 个 = 新路径；出现即 legacy 模式（旧时域合成路径，字节对拍回归专用）：0 值 = 无 tone；1 值 = 所有 band 同频；nbands 值 = 逐 band |
 
 环境变量：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `FXSIM_NOISE` | `0.02` | 高斯噪声 σ；`0` 关闭（配合固定 seed 可逐字节复现） |
-| `FXSIM_SEED` | 固定值 | mt19937 种子；默认固定保证可复现 |
+| `FXSIM_SEED` | 固定值 | 公共信号种子（mt19937，common 与 station 共用）；新路径下公共信号只与 (seed, batch) 有关、与站无关（跨站相干来源），站噪声种子由 (seed, station) 派生 |
+| `FXSIM_NOISE` | `0.02` | station 端高斯噪声 σ；`0` 关闭（两站同参数全关闭 = 输出逐位一致，跨站相干校验） |
+| `FXSIM_ADAPTIVE` | 关 | station 端自适应量化门限（`1` 开启；datasim d_tmul 语义：量化前按数据 rms 缩放、每帧更新、1M 样本封顶），默认关 |
+| `FXSIM_SPECRES` | 1 | specRes 缩放因子 N（公共信号频谱分辨率 ÷N、样本数 ×N），P2 |
+| `FXSIM_LINE` | 关 | 谱线 `freq,amp,rms`（MHz, 幅度, rms），common 端频域高斯滤波注入、跨站相干，P2 |
+| `FXSIM_DELAY` | 关 | **legacy**：`1` = 把 .calc 几何延迟注入 tone 相位（+2π·f_RF·τ(t)，每帧 order=1 求值、帧内线性；pcal 不注入） |
+| `FXSIM_FLUX` / `FXSIM_SEFD` | 关 | **legacy**：源流量 / 站 SEFD（Jy），**两者都设**才启用 SNR 定标（tone 幅度 = 0.5·√(2F/(F+SEFD))、噪声 σ = 0.5·√(SEFD/(F+SEFD))，覆盖 FXSIM_NOISE）；新路径下 SEFD 定标在 station 端按 datasim fabricatedata 语义接入（P2） |
 | `FXCORR_WORKDIR` | `.` | 项目根目录；`workdir` 位置参数优先 |
 
 输入输出：
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
-- 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；`PHASE CAL INT (MHZ)` > 0 时自动注入 pcal tone（幅度 0.7，避开 2bit 量化器电平陷阱）。
-- 输出 `workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF，多 band 帧内样本 band 交织）。
+- 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；common 的 specRes/numSamps 网格由**全站** band 布局推导（GCD 二分，找不到报错）。
+- `common` 输出 `workdir/common/<batch_id>/`：meta.json（版本/dtype/specRes/numSamps/minStartFreq/块表/seed/status）+ data_XX.bin（每 0.5s 块一个，float32 频域 slice 顺序；先临时名再 rename，meta status=done 后 station 才可启动）。格式见 data-spec 5.8。
+- `station` 输出 `workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF，多 band 帧内样本 band 交织）；公共未就绪报错退出。
+- 默认模式 = 本机串行 `common` + 对 `.input` 全部 datastream 逐个 `station`；仅限单机，多节点须编排分别调用两入口。
 
-程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界。batch 时长非帧整数倍时文件生成到下一个帧边界取整（fxcorr-f 只读 batch 段）。
+程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界；batch 时长非帧整数倍时文件生成到下一个帧边界取整（fxcorr-f 只读 batch 段）；common 的 band 频率须落在 specRes 网格（(freq−minStartFreq)/specRes 整数）。
 
 示例：
 
 ```bash
-# 无 tone，纯噪声（可复现：噪声 0.02 + 默认种子）
-fxcorr-sim 60512_45000 T1
+# 新路径：本机一键（common + 全站 station）
+fxcorr-sim 60512_45000
 
-# 各 band 同频 tone 1.5 MHz、噪声关闭（与 gen_test_vdif.py 逐字节对拍场景）
-FXSIM_NOISE=0 fxcorr-sim simcmp T1 . 1.5
+# 新路径：分布式两段（编排调用；station 可多节点并行）
+fxcorr-sim common 60512_45000 /data/proj
+fxcorr-sim station 60512_45000 T1 /data/proj
 
-# 逐 band tone（2 band：200/205 MHz band 各 1.5 MHz）
-fxcorr-sim 60512_45000 T1 . 1.5 1.5
+# 跨站相干校验：两站噪声全关 → 输出逐位一致（单源公共信号）
+FXSIM_NOISE=0 fxcorr-sim common 60512_45000
+FXSIM_NOISE=0 fxcorr-sim station 60512_45000 T1
+FXSIM_NOISE=0 fxcorr-sim station 60512_45000 T2
+
+# legacy 模式（字节对拍回归）：与 gen_test_vdif.py 逐字节一致
+FXSIM_NOISE=0 fxcorr-sim station simcmp T1 . 1.5
+
+# legacy：几何延迟注入（delay≠0 的 VLBI 观测仿真，tone 纯相位版）
+FXSIM_DELAY=1 fxcorr-sim station 60512_45000 T1 . 1.5
+
+# legacy：SNR 定标（源 100 Jy、站 SEFD 1000 Jy）
+FXSIM_FLUX=100 FXSIM_SEFD=1000 fxcorr-sim station 60512_45000 T1 . 1.5
 ```
 
 ---

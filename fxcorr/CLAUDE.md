@@ -9,15 +9,16 @@
 - **impl-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。改实施步骤时改它。
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。改 V2 范围或镜像设计时改它。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
+- **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、P0-P3 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
 - **build.md**：构建手册——集成构建（install-difx）与独立构建（单包 autotools）两条路径、依赖、测试机工作流。改构建体系时改它。
 
 ## 核心约定（源自 data-spec.md）
 
 - **batch_id**：`60512_45000`（MJD+秒，推荐）或 `20260908_123000`（紧凑日期时间）；全局唯一，字符串排序即时间顺序；同一 batch 在 fengine/ 与 vis/ 用相同 batch_id。
-- **目录**：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`raw/<station>/`（TB 级原始基带）、`fengine/<batch_id>/<station>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，二进制布局见 data-spec 5.3）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`product/`、`meta/`、`work/`（临时）。均不进 git。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
+- **目录**：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`common/<batch_id>/`（仿真公共信号 D15，fxcorr-sim common 一次生成、各站只读；≥16× 单站 2bit 数据量，batch 站任务全完成后可删）、`raw/<station>/`（TB 级原始基带）、`fengine/<batch_id>/<station>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，二进制布局见 data-spec 5.3）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`product/`、`meta/`、`work/`（临时）。均不进 git。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
 - **batch.json**（`batches/<batch_id>.json`，D9 全字段单文件）：batch_id / start_mjd / start_time / duration_sec / stations / station_groups（可选，空间切分组）/ baselines / config_file / calc_file / im_file / n_subints / subint_ns / integration_sec / n_channels / polarizations / difx_dir / status / 版本字段。编排脚本一次写全，三工具只读。
-- **数据流**：vex2difx + difxcalc（实验级一次）→ fxcorr-f × 各站（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。
+- **数据流**：vex2difx + difxcalc（实验级一次）→ [仿真分支：fxcorr-sim common（D15 公共信号，每 batch 一次）→ fxcorr-sim station × 各站（D7 VDIF）] → fxcorr-f × 各站（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。fxcorr-sim 架构（三入口/公共信号模型）见 fxcorr-sim-arch.md。
 - **三个敲定决策**：UVW 由 fxcorr-x 读 .calc/.im 求值（D1）；可见度直出 SWIN、difx2fits 零改造（D2）；偏振是 band 属性、偏振组合在 x 侧按 BASELINE TABLE 选（D3）。V1 边界与实施步骤见 impl-plan.md。
 - **SWIN 输出目录**：由 .input 的 OUTPUT FILENAME 决定（Visibility 写盘语义，difx2fits 零改造的前提），batch.json 的 difx_dir 仅为元数据。
 
@@ -71,6 +72,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `sta/sta_ctrl.c` / `sta/gen_test_sta.py` / `sta/cmp_sta.py` / `sta/README.md` | P9 STA/kurtosis 检验资产（sta_ctrl：difxmessage 控制消息发送 + BINARY_STA 组播抓包；CHANS TO AVG 4 变体覆盖 STA 频域平均分支；原始 record 流逐位对拍）+ 检验步骤/验收判据/验证记录（含 P1 cf32 stride bug 修复与基准控制消息时序坑） |
 | `p10/gen_test_mk5b.py` / `gen_test_lba.py` / `gen_test_ivdif.py` / `gen_test_p10.py` / `verify_lba.py` / `p10/README.md` | P10 输入格式检验资产（Mk5B 10016 帧生成器、LBA 16 字节 ASCII 头+2bit 低位先生成器、fanout 多线程 VDIF 生成器、.input 变体、LBA 自洽验证脚本）+ 检验步骤/验收判据/验证记录（含 LBA 位序、VDIF word3 布局、EDV4 三坑等 bug 记录） |
 | `p11/gen_test_p11.py` / `p11/README.md` | P11 reader 语义检验资产（TEST2 对跖点 → 几何 delay 11.2ms 的 test-delay.vex/v2d 生成器，触发 delay 重对齐跳块语义）+ 检验步骤/验收判据/验证记录（含 vex2difx 从 cwd 找 vex 的坑） |
+| `gen_vex_v2d.sh` | vex/v2d 生成脚本（datasim scripts/genv2dvex.sh 的 fxcorr 版；test.vex/test.v2d 模板参数化：站坐标/源/时间/频率/帧长/EOP 环境变量或 obs_info 文件覆盖，`CALC=1` 续跑 vex2difx→difxcalc 链；已全链验证：生成→.input/.calc/.im→sim→f→x→SWIN，详见 applications/fxcorr-sim/CLAUDE.md） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 

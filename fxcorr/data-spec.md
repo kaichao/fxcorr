@@ -42,6 +42,7 @@
 project/                          # 项目根目录（可自定义）
 ├── config/                       # 配置与模型文件
 ├── batches/                      # 批量元数据（batch.json，D9）
+├── common/                       # 仿真公共信号（fxcorr-sim common 输出，D15）
 ├── raw/                          # 原始基带数据
 ├── fengine/                      # fxcorr-f 输出（频域谱）
 ├── vis/                          # fxcorr-x 输出（SWIN 可见度）
@@ -56,6 +57,7 @@ project/                          # 项目根目录（可自定义）
 | 目录 | 归属 | 说明 |
 |---|---|---|
 | `config/` `batches/` `meta/` `product/` | 共享存储 | 配置、元数据、索引、产品；量小，全部节点须一致可见 |
+| `common/` | 共享存储 | 仿真公共信号（fxcorr-sim common 一次生成、各站 station 任务只读；≥16× 单站 2bit 数据量，见 11 节）；batch 的全部 station 完成后可删（生命周期同 fengine/，见 12 节） |
 | `vis/` | 共享存储 | SWIN 跨 batch 追加、difx2fits 直读；多 x 子集并行时按 subset 子目录分写（第 12 节） |
 | `beam/` | 共享存储 | 相位阵波束频谱，按 batch 组织；下游波束消费者直读 |
 | `raw/` | 本地存储 | TB 级原始基带；各站数据在各记录节点 |
@@ -82,6 +84,7 @@ project/                          # 项目根目录（可自定义）
 | D12 | Mark4 科学产品 | Mark4 文件集 | 后处理 | Mark4 | MB~GB | 测地学常用格式 |
 | D13 | 全局索引/日志 | `meta/` | 运行过程 | 文本/JSON | KB~MB | 批量索引、运行日志等 |
 | D14 | 波束数据 | `beam/<batch_id>/beam.bin` | fxcorr-x（相位阵） | 二进制（beam.bin） | MB 级 | 相位阵波束加权和频谱，按 acc 窗口记录（P8 2026-09-13；上游无对照格式，fxcorr 自定，见 5.5 节） |
+| D15 | 仿真公共信号 | `common/<batch_id>/` | fxcorr-sim common | 二进制（float32 频域 slice）+ JSON | 较大 | 频域公共信号（量化前复基带频谱，权威一份，各站 station 只读切频段；≥16× 单站 2bit 数据量，见 11 节）；格式见 5.8 节（2026-09-14 新增） |
 
 ---
 
@@ -91,6 +94,8 @@ project/                          # 项目根目录（可自定义）
 |------|------|----------|----------|------|
 | **vex2difx** | 前处理1 | D1（.vex）、D2（.v2d） | D3（.input）、D4（.calc）、D5（.flag） | 纯配置生成，不碰原始数据 |
 | **difxcalc / calcif2** | 前处理2 | D4（.calc） | D6（.im） | 生成几何延迟模型 |
+| **fxcorr-sim common** | 数据生成1 | D3（.input）、D9（batch.json） | D15（common/ 公共信号） | 每个 batch 一次；频域公共信号按全站 band 布局推导 specRes 网格（5.8 节） |
+| **fxcorr-sim station** | 数据生成2 | D3、D9、D15 | D7（raw/ 单站 VDIF） | 每站一任务，多节点并行；只读公共信号，不改写 |
 | **fxcorr-f** | 核心（Station-based） | D3（.input）、D4（.calc）、D6（.im）、D7（raw） | D8（频域谱+自相关+pcal）、D9（batch.json） | 按台站、按批量处理 |
 | **fxcorr-x** | 核心（Baseline-based） | D3（.input）、D4（.calc）、D6（.im）、D8（fengine）、D9 | D10（SWIN 可见度）、D9（batch.json）；相位阵配置时改出 D14（beam.bin，无 SWIN） | 按批量处理多台站数据；UVW 由模型求值 |
 | **difx2fits** | 后处理1 | D3、D4、D6、D10、D5（可选） | D11（.FITS） | 生成 FITS-IDI，SWIN 零改造直读 |
@@ -147,13 +152,14 @@ raw/
 
 #### 5.2.1 仿真数据生成器（fxcorr-sim）规范
 
-fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建），按 (batch_id, station) 生成 raw/ 下的 VDIF 数据。其配置输入与参数语义：
+fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建），单二进制三入口（架构见 fxcorr-sim-arch.md）：`common` 生成共享公共信号（D15，5.8 节）、`station` 读公共信号生成单站 VDIF、无子命令本机串行。其配置输入与参数语义：
 
-- **配置目录（workdir）定位**：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。workdir 内所有相对路径（`batches/<batch_id>.json`、`.input` 的 config_file、`raw/` 输出）均相对它解释。三工具（fxcorr-sim/f/x）与编排脚本（make_testdata.sh / run_batch.sh / run_bench.sh）统一此语义。
-- **配置来源**：读 `workdir/batches/<batch_id>.json`（D9）取 start_mjd / n_subints / config_file；band 结构、采样率、PHASE CAL tone 网格全部来自 `workdir/<config_file>`（.input，非 MPI 构造），与 fxcorr-f 同一解析语义——这是分批次对齐要求的硬理由。
-- **tone 参数**（基带频率 MHz，位置参数尾部）：0 个 = 无 tone；1 个 = 所有 band 同频率；nbands 个 = 逐 band 指定。
-- **噪声**：`FXSIM_NOISE`（高斯噪声 σ，默认 0.02；0 关闭），`FXSIM_SEED`（mt19937 种子，默认固定）。噪声关闭 + 固定 seed 时同参数输出逐字节可复现。
-- **PHASE CAL 注入**：`.input` 的 `PHASE CAL INT (MHZ)` > 0 时按 Configuration 的 tone 网格自动注入（幅度 0.7，避开 2bit 量化器电平陷阱，见 applications/fxcorr-sim/CLAUDE.md），频率/计数与 fxcorr-f 提取端完全一致，构成注入-提取闭环。
+- **配置目录（workdir）定位**：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。workdir 内所有相对路径（`batches/<batch_id>.json`、`.input` 的 config_file、`common/`、`raw/` 输出）均相对它解释。三工具（fxcorr-sim/f/x）与编排脚本（make_testdata.sh / run_batch.sh / run_bench.sh）统一此语义。
+- **配置来源**：读 `workdir/batches/<batch_id>.json`（D9）取 start_mjd / n_subints / config_file；band 结构、采样率、PHASE CAL tone 网格全部来自 `workdir/<config_file>`（.input，非 MPI 构造），与 fxcorr-f 同一解析语义——这是分批次对齐要求的硬理由。common 的 specRes/numSamps 网格由**全站** band 布局推导（5.8 节）。
+- **任务粒度**：common 任务 = (batch_id)（每 batch 一次）；station 任务 = (batch_id, station)（与 fxcorr-f 同构，多节点并行）；一致性靠共享存储单份 common，不靠多节点重复生成。
+- **legacy 模式**：station 子命令带 tone_mhz 位置参数时走旧时域合成路径（tone/噪声/pcal/FXSIM_DELAY/FXSIM_FLUX/FXSIM_SEFD/FXSIM_ADAPTIVE），供字节对拍回归；tone 参数 0 个 = 无 tone、1 个 = 所有 band 同频率、nbands 个 = 逐 band。新路径下 tone 由 P2 谱线机制（common 端频域注入）提供。
+- **噪声**：`FXSIM_NOISE`（高斯噪声 σ，默认 0.02；0 关闭），`FXSIM_SEED`（公共种子，默认固定）。公共信号只与 (seed, batch) 有关、与站无关；站噪声种子 = f(seed, station) 派生。两站噪声全关时输出逐位一致（跨站相干校验）。
+- **PHASE CAL 注入**：`.input` 的 `PHASE CAL INT (MHZ)` > 0 时按 Configuration 的 tone 网格自动注入（幅度 0.7，避开 2bit 量化器电平陷阱，见 applications/fxcorr-sim/CLAUDE.md），频率/计数与 fxcorr-f 提取端完全一致，构成注入-提取闭环（legacy 已实现，新路径 P2）。
 - **输出**：`workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF；多 band 时帧内样本 band 交织；帧时间戳/帧号按 batch 起点换算逐帧自增）。
 
 ### 5.3 F-Engine 输出（fengine/）
@@ -389,6 +395,36 @@ difxmsg/ 仅 container 模式（`FXCORR_RUN_MODE=container`）产生：组播受
 60512_45060,pending,
 ```
 
+### 5.8 仿真公共信号（common/）
+
+```
+common/
+└── <batch_id>/                      # fxcorr-sim common 输出（D15）
+    ├── meta.json                    # 格式版本与网格参数
+    └── data_XX.bin                  # 每 0.5s 块一个文件（XX 从 00 顺序编号）
+```
+
+- 编号：D15；产生者：`fxcorr-sim common <batch_id>`（每个 batch 一次）；消费者：`fxcorr-sim station`（各站任务只读，不改写）。格式单独定版本，**改文件格式必须先同步本节并递增 version**。
+- **信号语义**（datasim gencplx 移植）：量化前频域公共信号——覆盖全站 `[minStartFreq, maxStartFreq+maxBW]` 的复基带频谱时间流，每 `stime = 1/specRes` µs 一个 `numSamps` 点复频谱 slice（STDEV=1 高斯复噪声，实虚独立）；各站 station 端按自己 band 的 (startIdx, blksize) 切频段、加站噪声、逆 DFT 出复基带（切出的频段逐位相同 = 跨站相干来源）。
+- **网格参数**（由全站 band 布局推导，datasim getSpecRes 移植）：`specRes` = 全站 band 频率差/带宽的 GCD（0.5 MHz 起、二分至 1/2^10，找不到报错）；`numSamps = maxChanFreq/specRes`（全站 band 覆盖跨度）；`minStartFreq` = 全站最低 band 频率。band 频率须落在网格（`(freq−minStartFreq)/specRes` 整数，common 端校验）。
+- **meta.json 字段**：
+
+| 字段 | 说明 |
+|---|---|
+| `version` | 格式版本（初版 1；随布局变更递增） |
+| `dtype` | 数据元素类型（初版 `float32` 复数对；留 int16 降级口，见 11 节） |
+| `spec_res_mhz` / `numsamps` / `min_start_freq_mhz` | 网格参数（上文） |
+| `block_bytes` / `slices_per_block` | 每块字节数与 slice 数（`slices_per_block = 0.5s/stime`） |
+| `nblocks` | 块文件数（batch 末块按 batch 时长截断） |
+| `seed` | 公共信号种子（与站无关；站噪声种子 = f(seed, station) 由 station 端派生） |
+| `batch_id` / `start_mjd` | 归属批量与时间起点 |
+| `status` | `running` / `done`（先写数据再置 done，station 以 done 为就绪判据） |
+
+- **数据文件布局**：`data_XX.bin` 内按 slice 顺序平铺——每 slice `numSamps` 个复数（re,im 各 float32 小端交替），slice 内频点序 = 网格升序（minStartFreq 起）；块 XX 覆盖 batch 第 `XX×0.5s` 起的 0.5s。
+- **完成可见性**：块文件先写 `<name>.tmp` 再 `rename`；全部块落盘后 meta.json 写 `status=done`。station 端发现 meta 缺失或 status≠done 即报错退出。
+- **生命周期**：batch 的全部 station 任务完成后 `common/<batch_id>/` 可删（编排层清理，同 fengine/ 12 节语义）；重跑 batch 时 common 覆盖生成（status 回 running→done）。
+- **数据量**：float32 复基带 = 8 字节 × 覆盖带宽 × 时长，恒为单站 2bit VDIF 的 16 倍（11 节）；异带多站时覆盖跨度放大（可达全站总量 20 倍），共享存储容量须按此评估。
+
 ---
 
 ## 6. 批量标识（batch_id）规范
@@ -471,6 +507,20 @@ D10 (vis/<experiment>.difx/ SWIN) + D9
 D11 (.FITS) 或 D12 (Mark4)
 ```
 
+仿真数据分支（D7 的仿真来源，fxcorr-sim 两阶段）：
+
+```
+D3 (.input) + D9 (batch.json)
+        ↓
+   [fxcorr-sim common]     ← 每个 batch 一次
+        ↓
+D15 (common/<batch_id>/ 频域公共信号)
+        ↓
+   [fxcorr-sim station]    ← 按台站、多节点并行（只读 D15）
+        ↓
+D7 (raw/<station>/<station>_<batch_id>.vdif)
+```
+
 ---
 
 ## 10. 文件命名汇总
@@ -483,6 +533,7 @@ D11 (.FITS) 或 D12 (Mark4)
 | F 自相关文件 | D8 | `autocorr.bin` | `autocorr.bin` |
 | 可见度文件 | D10 | `DIFX_<MJD>_<sec>.s<XX>.b<XX>` | `DIFX_60512_45000.s0000.b0000` |
 | 波束文件 | D14 | `beam/<batch_id>/beam.bin` | `beam/60512_45000/beam.bin` |
+| 公共信号 | D15 | `common/<batch_id>/data_XX.bin` + `meta.json` | `common/60512_45000/data_00.bin` |
 | 批量元数据 | D9 | `batches/<batch_id>.json` | `batches/60512_45000.json` |
 | 状态文件 | - | `status.txt` | `status.txt` |
 | FITS 产品 | D11 | `<exp>_<batch_id>.FITS` | `exp_60512_45000.FITS` |
@@ -493,6 +544,7 @@ D11 (.FITS) 或 D12 (Mark4)
 
 ```
 D8（频域谱）  ≈  16×D7（原始基带，2bit 记录）  ≫  D10（可见度，单基线）
+D15（公共信号） ≈  16×D7（单站 2bit；float32 复基带 vs 2bit 实基带，与带宽无关）
 D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学产品）≈ D10 量级
 配置类（D1～D6、D9、D13）体积很小（KB～MB）
 ```
@@ -504,6 +556,7 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
 | 数据 | 公式 | 说明 |
 |---|---|---|
 | D7 | `fs × b/8 × nband` | fs = 采样率（样本/s，= 2×band 带宽，见 5.2 节帧结构反推）；b = 记录位宽（1/2/8bit） |
+| D15 | `覆盖带宽 × 8B × 时长` | float32 复基带（8B/复样本 × 覆盖带宽复采样率），**恒 = 16× 单站 2bit D7**；覆盖带宽 = 全站 band 跨度（同带多站 = 单站带宽，异带多站放大，见 5.8 节）；float16 可降 8×（预留） |
 | D8 | `(nchan/fftchannels) × fs × 8B × nband` | cf32 = 8B/复数；fftchannels = 2×nchan（50% 重叠）时 = **4×fs×nband**，与 nchan 无关（nchan 增大 → 每 FFT 块采样同比增大 → 块数反比减少，两者抵消）；pcal.bin / autocorr.bin 体积可忽略 |
 | D10 | `(74 + 8×nchan) B × nband/intTime × nbaseline` | 每基线每 band 每积分一条 74B 头 + nchan 个 cf32 记录（SWIN 布局见 5.3）；nbaseline = N(N−1)/2 |
 | D11（FITS-IDI） | ≈ 1~2×D10 | difx2fits 把 SWIN 复制进 FITS UV DATA 加表头，同量级、稍大 |
@@ -518,7 +571,7 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
 | test 配置（1×4MHz band、2bit、8Ms/s、nchan=4096、intTime 1.048576s） | 2 MB/s/站 | 32 MB/s/站（16×） | 31 KB/s（1 基线）→ 2.7 GB/天 |
 | 大阵（N=20、8×32MHz band、2bit、64Ms/s、nchan=2048、intTime 2s） | 128 MB/s/站 → 11 TB/天 | 2 GB/s/站（16×）→ 177 TB/天/站 | 12.5 MB/s（190 基线）→ 1.1 TB/天 |
 
-**含义**：① fengine/ 中间数据是 D7 的 16 倍，须按生命周期尽快清理（batch 的 x 完成后即可删，见 12 节）；② D10 才是真正的"小"数据：单基线时 ≈ D7 的 1/64，但随基线数平方增长，大阵可反超 D7。
+**含义**：① fengine/ 中间数据是 D7 的 16 倍，须按生命周期尽快清理（batch 的 x 完成后即可删，见 12 节）；② D10 才是真正的"小"数据：单基线时 ≈ D7 的 1/64，但随基线数平方增长，大阵可反超 D7；③ D15 公共信号与 D8 同量级（16× 单站 2bit D7），但 batch 的全部 station 完成后即可删（早于 x 完成），生命周期最短。
 
 ---
 

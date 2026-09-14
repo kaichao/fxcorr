@@ -143,7 +143,7 @@ for subint in batch:
 ./make_testdata.sh [workdir] [tone_mhz ...]     # 环境变量 FXSIM_NOISE / FXSIM_SEED 透传
 ```
 
-步骤：① config/ 的 .vex/.v2d → `vex2difx` → `difxcalc` 出 .input/.calc/.im（产物已存在则跳过，幂等）；② 从 .input 推导 batch 参数（START MJD/SECONDS、subintNS），`batch_id = MJD_秒`（START 秒向下取整）；③ 写 `batches/<batch_id>.json`（全字段一次写全：时间/结构 + stations + 可选 station_groups + baselines/integration_sec/n_channels/polarizations/difx_dir，start_mjd 写精确 repr）；④ 逐站 `fxcorr-sim <batch_id> <station> <workdir> [tone_mhz...]` 生成 raw VDIF；⑤ 软链 `raw/<station>/<station>_<batch_id>.vdif` 到 .input DATA TABLE 文件名；⑥ stdout 打印 batch_id。多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节）用 `-n N` 选项生成连续 N 个 batch 的 batch.json，数据生成逐 batch 重复 ④。
+步骤：① config/ 的 .vex/.v2d → `vex2difx` → `difxcalc` 出 .input/.calc/.im（产物已存在则跳过，幂等）；② 从 .input 推导 batch 参数（START MJD/SECONDS、subintNS），`batch_id = MJD_秒`（START 秒向下取整）；③ 写 `batches/<batch_id>.json`（全字段一次写全：时间/结构 + stations + 可选 station_groups + baselines/integration_sec/n_channels/polarizations/difx_dir，start_mjd 写精确 repr）；④ 数据生成两段式（2026-09-14 新架构，fxcorr-sim-arch.md）：`fxcorr-sim common <batch_id> <workdir>` 一次 → 逐站 `fxcorr-sim station <batch_id> <station> <workdir>`（station 带 tone_mhz 参数 = legacy 模式）生成 raw VDIF；⑤ 软链 `raw/<station>/<station>_<batch_id>.vdif` 到 .input DATA TABLE 文件名；⑥ stdout 打印 batch_id。多 batch（验证 SWIN 跨 batch 追加，data-spec 12 节）用 `-n N` 选项生成连续 N 个 batch 的 batch.json，数据生成逐 batch 重复 ④。
 
 **make_testdata.sh 实施记录（2026-09-12 完成，fxcorr/make_testdata.sh）**：
 
@@ -187,12 +187,13 @@ for subint in batch:
 
 **仿真数据生成器 fxcorr-sim**（`applications/fxcorr-sim`，独立 C++ 串行应用；上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建，此为其替身）：
 
-- **应用落位与复用**：autotools 应用模板照 fxcorr-f（configure.ac PKG_CHECK_MODULES: fxcorrcommon），install-difx 注册 4 处；读 .input 复用 fxcorrcommon 的 Configuration（非 MPI 构造）——与 fxcorr-f 同一份解析语义，分批次对齐的根基。
+- **新架构（2026-09-14 定稿，P0 实施中）**：单二进制三入口（`common` / `station` / 无子命令本机串行），频域公共信号落盘共享存储（D15，data-spec 5.8），跨站一致性靠单份 common（不靠多节点重复生成）；架构、数据量依据、P0-P3 阶段见 `fxcorr/fxcorr-sim-arch.md`，命令行见 usage.md。legacy 时域合成路径保留为 station 子命令的 tone 参数模式（字节对拍回归）。下方规格与实施记录为 legacy 路径语义。
+- **应用落位与复用**：autotools 应用模板照 fxcorr-f（configure.ac PKG_CHECK_MODULES: fxcorrcommon + fftw3f），install-difx 注册 4 处；读 .input 复用 fxcorrcommon 的 Configuration（非 MPI 构造）——与 fxcorr-f 同一份解析语义，分批次对齐的根基。
 - **编排器无关**：纯文件/目录接口，不感知调度器——手工、xargs -P、scalebox 三种方式均可驱动。
-- **分片参数化**：按（站, batch 时间窗）参数化，天然分片单元 = 未来 scalebox 的 Task 粒度。
+- **分片参数化**：按（站, batch 时间窗）参数化，天然分片单元 = 未来 scalebox 的 Task 粒度；分布式形态 = common 任务每 batch 一次 + station 任务多节点并行。
 - **分批次对齐**：读 .input 的 subint 结构，batch 时间窗与 subint 网格对齐（data-spec 12 节约束前置到数据产生端）；输出命名 `<station>_<batch_id>.vdif`。
 - **分布生成正确性**：多节点并行生成时，各分片的 VDIF 帧时间戳/帧号必须全局连续——作为程序内校验点，不依赖调度器保证。
-- V1 范围：tone + 高斯噪声 + pcal tone 注入（pcal.bin 链路对拍的前提，该链路至今未验证）+ 多 band。
+- V1 范围（legacy）：tone + 高斯噪声 + pcal tone 注入 + 多 band + 几何延迟 tone 相位注入 + SEFD 定标 + 自适应量化（2026-09-14 前四步已全部验证，见 applications/fxcorr-sim/CLAUDE.md）。
 - **位序验证**：2bit 打包位序沿用 gen_test_vdif.py 已验证约定（对齐 mark5access lut2bit），C++ 实现与其同参数输出逐字节对拍。
 - 上游 datasim 的 IPP 修复（subband.h 13 处类型/签名 + subband.cpp 5 处调用，DFT/复乘换 fftwf）可作为独立小贡献，不绑进主路线。
 

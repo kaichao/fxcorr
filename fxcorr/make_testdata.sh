@@ -2,7 +2,8 @@
 # make_testdata.sh —— 构建 data-spec 布局的标准测试数据（规格见 fxcorr/impl-plan.md 2.4）
 #
 # 步骤：① config/ 前处理（vex2difx + difxcalc，幂等）→ ② 从 .input 推导 batch 参数
-# → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ 逐站 fxcorr-sim 生成 raw VDIF
+# → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ fxcorr-sim 两段式生成 raw VDIF
+# （无 tone：每 batch 先 common 一次、再逐站 station；带 tone：legacy 逐站）
 # → ⑤ 软链 <DATA TABLE 文件名> 到最后 batch 的 VDIF → ⑥ stdout 打印 batch_id。
 #
 # 用法：./make_testdata.sh [-n N] [workdir] [tone_mhz ...]
@@ -10,8 +11,8 @@
 #   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）；
 #                 多 batch 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）
 #   workdir       项目根目录（默认 .）
-#   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone；1 个 = 全 band 同频；
-#                 nbands 个 = 逐 band
+#   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone（新频域路径）；1 个 = 全 band
+#                 同频（legacy 时域路径）；nbands 个 = 逐 band
 #   环境变量：FXSIM_NOISE / FXSIM_SEED 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 set -euo pipefail
 
@@ -207,7 +208,9 @@ for st, fn in zip(stations, datafiles):
     print('%s %s' % (st, fn))
 PYEOF
 
-# ---- ④ 逐 batch 逐站 fxcorr-sim（VDIF 已存在则跳过，幂等） ----
+# ---- ④ fxcorr-sim 两段式（新路径）：每 batch 先 common（一次），再逐站 station ----
+# 带 tone 参数 = legacy 时域合成路径（对拍回归），无 common 阶段；
+# 无 tone = 新频域路径（公共信号 + 站噪声）。VDIF 已存在则跳过，幂等。
 # $OUT：前段每行一个 batch_id，"--" 之后每行 "站名 文件名"
 BATCHES=()
 while IFS= read -r line && [ "$line" != "--" ]; do
@@ -220,13 +223,16 @@ while read -r st fn; do
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
 
 for bid in "${BATCHES[@]}"; do
+	if [ "${#TONES[@]}" -eq 0 ]; then
+		fxc fxcorr-sim common "$bid" "$WORKDIR"
+	fi
 	for i in "${!DSTATION[@]}"; do
 		st=${DSTATION[$i]}
 		out="raw/$st/${st}_${bid}.vdif"
 		if [ -s "$WORKDIR/$out" ]; then
 			echo "make_testdata.sh: skip existing $out" >&2
 		else
-			fxc fxcorr-sim "$bid" "$st" "$WORKDIR" ${TONES[@]+"${TONES[@]}"}
+			fxc fxcorr-sim station "$bid" "$st" "$WORKDIR" ${TONES[@]+"${TONES[@]}"}
 		fi
 	done
 done
