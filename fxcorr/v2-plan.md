@@ -66,7 +66,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 | P8 | 相位阵（phased array）频率域加权 | 功能未迁移 | ✅ 2026-09-13（x 侧 BeamEngine 波束加权求和（core.cpp:818-865）+ beam.bin 落盘（上游输出端全死代码，格式自定，data-spec 5.5/D14）；fxcorrcommon 仅补一行 getFPhasedArrayAccumulationNS getter；DWeight 0.5/0.5 与 1.0/0.0 两变体 50×4 窗口逐位 PASS、谱峰落位正确、不写 SWIN；无相位阵回归 6/6 全等） |
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | ✅ 2026-09-13（f 侧 FXCORR_KURTOSIS=1 触发（Mode 的 s1/s2 累积与 calculateAndAverageKurtosis 已随 fxcorrcommon 就位，只补接线）+ datastreamsaveraged 平均分支（minpostavfreqchannels>=stadumpchannels 时 STA 前平均、写盘跳过重复平均）；CHANS TO AVG 1/4 两轮对拍 318 条逐位全等、无开关回归 6/6；顺手修 P1 遗留的 cf32 stride bug） |
 | P10 | 输入格式补齐 | 功能未迁移 | ✅ 2026-09-14（f 侧 reader 五路径：Mark5B（mark5bfix 修复）→ LBA 家族（ASCII 头+raw）→ MKIV/VLBA/VLBN/KVN5B/CODIF（mark5access 通用流）；多线程 VDIF corner-turn（VDIFMuxer）；K5VSSP/K5VSSP32 上游不可用（mark5access Not Yet Implemented）不迁移；硬件访问（StreamStor/Mark6）不迁移。Mark5B/多线程 VDIF 对拍 6/6、LBA 降级自洽验证（mpifxcorr 基类路径死循环）、五格式代码审查、VDIF 回归 6/6，详见 algo-plan P10 实施记录） |
-| P11 | f 侧 reader 语义补全 | 语义等价 | valid flag 跨段续接子句（datastream.cpp:604-605）、subint 内延迟中途重对齐（datastream.cpp:538-574）；长积分高精度场景才暴露 |
+| P11 | f 侧 reader 语义补全 | 语义等价 | ✅ 2026-09-14（datareader locate 补 delay 重对齐：修正起点早于数据起点时跳 FFT 块 + tosubtract 补偿（含上游 quirk 照抄）+ 整数 ns 对齐 + fillValidFlags 前 count 块 invalid；−nsinc 整 subint 丢弃早退；跨段续接子句在单文件连续读下自动等价不显式实现。delay≠0（T2 对跖点 11.2ms）对拍 6/6 全等、首 subint T1 记录 weight 0.989 证实跳块触发、cmp5 回归 6/6，详见 algo-plan P11 实施记录） |
 
 上游死代码不迁移：FILTERBANK USED/PROCESSING METHOD（configuration.cpp:1558-1574）、dumplta/ltachannels、checkData（datastream.cpp:1953 `#if 0`）、相位阵 TIMESERIES 输出（paoutputformat/padomain 无消费者）、MPI 分段缓冲回填。
 

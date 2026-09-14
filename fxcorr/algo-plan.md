@@ -23,10 +23,10 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 | P7 | 交叉极化自相关（WRITE AUTOCORRS） | 功能未迁移 |
 | P8 | 相位阵频率域加权合并 | 功能未迁移 | ✅ 2026-09-13（x 侧 BeamEngine 波束加权求和 + beam.bin 落盘（上游输出端死代码、格式自定）；两种权重逐位 PASS、回归 6/6；详见 P8 节） |
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | ✅ 2026-09-13（f 侧 FXCORR_KURTOSIS=1 触发 + STA 平均分支；CHANS TO AVG 1/4 两轮 STA+kurtosis 对拍 318 条逐位全等、无开关回归 6/6；顺手修 P1 遗留 stride bug） |
-| P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 |
-| P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 |
+| P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 | ✅ 2026-09-14（五路径 reader；Mark5B/多线程 VDIF 对拍 6/6、LBA 自洽验证 PASS、五格式审查、VDIF 回归 6/6；详见 P10 节实施记录） |
+| P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 | ✅ 2026-09-14（locate 加 delay 重对齐（跳块/tosubtract 含上游 quirk/整数 ns 对齐）+ fillValidFlags count 语义；delay≠0 对拍 6/6 全等、cmp5 回归 6/6；详见 P11 节实施记录） |
 
-P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，详细设计待后续在本文补节（按 P0/P1 相近方式细化后再实施）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
+P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，均已补节细化（P6-P10 已实施，P11 设计节 2026-09-14 补齐）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
 
 对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P6/P8 SWIN 对拍、P2/P3（V3 实现时）与单 x 全量结果全等。
 
@@ -775,6 +775,73 @@ STA 是实时监控（difxmonitor GUI）的数据源：autocorr STA 的谱形、
 - **五格式审查**（判据④，决策 B 通性验证）：MKIV/VLBA/VLBN/KVN5B/CODIF 无基准数据可造（磁带格式），以代码对照审查为验收依据：构造分派（datareader.cpp:50-55）与上游 mpifxcorr.cpp:431-469 映射一致；genMk5FormatName + new_mark5_stream_file 锚定首帧 + 帧对齐定位 + raw 顺序读，与上游 Mk5DataStream（mk5.cpp:315-390）同构；解包在 mark5access 库内与上游同一库同一 formatname；报错路径完整（fanout<0 / 打开失败 / 文件起点晚于 batch 起点）。读入架构与已验证的 KIND_MARK5B 路径同构（raw 读 + Mode 解包）。
 - **VDIF 单线程回归 PASS**（判据⑤）：cmp5 目录（标准 VDIF 配置）SWIN 6/6 全等，datareader 多格式改造 + mode/mk5mode/datamuxer 修复无回归。
 - 调试 dump 代码（FXCORR_*DUMP）已全部清理。
+
+---
+
+## P11：f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐）
+
+### 与 P10 的关系
+
+P10/P11 是同一组件（fxcorr-f datareader）上先后两层的改造，均源自 2026-09-13 mpifxcorr 完整审查：
+
+- **P10 补"读什么"（格式覆盖）**：上游 DataStream 工厂按格式分派六类读取路径，P10 补齐五路径（VDIF/muxed VDIF/Mark5B/mark5access 通用流/LBA 家族），落点是 datareader 构造分派 + 各格式定位/读取机制，已完成。
+- **P11 补"怎么读"（读入语义精度）**：上游所有格式的 subint 定位都走基类 DataStream::calculateControlParams 的公共段（datastream.cpp:516-613），其中两处边界语义（延迟中途重对齐、valid flag 跨段续接）P10 未迁。P11 落点是 P10 五路径**共享**的 locate/fillValidFlags——改一次，五格式同时受益。
+- **暴露条件**：P11 只在几何 delay≠0（真实观测）时暴露差异；合成测试 .vex 两站坐标重合 delay=0，故 P10 的全部对拍均未触达。
+
+### 动机分类
+
+语义等价。V1/P10 的 datareader 只迁移了正常路径语义（数据连续、几何 delay≈0）；上游 DataStream::calculateControlParams 的两处边界语义未迁移，真实观测（几何 delay≠0）下 fxcorr-f 与 mpifxcorr 输出不等价。合成测试 .vex 两站坐标重合 delay=0，故此前所有对拍均未暴露。
+
+### 要解决的问题
+
+上游 getData（datastream.cpp:516-613，**所有格式经基类路径**；VDIF/Mk5/Mark5B 子类只在基类 bufferindex 上做帧对齐，vdiffile.cpp:348-353 同款调用）在"延迟修正后的数据起点早于所属数据段起点"时走 count>0 分支（:538-574）：
+
+- **跳块**：按 FFT block（blockbytes）跳过 count 块直到数据起点进入段内；count ≥ blockspersend → 整个 subint INVALID_SUBINT。
+- **tosubtract 补偿**：`count×(delayus2−delayus1)×1000/(sampletimens×blockspersend)` 采样，补偿 subint 内延迟线性变化（delayus2 = subint 终点延迟，:387-388）。**上游 quirk（:553-569，须照抄保对拍）**：仅当"补偿后压回段起点前"才扣 tosubtract，此时 count++ 再跳一块重算；补偿后仍在段内则**不扣**。
+- **对齐**：2 字节边界（:518-519）+ 整数 ns 字节边界（bytesbetweenintegerns，:570-573）。
+- **valid flags**：前 count 块强制 invalid（:568 判界从 count 起）。
+- **时间重算**：数据时间 = 段起点时间 + segoffns（跳过后实际起点），不是请求的 offsetns（:576-583）。
+
+触发场景：① 修正起点早于 scan 起点（**delay>0 时第一个 subint 必触发**；地球基线 delay ≤ ~21ms < subint 时长，只影响第一个 subint）；② 修正起点落在数据缺口段内（段 validbytes 截断、段前推循环 `nsdifference ≥ validns` 提前推进，:437-456）——缺口语义依赖 filldatasegment 的帧断档检测，**本项不含**（V1 数据无缺口）。
+
+另两处相关语义：**nsdifference < −nsinc 早退**（:463-470：修正起点早于段起点超过一个段长 → 整个 subint INVALID_SUBINT，不跳块）；**valid flag 跨段续接子句**（:584-605：本段读满 + 下一段时间连续（精确 nsinc 衔接）+ 两段合计字节够 → 判界借用下段 validbytes）。
+
+fxcorr 现状差距：locate 对修正起点 < batch 起点只做 `framesin=0` 截断（无块对齐、无补偿、无 count、时间语义不同）；fillValidFlags 无 count 参数；locate 只算 delayus1 未算 delayus2。
+
+### 设计
+
+**落点：fxcorr-f 的 datareader.{h,cpp}（+main.cpp 传 count）**。
+
+- **等价映射**：fxcorr 无段缓冲、无缺口检测 ⇒ 段恒"读满"（validbytes = readbytes）⇒ 段前推条件 `nsdifference ≥ validns = nsinc` 在修正起点 ≥ 数据起点时恒成立（前推到所属段）、< 数据起点时恒不前推 ⇒ **段网格（readbytes = databufferfactor/numdatasegments×maxbytes）退化为单一"数据起点"网格**，count>0 判界即"修正字节位置 < 数据起点"（batch 起点；file-per-batch 单 scan 下 = scan 起点 = 段 0 起点）。
+- **locate 改造**（五 kind 通用，插在现有 framesin 帧对齐之前，对照 :516-583）：
+  1. delayus2 = calculateDelayInterpolator(subint 终点，dataspanns 算法同 mode.cpp setOffsets 的 timespan，:387-388)；
+  2. 修正字节位置（batch 相对）< 0 → 按 blockbytes 跳块到 ≥ 0（count 上限 blockspersend，超限 → INVALID_SUBINT，:542-548）；修正起点 < −nsinc（nsinc = subintns×databufferfactor/numdatasegments，configuration.cpp:3025）→ 整个 subint INVALID_SUBINT（:463-470 早退）；
+  3. count>0 时 tosubtract 补偿（照上游公式，采样→字节用 bytespersamplenum/denom），**含 quirk 照抄**（仅压回时扣 + count++ 重算，:553-569）；
+  4. 2 字节对齐 + bytesbetweenintegerns 对齐（:570-573）；
+  5. 各 kind 现有帧对齐与时间重算照旧（输入改为重对齐后的位置；KIND_LBA 无帧对齐）。重对齐后的数据起点时间 = 重对齐后字节位置换算（上游 = 段起点时间 + segoffns）。
+- **fillValidFlags 加 count 参数**：前 count 块强制 0，其余按 gcount 判界（:568-613 慢路径本段判界）；"跨段续接子句"在 fxcorr 单文件连续读下自动等价（读窗口无段限制、文件连续 ⇒ gcount = sendbytes 时全 valid；文件尾部 = 上游"段未读满"单段判界），**不显式实现**，写入实施记录。
+- **main.cpp**：readSubint 把 count 带出（返回参数或成员），fillValidFlags 取用；仅传参改动。
+- **新成员/参数**：blockbytes 与 bytesbetweenintegerns 提为 datareader 成员（fillValidFlags 已算 blockbytes；bytesbetweenintegerns 照 datastream.cpp:757-761 累加算法）；delayus2 为 locate 局部量。
+- **不迁移项**：帧断档检测（filldatasegment）、段缓冲（readbytes 网格）、跨段数据拼接（execute 回绕拷贝）——单文件连续数据下语义自动等价，写入 v2-plan 记录。
+
+### 验证方法
+
+- **delay≠0 测试资产**（`fxcorr/test/p11/`）：改 test.vex 站点坐标（T2 挪到地球尺度基线 → 几何 delay ~ms 级）→ vex2difx + difxcalc 全链路重跑（fxcorr 用 .calc、mpifxcorr 用 .im，同 .vex 几何同源）。delay 变化项：2.097s 观测内几何 delay 变化 ~µs 级（dτ/dt ~ 1.5µs/s）→ delayus2−delayus1 ≈ 3µs → tosubtract = count×3µs/0.524s ≈ 0 采样（round 0）→ **跳块语义独立可验，补偿项恒 0 时 quirk 无影响**。
+- **对拍**：delay≠0 配置 mpifxcorr 出基准 SWIN → cmp_swin.py 全等（第一个 subint 触发 count>0，其余 count=0，无缺口）；delay=0 回归（cmp5）6/6 不变。
+- **补偿项（tosubtract≠0）**：真实几何 delay 下 subint 内变化不足以产生 ≥1 采样补偿（需 Δ ≥ subintns/count，地球基线不可能，航天器场景才有）；公式与 quirk 以**代码逐行对照审查**为验收依据（对拍覆盖到 tosubtract=0 的同一条代码路径），写入实施记录。
+
+### 验收判据
+
+① delay≠0 对拍逐位全等（count>0 触发）；② delay=0 回归 6/6 全等；③ tosubtract 公式/quirk 与上游逐行对照记录；④ 跨段续接自动等价的论证写入实施记录。
+
+### 实施记录（2026-09-14 完成）
+
+- **delay≠0 对拍 PASS**（判据①）：p11 资产（`fxcorr/test/p11/gen_test_p11.py`：TEST2 挪到 T1 对跖点，基线 12746km）→ vex2difx + difxcalc 全链路，`.im` 实测 DELAY ANT0 ≈ +11.2ms / ANT1 ≈ −11.2ms（fxcorr 用 .calc、mpifxcorr 用 .im，同源几何）。SWIN 对拍 6/6 全等。**跳块语义确认触发**：两边 SWIN weight 分布一致——第一个 subint 的 T1 相关记录（bl 258/257）weight 0.989258（+11.2ms 修正起点落在数据起点前 → 跳块、前段块 invalid），T2 相关记录（bl 514）与后续 subint 全部 weight 1.0（负 delay 修正起点在数据起点之后、count=0），与"delay>0 只影响第一个 subint"的预期一致。
+- **delay=0 回归 PASS**（判据②）：cmp5 目录 SWIN 6/6 全等（改造后二进制）。
+- **tosubtract 逐行对照**（判据③）：公式 `count×1000×(delayus2−delayus1)/(sampletimens×blockspersend)` 采样 + `×bytespersamplenum/bytespersampledenom` 换字节，与 datastream.cpp:553/563 一致；quirk（仅"补偿压回数据起点前"时扣 + count++ 重算，否则不扣）照抄 :556-567；单位 sampletimens = 500/带宽（COMPLEX×2）照 :755-756；delayus2 取 subint 终点（offsetns+dataspanns，dataspanns = blockspersend×fftchannels×sampletimens）照 :384-388；2 字节对齐（:518-519）与整数 ns 边界（bytesbetweenintegerns，:570-573、累加算法照 :757-761）同序。对拍数据 delay 一阶项 −0.23µs/s → 2.097s 内变化 ~0.48µs → 补偿恒 round 0，补偿分支未触发（设计节预期，走代码对照）。
+- **跨段续接自动等价论证**（判据④）：fxcorr 读窗口 = 单段（seek + 读 sendbytes），文件连续时 gcount == sendbytes ⇔ 上游"段读满 + 下段连续（nsinc 精确衔接）+ 两段合计够"的快路径（:584-594）；文件尾部 gcount < sendbytes ⇔ 上游"段未读满"单段判界（:600-604 第一子句）。上游跨段数据拼接（execute 回绕拷贝）与段缓冲（readbytes 网格）无对应物——单文件连续读下无段边界可切，语义自动等价，不显式实现。
+- **实施细节**：等价映射成立的关键是"无缺口检测 ⇒ 段恒读满 ⇒ 前推循环 nsdifference ≥ validns=nsinc 恒成立 ⇒ 段网格退化为单一数据起点"；−nsinc 早退（datastream.cpp:463-470）用 nsinc = subintns×databufferfactor/numdatasegments（测试配置 256/64=4 → 2.097s，delay 11.2ms 远小于，不触发）；locate 的修正字节位置按上游 :516 采样四舍五入公式重算（替换原 floor(帧) 近似），帧对齐改为上游子类 `framesin = vlbaoffset/payloadbytes`（vdiffile.cpp:429-444）。
+- **对拍过程踩坑**：① mpifxcorr 基准的 OUTPUT FILENAME sed 替换须带 4 空格（.input 列对齐，getinputkeyval 按固定列读值）——漏掉时输出目录被读成 `ch.difx`（值从第 17 列起截断），此坑 p10/README 已有记录，再次踩中；② vex2difx 从进程 cwd 找 `vex=` 文件（非 v2d 所在目录），test-delay.vex 须放工作目录根（已写入 p11/README 步骤）。
 
 ---
 

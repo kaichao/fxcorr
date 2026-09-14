@@ -14,6 +14,8 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 	kind(KIND_VDIF),
 	framebytes(0), payloadbytes(0), framespersecond(0), sendbytes(0),
 	blockspersend(0), intclockseconds(0), nummuxthreads(1),
+	bytespersamplenum(0), bytespersampledenom(0), sampletimens(0.0),
+	blockbytes(0), bytesbetweenintegerns(0), nsinc(0), lastcount(0),
 	numfiles(0), datafilenames(0), currentfile(-1), currentscanstartsec(0),
 	currentscan(0), batchstartabsns(0), lastfileoffset(0), anchorbytes(0),
 	muxer(0),
@@ -71,6 +73,29 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 
 	// internal clock offset in whole seconds (datastream.cpp:158)
 	intclockseconds = (long long)floor(config->getDClockCoeff(0, dsindex, 0)/1000000.0 + 0.5);
+
+	// per-sample timing and byte-grid parameters (datastream.cpp:750-761):
+	// bufferindex arithmetic and the P11 delay realignment work on these
+	bytespersamplenum = config->getDBytesPerSampleNum(configindex, dsindex);
+	bytespersampledenom = config->getDBytesPerSampleDenom(configindex, dsindex);
+	sampletimens = 500.0/config->getDRecordedBandwidth(configindex, dsindex, 0);
+	if(config->getDSampling(configindex, dsindex) == Configuration::COMPLEX)
+		sampletimens *= 2;
+	int fftchannels = config->getFNumChannels(config->getDRecordedFreqIndex(configindex, dsindex, 0))*2;
+	if(config->getDSampling(configindex, dsindex) == Configuration::COMPLEX)
+		fftchannels = config->getFNumChannels(config->getDRecordedFreqIndex(configindex, dsindex, 0));
+	blockbytes = (fftchannels*bytespersamplenum)/bytespersampledenom;
+	bytesperns = (double)bytespersamplenum/((double)bytespersampledenom*sampletimens);
+	bytesbetweenintegerns = 0;
+	double nsaccumulate = 0.0;
+	do {
+		nsaccumulate += (double)bytespersampledenom*sampletimens;
+		bytesbetweenintegerns += bytespersamplenum;
+	} while (!(fabs(nsaccumulate - int(nsaccumulate+0.5)) < 50*Mode::TINY));
+	// segment span used by upstream as the early-bail bound (datastream.cpp:763)
+	long long readbytes = (long long)config->getMaxDataBytes(dsindex)
+	                    * config->getDDataBufferFactor()/config->getDNumDataSegments();
+	nsinc = (long long)(sampletimens*(double)readbytes*(double)bytespersampledenom/bytespersamplenum + 0.5);
 
 	if(kind == KIND_VDIF)
 	{
@@ -234,9 +259,8 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 		}
 
 		// no framing: time<->byte mapping is the pure payload rate (upstream
-		// base DataStream::calculateControlParams), derived from getDataBytes
-		// which for LBA is the raw subint payload without frame rounding
-		bytesperns = (double)sendbytes/(double)config->getSubintNS(configindex);
+		// base DataStream::calculateControlParams); bytesperns is the common
+		// per-sample value set above
 		anchorbytes = (long long)((double)(batchstartabsns - filefirstabsns)*bytesperns + 0.5);
 	}
 }
@@ -281,10 +305,21 @@ bool DataReader::locate(int scan, int offsetsec, int offsetns, int *sec, int *ns
 	f64 delayus1 = 0.0;
 	bool foundok = model->calculateDelayInterpolator(scan, (double)offsetsec + ((double)offsetns)/1.0e9, 0.0, 0,
 		config->getDModelFileIndex(configindex, dsindex), srcindex, 0, &delayus1);
-	if(!foundok)
-		return false;
 	delayus1 -= (double)intclockseconds*1000000.0;
 	long long firstoffsetns = ((long long)offsetns) - (long long)(delayus1*1000.0);
+
+	// geometric delay at the subint end (datastream.cpp:384-388), needed by
+	// the realignment compensation below (P11)
+	int fftchannels = config->getFNumChannels(config->getDRecordedFreqIndex(configindex, dsindex, 0))*2;
+	if(config->getDSampling(configindex, dsindex) == Configuration::COMPLEX)
+		fftchannels = config->getFNumChannels(config->getDRecordedFreqIndex(configindex, dsindex, 0));
+	long long dataspanns = (long long)((double)blockspersend*(double)fftchannels*sampletimens + 0.5);
+	f64 delayus2 = 0.0;
+	foundok = foundok && model->calculateDelayInterpolator(scan, (double)offsetsec + ((double)offsetns + dataspanns)/1.0e9, 0.0, 0,
+		config->getDModelFileIndex(configindex, dsindex), srcindex, 0, &delayus2);
+	delayus2 -= (double)intclockseconds*1000000.0;
+	if(!foundok)
+		return false;
 
 	// delay-corrected start relative to the scan start, in ns
 	long long relstartns = (long long)offsetsec*1000000000LL + firstoffsetns;
@@ -297,13 +332,60 @@ bool DataReader::locate(int scan, int offsetsec, int offsetns, int *sec, int *ns
 	                       - (config->getStartSeconds() + currentscanstartsec)*1000000000LL;
 	long long batchrel = relstartns - batchrelscan;
 
+	// P11 realignment (datastream.cpp:516-583): the delay-corrected start may
+	// lie before the data origin (segment 0 = batch start under the
+	// file-per-batch layout; the segment grid degenerates to this single
+	// boundary because the reader has no gap detection, so every segment is
+	// always "full").  Upstream skips whole FFT blocks in that case and
+	// compensates for the delay change across the skipped blocks.
+	lastcount = 0;
+	// whole subint discarded if the corrected start is more than one segment
+	// before the data origin (datastream.cpp:463-470)
+	if(batchrel < -nsinc)
+		return false;
+	// corrected position in bytes, assuming no framing overhead (datastream.cpp:516)
+	long long bufbytes = ((long long)((double)batchrel/sampletimens + 0.5)*bytespersamplenum)/bytespersampledenom;
+	// align to the nearest previous 16 bit boundary (datastream.cpp:518-519)
+	if(bufbytes % 2 != 0)
+		bufbytes--;
+	// skip whole FFT blocks until inside the data (datastream.cpp:538-548)
+	int count = 0;
+	while(bufbytes < 0 && count < blockspersend)
+	{
+		bufbytes += blockbytes;
+		count++;
+	}
+	if(bufbytes < 0)
+		return false;
+	// account for the delay change over the skipped blocks (datastream.cpp:550-568).
+	// Upstream quirk kept for identical behaviour: tosubtract is applied only
+	// when it would push the position back before the data origin (then one
+	// more block is skipped and the compensation recomputed); otherwise it is
+	// NOT subtracted.
+	if(count > 0)
+	{
+		int tosubtract = (int)(count*1000.0*(delayus2 - delayus1)/(sampletimens*blockspersend) + 0.5)*bytespersamplenum/bytespersampledenom;
+		if(bufbytes - tosubtract < 0)
+		{
+			count++;
+			bufbytes += blockbytes;
+			if(count == blockspersend)
+				return false;
+			tosubtract = (int)(count*1000.0*(delayus2 - delayus1)/(sampletimens*blockspersend) + 0.5)*bytespersamplenum/bytespersampledenom;
+			bufbytes -= tosubtract;
+		}
+		// re-align to the nearest previous 16 bit boundary (datastream.cpp:567)
+		bufbytes -= bufbytes % 2;
+	}
+	lastcount = count;
+	// back off to a byte boundary where the ns is an integer value
+	// (datastream.cpp:570-573)
+	bufbytes -= bufbytes % bytesbetweenintegerns;
+
 	if(kind == KIND_LBA)
 	{
 		// no framing: raw payload byte rate (upstream base DataStream)
-		if(batchrel < 0)
-			batchrel = 0;	// start slightly before the batch start: begin at the first byte
-
-		*fileoffset = anchorbytes + (long long)((double)batchrel*bytesperns);
+		*fileoffset = anchorbytes + bufbytes;
 
 		// data block start time: no frame rounding for LBA
 		double abstime = (double)batchrelscan/1000000000.0 + (double)(*fileoffset - anchorbytes)/bytesperns/1.0e9;
@@ -313,11 +395,9 @@ bool DataReader::locate(int scan, int offsetsec, int offsetns, int *sec, int *ns
 		return true;
 	}
 
-	// frame-aligned start (vdiffile.cpp:429-444; V1 frame granularity is 1)
-	double framed = (double)batchrel*framespersecond/1.0e9;
-	long long framesin = (long long)floor(framed);
-	if(framesin < 0)
-		framesin = 0;	// start slightly before the batch start: begin at the first frame
+	// frame-aligned start (vdiffile.cpp:429-444; V1 frame granularity is 1):
+	// framesin from the payload-equivalent byte offset (upstream vlbaoffset)
+	long long framesin = bufbytes/payloadbytes;
 
 	if(kind == KIND_MUXEDVDIF)
 	{
@@ -465,16 +545,15 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 void DataReader::fillValidFlags(s32 *flags, int validbytes) const
 {
 	// one bit per FFT block; a block is valid if its bytes are within the
-	// data actually read (datastream.cpp:600-604)
-	int fftchannels = config->getFNumChannels(config->getDRecordedFreqIndex(configindex, dsindex, 0))*2;
-	if(config->getDSampling(configindex, dsindex) == Configuration::COMPLEX)
-		fftchannels = config->getFNumChannels(config->getDRecordedFreqIndex(configindex, dsindex, 0));
-	int blockbytes = (fftchannels*config->getDBytesPerSampleNum(configindex, dsindex))/config->getDBytesPerSampleDenom(configindex, dsindex);
-
+	// data actually read (datastream.cpp:568-613 slow path).  Blocks skipped
+	// by the delay realignment (locate's count) are forced invalid.  The
+	// cross-segment clause (:604-605) degenerates here: a full read window
+	// over a continuous file is exactly upstream's "full segment + contiguous
+	// next segment" case, and the file tail is the "segment not full" case.
 	memset(flags, 0, sizeof(s32)*((blockspersend + FLAGS_PER_INT - 1)/FLAGS_PER_INT));
-	for(int i=0;i<blockspersend;i++)
+	for(int i=lastcount;i<blockspersend;i++)
 	{
-		if((long long)i*blockbytes < validbytes)
+		if((long long)(i-lastcount)*blockbytes < validbytes)
 			flags[i/FLAGS_PER_INT] |= 1<<(i%FLAGS_PER_INT);
 	}
 }

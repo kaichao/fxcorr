@@ -86,6 +86,18 @@ private:
 	long long intclockseconds;
 	int nummuxthreads;
 
+	// per-sample timing and byte-grid parameters, common to all kinds
+	// (datastream.cpp:750-761); bufferindex arithmetic and the P11 delay
+	// realignment (algo-plan.md P11) work on these
+	int bytespersamplenum;
+	int bytespersampledenom;
+	double sampletimens;		// ns per sample
+	int blockbytes;			// bytes per FFT block
+	int bytesbetweenintegerns;	// bytes per integer-ns boundary
+	long long nsinc;		// upstream segment span in ns (early-bail bound)
+	int lastcount;			// FFT blocks skipped by the last locate
+					// realignment; fillValidFlags forces these invalid
+
 	// file state
 	int numfiles;
 	std::string *datafilenames;
@@ -110,7 +122,8 @@ private:
 
 	// LBA family (KIND_LBA)
 	long long headerbytes;		// bytes of ASCII header in front of the payload
-	double bytesperns;		// raw payload byte rate (upstream base DataStream)
+	double bytesperns;		// payload byte rate (upstream base DataStream
+					// bufferindex conversion; common to all kinds)
 };
 
 #endif
