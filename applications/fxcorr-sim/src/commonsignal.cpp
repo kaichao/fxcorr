@@ -105,21 +105,22 @@ bool deriveGrid(Configuration &config, Grid *grid, int specresfac)
 	// runs on the scaled grid
 	specres /= (double)specresfac;
 
-	// coverage span: datasim getMaxChanFreq (band-0 bandwidth * band count,
-	// i.e. each station's bands are contiguous), the maximum over stations
-	double maxchanfreq = 0.0;
+	// coverage span: min band start to max band top edge across ALL bands of
+	// ALL datastreams (datasim getMaxChanFreq uses band-0 bandwidth x band
+	// count, i.e. assumes each datastream's bands are contiguous; layouts
+	// with gaps like 200 + 205 MHz silently overrun its common signal, so
+	// cover the full extent instead - slices in a gap are generated but
+	// never read by any station)
 	double minstartfreq = freqs[0];
-	for(int d = 0; d < config.getNumDataStreams(); d++)
-	{
-		int nbands = config.getDNumRecordedBands(0, d);
-		int fq0 = config.getDRecordedFreqIndex(0, d, 0);
-		double span = config.getFreqTableBandwidth(fq0) * nbands;
-		if(span > maxchanfreq)
-			maxchanfreq = span;
-	}
+	double maxtopfreq = freqs[0] + bws[0];
 	for(size_t i = 0; i < freqs.size(); i++)
+	{
 		if(freqs[i] < minstartfreq)
 			minstartfreq = freqs[i];
+		if(freqs[i] + bws[i] > maxtopfreq)
+			maxtopfreq = freqs[i] + bws[i];
+	}
+	double maxchanfreq = maxtopfreq - minstartfreq;
 
 	if(!isInteger(maxchanfreq / specres))
 	{

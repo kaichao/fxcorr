@@ -406,7 +406,7 @@ common/
 
 - 编号：D15；产生者：`fxcorr-sim common <batch_id>`（每个 batch 一次）；消费者：`fxcorr-sim station`（各站任务只读，不改写）。格式单独定版本，**改文件格式必须先同步本节并递增 version**。
 - **信号语义**（datasim gencplx 移植）：量化前频域公共信号——覆盖全站 `[minStartFreq, maxStartFreq+maxBW]` 的复基带频谱时间流，每 `stime = 1/specRes` µs 一个 `numSamps` 点复频谱 slice（STDEV=1 高斯复噪声，实虚独立）；各站 station 端按自己 band 的 (startIdx, blksize) 切频段、加站噪声、逆 DFT 出复基带（切出的频段逐位相同 = 跨站相干来源）。可选谱线（FXSIM_LINE）：gencplx 后逐 slice 乘高斯滤波器（√amp·exp(−π²δ²/2rms²)，δ = 网格点距，re=im 同乘）。
-- **网格参数**（由全站 band 布局推导，datasim getSpecRes 移植）：`specRes` = 全站 band 频率差/带宽的 GCD（0.5 MHz 起、二分至 1/2^10，找不到报错）；`numSamps = maxChanFreq/specRes`（全站 band 覆盖跨度）；`minStartFreq` = 全站最低 band 频率。可选 specRes 缩放（FXSIM_SPECRES，正整数）：网格 ÷N 后一致性检查照跑（datasim --specres 语义）。band 频率须落在网格（`(freq−minStartFreq)/specRes` 整数，common 端校验）。
+- **网格参数**（由全站 band 布局推导，datasim getSpecRes 移植）：`specRes` = 全站 band 频率差/带宽的 GCD（0.5 MHz 起、二分至 1/2^10，找不到报错）；`numSamps = (maxStartFreq+maxBW − minStartFreq)/specRes`（覆盖全站 band 的实际跨度——band 间有间隙（如 200/205 MHz）时间隙网格点照常生成，仅不被任何站读取；datasim 的 `maxChanFreq = band0带宽×band数` 假设 band 连续、间隙布局会静默越界读公共信号，不照抄）；`minStartFreq` = 全站最低 band 频率。可选 specRes 缩放（FXSIM_SPECRES，正整数）：网格 ÷N 后一致性检查照跑（datasim --specres 语义）。band 频率须落在网格（`(freq−minStartFreq)/specRes` 整数，common 端校验）。
 - **meta.json 字段**：
 
 | 字段 | 说明 |

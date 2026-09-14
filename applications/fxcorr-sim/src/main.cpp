@@ -192,6 +192,11 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 	if(!deriveFrame(config, st->dsindex, &st->bytesperbandframe,
 	                &st->framespersecond, &st->ratehz, &st->nsampframe, &st->framens))
 		return false;
+	// getFramePayloadBytes is the whole-frame payload across all bands; the
+	// fields above are per-band quantities (single-band setups hide this)
+	st->bytesperbandframe /= st->nbands;
+	st->nsampframe /= st->nbands;
+	st->ratehz /= st->nbands;
 
 	// batch start must lie on a subint boundary (data-spec section 12);
 	// tolerance absorbs the f64 representation error of start_mjd (~1 us)

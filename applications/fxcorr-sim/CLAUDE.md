@@ -2,7 +2,7 @@
 
 仿真 VDIF 数据生成器：无 MPI 串行程序，单二进制三入口（`common` 生成共享公共信号 / `station` 生成单站 VDIF / 无子命令本机串行）。架构设计（分布式形态、公共信号模型、阶段 P0-P3）见 `fxcorr/fxcorr-sim-arch.md`，本文是该目录的操作说明。datasim 的替身（上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建）。
 
-**实施状态（2026-09-14）**：新架构 P0、P1、P2 已完成并验证（三入口、频域公共信号、station 新路径、legacy 挂接、make_testdata.sh 并行/多节点分发、SEFD 定标、延迟注入完整链、谱线+specres 全过）。旧 4 参调用（`fxcorr-sim <batch_id> <station> [workdir] [tone_mhz...]`）已废止，报错提示改用 station 子命令。P3（按需进程内并行）未定。
+**实施状态（2026-09-14）**：新架构 P0、P1、P2 已完成并验证（三入口、频域公共信号、station 新路径、legacy 挂接、make_testdata.sh 并行/多节点分发、SEFD 定标、延迟注入完整链、谱线+specres 全过）。旧 4 参调用（`fxcorr-sim <batch_id> <station> [workdir] [tone_mhz...]`）已废止，报错提示改用 station 子命令。P3（按需进程内并行）**已评估不实施**：实测 sim-station 2.45s（test 配置 2.097s batch，0.86× 实时）虽是流水线最慢单任务（fxcorr-f 0.46s 的 5.3×），但离线造数无压力且 P1 的 (batch,station) 进程级并行已覆盖多核场景；评估同时完成 datasim 功能对照并修复带间隙多 band 网格（见下）。P4（新路径 pcal 注入）已排期，见 fxcorr-sim-arch.md 阶段表。
 
 ## 调用方式（目标状态）
 
@@ -34,6 +34,7 @@ fxcorr-sim         <batch_id> [workdir]              # 默认：本机串行 com
 现有坑（legacy 路径与打包层共同）：
 
 - **采样率 ≠ band 带宽**：采样率从 `.input` 的帧结构反推（`getFramePayloadBytes × 4 × getFramesPerSecond`，同 fxcorr-f datareader.cpp），不能取 `getFreqTableBandwidth`——4 MHz band 以 8 Ms/s 记录。
+- **getFramePayloadBytes 是帧总 payload（2026-09-14 test2b 暴露）**：含全部 band，非 per-band。setupStation 里 deriveFrame 后的 bytesperbandframe/nsampframe/ratehz 已统一 ÷nbands（vpsamps、VDIFWriter、legacy tone 相位、payloadbytes 计算全部是 per-band 语义）；doCommon 的局部 deriveFrame 只取 framens 不受影响。单 band 下总=per-band，此前从未暴露。
 - **FREQ 表单位是 MHz**：`getFreqTableFreq/Bandwidth` 返回 MHz（`BW (MHZ)` atof 直存），换算 Hz 需 ×1e6；pcal tone 频率（`getDRecordedFreqPCalToneFreqHz`）是 Hz。
 - **2bit 校验**：`getDBytesPerSampleNum/Denom` 含 band 数因子（num/denom = nbands/4），单 band 1/4、双 band 1/2，不能写死 1/4。
 - **帧头字布局 = vdifio/mark5access 布局（2026-09-13 修正，P6 暴露）**：word0 [29:0] 秒 + bit30 legacymode=0（=1 会被 mark5access 判为 legacy 16 字节头）+ bit31 invalid=0；word1 [23:0] 帧号 + [29:24] ref epoch（0 = 2000.0，与 word0 自 2000 起的累计秒一致）；word2 [23:0] 帧长（8 字节单位）+ [31:29] version；word3 station/thread/nbits/iscomplex。原按 VDIF 2010 官方 spec 布局（word1 = 秒高位、word2 = epoch/frame、word3 = version/len）写，主路径 vdifmux 不查这些字段故从未暴露，但 mark5access（switched power 路径）解析失败——详见 `fxcorr/test/tcal/README.md`。
@@ -44,7 +45,7 @@ fxcorr-sim         <batch_id> [workdir]              # 默认：本机串行 com
 
 频域链要点（新路径，照 datasim 移植时）：
 
-- **specRes 网格**：全站 band 频率差/带宽的 GCD，0.5MHz 起二分到 1/2^10，找不到报错退出（datasim getSpecRes）；`numSamps = maxChanFreq/specRes`（全站 band 覆盖跨度）、`stime = 1/specRes` µs；station 端 startIdx = (band 频率 − minStartFreq)/specRes、blksize = bw/specRes（非整数报错）。
+- **specRes 网格**：全站 band 频率差/带宽的 GCD，0.5MHz 起二分到 1/2^10，找不到报错退出（datasim getSpecRes）；`numSamps = (maxStartFreq+maxBW − minStartFreq)/specRes`（全站 band 实际跨度，**band 间有间隙也覆盖**——datasim 的 band0带宽×band数 假设连续、间隙布局会静默越界读公共信号，2026-09-14 修正不照抄）、`stime = 1/specRes` µs；station 端 startIdx = (band 频率 − minStartFreq)/specRes、blksize = bw/specRes（非整数报错）。
 - **确定性分层**：公共信号只与 (seed, batch) 有关、与站无关；站噪声种子 = f(seed, station) 派生，与公共种子分离——混用会让站噪声破坏跨站相干。
 - **DC/Nyquist 置零**（datasim 语义）：fabricatedata 后 DC 须为 0（assert）；帧校正链里 procbuffreq[0] 置零；Hermitian 扩展时 DC 与 Nyquist 置零。
 - **DFT 规格映射**：IPP `IPP_FFT_DIV_INV_BY_N`（正变换除 N）+ `ippsDFTInv`（逆变换不除）→ fftwf 正变换后手动 ×1/N、逆变换不缩放，保证 DFT→IDFT 恒等；块生成的小 blksize IDFT 与帧级三趟 FFT（vpsamps/vpsamps/2·vpsamps）共用 plan 复用。
@@ -64,7 +65,7 @@ fxcorr-sim         <batch_id> [workdir]              # 默认：本机串行 com
 | 几何延迟/条纹注入（procptr+fracsample+条纹旋转） | station 端 | **P2 已完成**：datasim updatevalues + processdata 语义，默认开、FXSIM_DELAY=0 关（tone 纯相位版保留于 legacy） |
 | 谱线 -l（gengaussianfilter） | common 端 | **P2 已完成**（FXSIM_LINE，gengaussianfilter 照抄：√amp·exp(−π²δ²/2rms²)、re=im 同乘、越界报错） |
 | specres -r（specRes 缩放） | common 端 | **P2 已完成**（FXSIM_SPECRES，datasim `specRes /= specres` 语义，缩放后一致性检查照跑） |
-| pcal 注入 | station 端 | legacy 已实现（.input 驱动）；新路径未实现（待后续阶段） |
+| pcal 注入 | station 端 | legacy 已实现（.input 驱动）；新路径未实现（**已排期 P4**，见 fxcorr-sim-arch.md 阶段表） |
 | 量化阈值自适应（quantize d_tmul） | station 端打包层 | 已实现（FXSIM_ADAPTIVE，四电平版） |
 | 测试模式 -t / MPI 并行 / 多站一次生成+zipper/cat | — | 等价覆盖：batch.json 定时长、batch 编排分片、(batch,station) 任务 + band 交织帧直接生成 |
 | 依赖（GSL/IPP/MPI） | — | mt19937+Box-Muller / fftw3f / 无 MPI（fxcorr-sim 已链接 fftw3f，零新依赖） |
@@ -74,8 +75,8 @@ fxcorr-sim         <batch_id> [workdir]              # 默认：本机串行 com
 ## V1 边界
 
 - 实采样（complex 报错）、2bit、各 band 同采样率（VDIF 帧约束）、band 数 ∈ {1,2,4,8,16,32}。
-- 单 scan；帧 payload 取 .input 的 `getFramePayloadBytes`（如 8000，4ms @ 8Ms/s）。
-- 新路径现状（P2 后）：延迟注入默认开（FXSIM_DELAY=0 关）、SEFD 定标（FXSIM_FLUX>0 启用，否则 FXSIM_NOISE σ）、谱线/specres 已实现；pcal 注入未实现。帧须为整数 slice（vpsamps % blksize == 0，即 1e6×specRes/fps 整数）、0.5s 块须为整数帧（fps 偶数），不满足报错。
+- 单 scan；帧 payload 取 .input 的 `getFramePayloadBytes`（**帧总 payload，含全部 band**；per-band 值 = ÷nbands——2026-09-14 test2b 修复，单 band 下两者一致故长期隐藏）。
+- 新路径现状（P2 后）：延迟注入默认开（FXSIM_DELAY=0 关）、SEFD 定标（FXSIM_FLUX>0 启用，否则 FXSIM_NOISE σ）、谱线/specres 已实现；pcal 注入未实现（P4 排期）。帧须为整数 slice（vpsamps % blksize == 0，即 1e6×specRes/fps 整数）、块总复样本须为帧复样本整数倍（nslices×blksize % vpsamps == 0，含末块），不满足报错。
 
 ## 构建与注册
 
@@ -95,6 +96,7 @@ fxcorr-sim         <batch_id> [workdir]              # 默认：本机串行 com
 - **全链路对拍**（单 band，config/test.input）：4.096s 数据 → f ×2 站 → x（4 subints 2.097s 对拍段）→ 与 mpifxcorr cmp_swin.py **6/6 记录全等**（对拍段须留 ≥1 subint 数据余量，mpifxcorr vdifmux 滞后）。
 - **pcal 链路**：PHASE CAL INT 1MHz → 4 tones（201-204MHz）全部检出、subint 间相位稳定、Nyquist 边缘 tone 折叠纯实。
 - **多 band**：test2b（2 band 200/205MHz）→ fxcorr-f 出 band_00/01.sp、autocorr 峰 chan 768/512 ✓ → fxcorr-x 144 条 SWIN、可见度峰落位正确 ✓。mpifxcorr 读 2 band VDIF 不可用（vdiffile.cpp corner-turn 路径 vs mark5access 2channel 交织解码不匹配，上游路径未考验），2 band 对拍以物理验证为准。
+- **多 band 新路径（2026-09-14，P3 评估）**：test2b 带 1MHz 间隙（200+205MHz）原报 "band at 205 MHz does not fit the spectrum grid"——deriveGrid 的 span 照抄 datasim band0带宽×band数（连续假设），且 datasim 对间隙布局会静默越界读公共信号。修正 span = max(freq+bw) − min(freq)（间隙切片生成不读取）→ common 成功（specRes 0.5MHz、numsamps 18 覆盖 200-209）→ 两站 station 2098 帧 → f（band_00/01.sp）→ x 42 条 SWIN（7 积分 × 2 频段 × 3 基线）、自相关峰 chan 768/512 与 legacy 验证一致 ✓。同时暴露并修复 per-band 帧结构 bug（vpsamps/ratehz/nsampframe 未 ÷nbands，见关键实现要点）。单 band 回归：common 与 P2 产物 BYTE-IDENTICAL、station 两次生成逐位一致 ✓。
 - difx2fits 对 simcmp SWIN 出 FITS ✓。
 
 P0 已验证（2026-09-14，测试机 /root/fxcortest/simp0/）：

@@ -94,7 +94,7 @@ V_i = g_i · S(t − τ_i) · e^{jφ_i} + n_i
 - Ormsby 频域边缘滤波（0, 1/2, 4/5, 1…1, 4/5, 1/2）→ IDFT 出复基带缓冲
 - τ_i 注入（已实现，datasim updatevalues + processdata 语义）：每帧 .im 模型求 delay/rate，fracsamperror 累积超半复样本整样本移位（帧窗口在滚动基带缓冲上移动），频域亚样本校正（e^{j·2π·bandwidth·idx/vpsamps·fracerr}），时域条纹旋转（band 起始频率，fraction_of 小数相位）；FXSIM_DELAY=0 时校正链恒等（字节回归判据）
 - 复转实：Hermitian 2N IDFT 取实部 → 2bit 量化打包（复用 quantise2bit + FXSIM_ADAPTIVE）→ VDIF 写盘
-- pcal 注入（.input PHASE CAL 网格，station 端，新路径待后续阶段）
+- pcal 注入（.input PHASE CAL 网格，station 端，新路径未实现——P4 排期）
 
 ### 数据量事实（设计依据，2026-09-14 分析）
 
@@ -143,7 +143,7 @@ fxcorr-sim         <batch_id> [workdir]
 |----|------|
 | common : station 计算比 | common 段（公共噪声生成 + 切频段 + IDFT + normalize）≈ 单站总量的 **10%**（test 配置估算：~200M flops/s vs 站总 ~2G flops/s，大头在站级帧校正链）；specRes 变细（多站频率差 GCD 小或 FXSIM_SPECRES 缩放）时公共段占比上升（specRes 减半 → 占比翻倍），这是"每节点各自重算 common 不优先"的量化依据 |
 | 并行 | 多进程/多节点跑 **`station`**（任务粒度 = (batch, station)，与 fxcorr-f 同构）；V1 程序内单线程 |
-| OpenMP | V1 不需要；P3 按需再评估 |
+| OpenMP | V1 不需要；P3 已评估（2026-09-14）结论不实施，见阶段表 |
 
 ## 9. 实现结构（单二进制内）
 
@@ -179,7 +179,8 @@ fxcorr-sim
 | P0 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：子命令框架 + 默认串行；频域 S 落盘（common）；station 读 S 加噪量化出 VDIF；legacy 模式挂接（字节对拍 BYTE-IDENTICAL）；编排脚本两段式；文档同步；测试机验证（跨站相干两站 FXSIM_NOISE=0 逐位一致、σ=1.0 相关系数 0.444 vs 理论 0.5、新路径全链路 SWIN） |
 | P1 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：make_testdata.sh `-p P` 本地并行 + `--nodes` ssh 节点映射分发 station 任务；测试机验证（p1reg）——3 batch × 2 站并行生成、远程/本地逐位一致、失败传播非零退出、并行产物全链路 SWIN 12 记录 |
 | P2 | **已完成（2026-09-14，验证记录见 applications/fxcorr-sim/CLAUDE.md）**：SEFD/通量定标（station 端，datasim fabricatedata 链）；延迟注入完整链（procptr/fracsample/条纹旋转，默认开）；谱线 FXSIM_LINE + specres FXSIM_SPECRES（common 端） |
-| P3 | 按需再考虑进程内并行 |
+| P3 | **已完成（2026-09-14，评估不实施 + 附带修复）**：性能基线实测（test 配置 2.097s batch）：common 0.84s、station 2.45s/站（0.86× 实时）、fxcorr-f 0.46s、fxcorr-x 0.09s——sim station 虽是流水线最慢单任务（f 的 5.3×），但离线造数无压力、P1 的 (batch,station) 进程级并行已覆盖多核场景，**进程内并行判定不需要**；datasim 功能对照（通读 2748 行源码逐项比对）结论：核心功能全覆盖，遗漏 2 项——新路径 pcal（→P4）、带间隙多 band 网格（本阶段已修：deriveGrid span 改为 max(freq+bw)−min(freq) 实际覆盖，datasim 原算法对间隙布局静默越界不照抄；附带修 per-band 帧结构 ÷nbands bug，test2b 全链路验证通过、单 band 回归 BYTE-IDENTICAL，详见 applications/fxcorr-sim/CLAUDE.md） |
+| P4 | **排期（未实施）**：新路径 pcal 相位校准注入（datasim `-p` 梳齿语义 vs .input PHASE CAL tone 网格，参考 legacy 已实现路径；帧边 taper 随之） |
 
 ## 12. 约束
 
