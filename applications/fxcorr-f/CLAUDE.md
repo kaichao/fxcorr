@@ -20,7 +20,7 @@ fxcorr-f <batch_id> <station> [workdir]
 | 本目录 | 作用 | 对照源 |
 |---|---|---|
 | main.cpp | 参数/batch.json 解析、subint 循环驱动、ac 批次触发、**SwitchedPower 切块喂入（P6）**、**STA 发送与 kurtosis（P1/P9）** | 骨架参照 core.cpp:694-801（zeroAutocorrelations→setValidFlags→setData→setOffsets→resetpcal→process 循环）+ :993-1003（acblockcount/maxacblocks 批次）；对齐校验为新增（data-spec 12 节）；switched power 喂入照 vdiffile.cpp:945-964（段粒度 + increment）；sendSTA 照 :1195-1253（P9 补 :1181-1187 平均分支与 :1249-1254 renorm 修正、:1191 MTU gate）、sendKurtosis 照 :1378-1434（P9） |
-| datareader.{h,cpp} | 粗延迟 + VDIF 帧对齐定位 + 顺序读文件 | datastream.cpp:381-394（延迟/第一个 offsetns）、:516-573（采样→字节偏移）、vdiffile.cpp:417-444（帧对齐、framesin×framebytes）；sendbytes = getDataBytes（configuration.cpp，已帧对齐含 guard）；**getLastFileOffset（P6）** 暴露上次读入的文件偏移供喂入重叠剔除 |
+| datareader.{h,cpp} | 多格式读取：粗延迟 + 帧对齐/字节率定位 + 顺序读文件（**P10 五路径**：KIND_VDIF / KIND_MUXEDVDIF / KIND_MARK5B / KIND_MK5STREAM / KIND_LBA） | datastream.cpp:381-394（延迟/第一个 offsetns）、:516-573（采样→字节偏移）、vdiffile.cpp:417-444（帧对齐、framesin×framebytes）；sendbytes = getDataBytes（configuration.cpp，已帧对齐含 guard）；**getLastFileOffset（P6）** 暴露上次读入的文件偏移供喂入重叠剔除；P10 各路径对照源见 algo-plan.md P10 上游路径映射表 |
 | fenginewriter.{h,cpp} | .sp / pcal.bin / autocorr.bin 写盘 | 布局照 data-spec 5.3；写入序照 core.cpp:1145-1153（finalisepcal→getPcal）、:993-1003（autocorr 批次节奏）、:1260-1265（averageFrequency→getAutocorrelation）；**autocorr.bin 覆盖 total bands（P4a 2026-09-13）**：头/写循环用 getDNumTotalBands、per-band nchan = getDTotalFreqIndex 的 nchan/chanstoavg，zoom 段 weight 从父 recorded band 取（getWeight(false, l)，映射同 core.cpp:1324-1339）；**crosspol 段（P7 2026-09-13）**：header v2 + crosspol 标志（writeAutoCorrs && maxproducts>2），批次记录平行段后接 crosspol 段（getAutocorrelation(true, j)/getWeight(true, j)，zoom 的 crosspol weight 从父 band 取 getWeight(true, l)，照 core.cpp:1288-1301/1342-1369） |
 
 ## 关键实现要点（易错，改前必读）
@@ -36,8 +36,8 @@ fxcorr-f <batch_id> <station> [workdir]
 
 ## V1 边界
 
-- 输入格式：本地 **VDIF**（VDIF/VDIFL），datasim 风格帧；其他格式（Mark5B 等）直接报错退出。
-- **单 mux thread**（nummuxthreads=1）、无 fanout、帧粒度 1；vdifmux/corner-turner 不做（V2）。
+- 输入格式（**P10 已补齐，2026-09-14**）：本地 **VDIF/VDIFL**（单线程）、**INTERLACEDVDIF**（多线程 corner-turn，KIND_MUXEDVDIF）、**MARK5B**（mark5bfix 修复）、**LBA 家族**（LBASTD/LBAVSOP/LBA8BIT/LBA16BIT，ASCII 头+raw）、**MKIV/VLBA/VLBN/KVN5B/CODIF**（mark5access 通用流，KIND_MK5STREAM）；K5VSSP/K5VSSP32 上游不可用仍报错退出；硬件访问（StreamStor/Mark6）不迁移。
+- 多 mux thread 仅限 INTERLACEDVDIF 语义（fanout corner-turn）；vdifmux 输出为 mark5access 期望布局（含 EDV4 头）。
 - **单 scan**、文件序号 = scan 序号（每个数据文件一个 scan，从 scan 起点开始连续记录）。
 - **数据文件起点 = batch 起点**（data-spec 5.2 file-per-batch 布局）：datareader 构造接收 batch 起点的绝对 sec/ns（main.cpp 由 batchstartjob 换算），locate 的字节偏移相对 batch 起点计算（batch 起点 = scan 起点时退化为原语义）。**数据块时间（*sec/*ns）须保持 scan 相对系**（Mode::setData 与 setOffsets 同系）；换算注意 batchstartabsns 是当日秒系、currentscanstartsec 是 scan 相对系（曾混用导致 nearestsample 越界、weight 全 0，2026-09-12 修复并回归对拍 6/6）。
 - zoom band 的 .sp 不落盘（x 侧从父 .sp 切片，P4a 2026-09-13）；**autocorr.bin 已含 zoom 段**（total bands，Mode 的 zoom 自相关是父数组切片、getMode 工厂自动传 numzoombands，f 侧零改动）；多相位中心/脉冲星 binning 不涉及（f 侧本就没有）。

@@ -65,7 +65,11 @@ Mk5Mode::Mk5Mode(Configuration * conf, int confindex, int dsindex, int recordedb
       }
       if(format == Configuration::INTERLACEDVDIF)
       {
-        invalid = new int[nrecordedbands];
+        // P10: blank_vdif_EDV4 walks the validity mask of the EDV4 header and
+        // writes one count per masked thread, not per recorded band; with
+        // nthreads > nrecordedbands the upstream nrecordedbands-sized array
+        // overruns.  Allocate for the thread count instead.
+        invalid = new int[config->getDNumMuxThreads(confindex, dsindex)];
         perbandweights = new f32*[config->getNumBufferedFFTs(configindex)];
         for(int i=0;i<config->getNumBufferedFFTs(configindex);++i)
         {

@@ -89,7 +89,7 @@ fxcorr-f <batch_id> <station> [workdir]
 
 程序内校验：batch 起点须在 subint 边界（1µs 容差，吸收 start_mjd 的 f64 表示误差）——batch.json 的 start_mjd 建议写精确 repr（如 `58948.291666666664`），否则报错退出。
 
-V1 边界：本地 VDIF（其他格式报错）、单 mux thread、单 scan、无 zoom band 落盘。
+V1 边界（P10 已补齐输入格式，2026-09-14）：本地文件输入，支持 VDIF/VDIFL（单线程）、INTERLACEDVDIF（多线程 corner-turn）、MARK5B（mark5bfix 修复）、LBASTD/LBAVSOP/LBA8BIT/LBA16BIT（ASCII 头 + raw payload）、MKIV/VLBA/VLBN/KVN5B/CODIF（mark5access 通用流）；K5VSSP/K5VSSP32 报错退出（上游 mark5access 亦不可用）；硬件访问（StreamStor/Mark6）不迁移；单 scan、无 zoom band 落盘。
 
 示例：
 

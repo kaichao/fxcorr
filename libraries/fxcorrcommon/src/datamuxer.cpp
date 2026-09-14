@@ -686,9 +686,28 @@ int VDIFMuxer::multiplex(u8 * outputbuffer)
       header = (vdif_header *)(outputbuffer + outputframecount*outputframebytes);
       memcpy(header, (char *)(threadbuffers[0] + processindex*inputframebytes), VDIF_HEADER_BYTES);
       setVDIFFrameInvalid(header, 0);
-      setVDIFNumChannels(header, numthreads);
+      // P10: leave the nchan field at the input value (0 = 1 channel), like
+      // vdifio's vdifmux does: mark5access' blank_vdif_EDV4 walks 1<<nchan
+      // per-channel arrays and would overrun with numthreads > 1
       setVDIFFrameBytes(header, outputframebytes);
       setVDIFThreadID(header, 0);
+      // P10: emit an EDV4 extended header like vdifio's vdifmux does
+      // (vdifmux.c:514-526, PROPAGATEVALIDITY): mark5access' blank_vdif_EDV4
+      // requires eversion 4 with the syncword -- without it the whole frame
+      // reads as invalid and per-band weights collapse to zero.  Written as
+      // raw words: vdif_edv4_header pads the u64 validitymask to 8-byte
+      // alignment and would spill past the 32-byte header.
+      {
+        unsigned int *w = (unsigned int *)header;
+        w[4] = 0 | (numthreads << 16) | (4 << 24);   // dummy=0, masklength, eversion=4
+        w[5] = 0xACABFEED;
+        // validity mask must equal mark5access' goodMask (1<<nchan = 1 for
+        // the single muxed channel) so blank_vdif_EDV4 skips the per-thread
+        // loop entirely -- a fuller mask with masklength>nChan would divide
+        // by zero (vdifmux emits exactly this mask for a clean mux)
+        w[6] = 1;
+        w[7] = 0;
+      }
 
       // call the corner turning function.  gotta love this syntax!
       (this->*cornerturn)(outputbuffer, processindex, outputframecount);
@@ -706,6 +725,13 @@ int VDIFMuxer::multiplex(u8 * outputbuffer)
           setVDIFFrameInvalid(header, 1);
           setVDIFFrameBytes(header, outputframebytes);
           setVDIFThreadID(header, 0);
+          {
+            unsigned int *w = (unsigned int *)header;
+            w[4] = 0 | (numthreads << 16) | (4 << 24);
+            w[5] = 0xACABFEED;
+            w[6] = 1;
+            w[7] = 0;
+          }
           foundframe = true;
           break;
         }
@@ -717,7 +743,7 @@ int VDIFMuxer::multiplex(u8 * outputbuffer)
         if(outputframecount>0) { //take the preceding output frame instead
           header = (vdif_header *)(outputbuffer + outputframecount*outputframebytes);
           copyheader = (vdif_header *)(outputbuffer + (outputframecount-1)*outputframebytes);
-          memcpy(header, copyheader, VDIF_HEADER_BYTES);
+          memcpy(header, copyheader, VDIF_HEADER_BYTES);	// copyheader already carries the EDV4 words
           setVDIFFrameInvalid(header, 1);
           setVDIFFrameNumber(header, getVDIFFrameNumber(header)+1);
           if(getVDIFFrameNumber(header) == framespersecond) {

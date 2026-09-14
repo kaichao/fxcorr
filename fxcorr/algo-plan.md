@@ -723,6 +723,59 @@ STA 是实时监控（difxmonitor GUI）的数据源：autocorr STA 的谱形、
 
 ✅ 2026-09-13：**实施完成**（main.cpp：FXCORR_KURTOSIS 开关 + setDumpKurtosis/条件 zeroKurtosis/sendKurtosis 新函数 + 两处批次边界的 datastreamsaveraged 判定 + sendSTA 平均分支与 MTU gate；fenginewriter：writeAutocorrelationBatch 加跳过平均参数）。**验证**：两轮对拍各 318 条**逐位 PASS**（含 kurtosis 6 条）；无开关 SWIN 回归 6/6 全等；autocorr.bin 开/关 STA 逐字节一致（md5）。**实施坑**：① **P1 遗留 stride bug**——sendSTA 折叠循环 `acdata[2*k*chans_to_avg].re` 直接照抄上游 f32* 的 ×2 stride（上游 acdata 是 `(f32*)getAutocorrelation()`，f32 stride 2 = cf32 stride 1），fxcorr 用 cf32* 时 ×2 导致隔块取样、STA 谱形完全错误；P1 对拍未覆盖 data 数值，P9 的逐位对拍暴露，修复为 `acdata[k*chans_to_avg].re`；② **基准控制消息时序**——mpifxcorr 命令线程在 .input 读完后才 spawn，先发的消息必丢，4 次×1s 连发只从第 3 个 subint 起生效；检验用 0.2s×40 轮连发（dump 从第 2 个 subint 起生效），首 subint 无基准记录、两边统一 min_absns=524288000 过滤（组播 fire-and-forget 固有行为，非 fxcorr 问题）。
 
+## P10：输入格式补齐（Mark5B/LBA 家族/其余 + 多线程 VDIF corner-turn）
+
+### 动机分类
+
+功能未迁移。V1 fxcorr-f 的 datareader 只收 VDIF/VDIFL、强制 nummuxthreads=1（usage.md V1 边界）；上游 DataStream 工厂（mpifxcorr.cpp:431-469）按格式分派六类读取路径，其余全部未迁移。
+
+### 要解决的问题
+
+真实观测数据不只有单线程 VDIF：Mark5B 是主流磁带文件格式（LBA/CMI 等数据的标准文件载体），多线程 VDIF（INTERLACEDVDIF）是宽带数据标准形态。缺这些格式则 fxcorr 无法处理绝大部分历史与现役观测数据。
+
+### 上游路径映射（调研结论，2026-09-13）
+
+| 格式 | 上游类 | 读取机制 | fxcorr 落点 |
+|---|---|---|---|
+| VDIF/VDIFL | VDIFDataStream（vdiffile.cpp） | 自写帧解析 | V1 已迁移 |
+| INTERLACEDVDIF（多线程 VDIF） | VDIFDataStream | 帧对齐按 multiplexed framebytes（payload×nthreads、fps÷nthreads，vdiffile.cpp:396-401）+ vdifio 的 vdifmux corner-turn | **改造项 1**：放开 nthreads 限制 + VDIFMuxer（fxcorrcommon 已含，上游 Mk5DataStream 的 VDIF+MK5MODULE 路径同款，输出同为 mk5access 期望的 muxed 布局） |
+| MARK5B | Mark5BDataStream（mark5bfile.cpp） | summarizemark5bfile 读首帧时间 → 时间跳转 dataoffset（:341-356，帧/载荷比 10016/10000 修正）→ seek → 顺序读 + **mark5bfix** 修复 | **改造项 2**：同款（summarizemark5bfile + mark5bfix，mark5access 库函数） |
+| MKIV/VLBA/VLBN/KVN5B/CODIF | Mk5DataStream（mk5.cpp） | mark5access 通用文件流：`new_mark5_stream_file` + `genMk5FormatName` 的 formatname 读首帧（frameoffset/mjd/sec/ns/framebytes/framens，mk5.cpp:315-390）→ 时间跳转 → seek → 基类 raw 顺序读（无修复） | **改造项 3**：同款通用路径，一条路径覆盖 5 格式 |
+| LBA 家族（LBASTD/VSOP/8BIT/16BIT） | 基类 DataStream（工厂 else 分支） | **ASCII 时间头 + raw payload**（datastream.cpp:1825-1848：15 字符 `YYYYDOYHHMMSS:xx` 或 `TIME ` 关键字头，LBA 数据文件传统格式）+ 纯字节率定位（无帧概念）；解包走 mode.cpp 的 LBAMode/LBA8BitMode/LBA16BitMode（**fxcorrcommon 已含**，configuration 工厂 870-892 已接） | **改造项 4**：ASCII 头解析 + raw 字节定位；解包零改动 |
+| K5VSSP/K5VSSP32 | Mk5Mode（mark5access） | **上游即不可用**：mark5access 的 MK5_FORMAT_K5 = "Not Yet Implemented" + genMk5FormatName 无 K5 分支（直接 fatal） | **不迁移**，与上游死代码同列记录 |
+| StreamStor/Mark6 | NativeMk5/Mark6 类 | 硬件访问 | 不迁移（既定） |
+
+### 设计
+
+**落点：fxcorr-f 只动 datareader.{h,cpp}（+main.cpp 最小接线）**。datareader 构造时按 format 分派五条路径；locate/readSubint 语义保持（逐 subint 定位 + 顺序读，main.cpp 驱动不变）。
+
+- **改造项 1（INTERLACEDVDIF）**：构造时放开 `nummuxthreads != 1` 限制（保留 format != VDIF/VDIFL 拦截）；nthreads>1 时创建 VDIFMuxer（构造参数照 datamuxer.h：conf, dsindex, id, nthreads, 单线程帧字节, rframes, fpersec, bitspersamp, threadmap）。帧对齐/字节定位用 multiplexed 参数（getMultiplexedFrameBytes / payloadbytes×nthreads / fps÷nthreads，对照 vdiffile.cpp:396-401）；readSubint 读入 muxed 帧到临时 buffer → `muxer->deinterlace(validbytes)` → `muxer->multiplex(databuf)` 输出 corner-turn 数据，valid flags 按 mux 后字节数照旧。单线程路径零变化（回归）。
+- **改造项 2（MARK5B）**：构造时 `summarizemark5bfile` 读文件头（firstFrameOffset/startmjd/sec/ns/bitrate，对齐 mark5bfile.cpp:313-327）；locate 的时间→字节偏移用帧长/帧率直接算（batch 起点=帧边界，file-per-batch 干净数据），首帧时间仅做校验与锚定（对照 mark5bfile.cpp:337-373 的跳秒逻辑）；readSubint 顺序读 + `mark5bfix`（对齐上游 Mark5BDataStream 的 gap/fill 语义，逐位对拍的前提）。
+- **改造项 3（MKIV/VLBA/VLBN/KVN5B/CODIF）**：一条通用路径——构造时 `new_mark5_stream_file(filename, 0)` + `new_mark5_format_generic_from_string(genMk5FormatName(...))`（fxcorrcommon 已含，mk5.cpp:315-390 同款）读首帧参数（frameoffset/mjd/sec/ns/framebytes/framens）→ 首帧时间锚定 batch 起点 → locate 按帧长算偏移 → readSubint seek + raw 顺序读（无修复，对齐 Mk5DataStream）。解包在 mark5access 库内，与上游同一库同一 formatname。
+- **改造项 4（LBA 家族）**：构造时解析 ASCII 头（照 datastream.cpp:1825-1848：第一行 15 字符直接是时间、或循环找 `TIME` 关键字行，取 `YYYYDOYHHMMSS:xx` 的年月日时分秒+百分秒），头后偏移 = 首 payload 字节；时间→字节定位纯字节率（无帧对齐，对齐基类 calculateControlParams 语义）；解包已就位零改动。
+- **formatname 一致性**：改造项 2/3 的 formatname 一律走 `config.genMk5FormatName`（fxcorrcommon 已有），保证与上游、与 mk5mode 解包侧同一字符串（CODIF 的 codifio 库头常量 CODIF_HEADER_BYTES 已由 configuration.cpp include，genMk5FormatName 的 CODIF 分支直接可用）。
+- **K5VSSP 记录**：v2-plan 的 P10 行补充"K5VSSP 上游不可用不迁移"（mark5access K5 Not Yet Implemented、genMk5FormatName 无分支）。
+
+### 验证方法（决策：重点对拍 + 通性验证，2026-09-13 用户定）
+
+- **逐位对拍**（mpifxcorr 读同文件出基准 SWIN → cmp_swin.py）：① **MARK5B**（上游 Mark5BDataStream 路径）；② **INTERLACEDVDIF 多线程**（上游 VDIFDataStream+vdifmux 路径；测试机 fakemultiVDIF 造多线程数据）；③ **LBA 家族**（上游基类 DataStream raw 路径——先试对拍，若 mpifxcorr 基类路径自身不可用则降级 fxcorr 自洽验证并把结论写入本文与测试 README）。
+- **通性验证**（跑通 + tone 落位 + 谱形/SWIN 物理正确 + 代码对照审查）：MKIV/VLBA/VLBN/KVN5B/CODIF——解包在 mark5access 库内与上游同一库，fxcorr 侧只验帧定位接线；基准数据难造（磁带格式无现成生成器），不做逐位对拍。
+- **回归**：现 VDIF 单线程配置 SWIN 对拍 6/6 保持全等。
+- 测试数据：Mk5B 帧生成器自写（Python，10016 字节帧 = 16 字节头 + 10000 payload，帧头布局照 mark5access 读端实现而非官方文档——见 memory vdif-header-layout 同类教训——先用测试机 m5bstate/fixmark5b 验证帧合法）；LBA raw 文件 = ASCII 头 + payload（2bit 采样，照 gen_test_vdif.py 的位序）；CODIF 用测试机 codif_write；多线程 VDIF 用 fakemultiVDIF。
+
+### 验收判据
+
+① Mark5B 对拍逐位全等；② 多线程 VDIF 对拍逐位全等；③ LBA 家族对拍逐位全等（或降级自洽验证 + 结论记录）；④ MKIV/VLBA/VLBN/KVN5B/CODIF 五格式 fxcorr-f 通性验证全过；⑤ 现 VDIF 回归 6/6。
+
+### 实施记录（2026-09-14 完成）
+
+- **Mark5B 对拍 PASS**（判据①）：fxcorr vs mpifxcorr Mark5BDataStream，SWIN 6/6 逐记录全等。
+- **多线程 VDIF 对拍 PASS**（判据②）：INTERLACEDVDIF fanout 2 线程（自写 gen_test_ivdif.py，fakemultiVDIF 复制语义不可用），SWIN 6/6 全等。期间修复：VDIF word3 位布局（threadid bits16-25、nbits-1 bits26-30，旧生成器布局错）、datamuxer 输出 EDV4 头三坑（nchan 保持 0、validitymask=1、裸 word 写）、mode.cpp unpacked +8、mk5mode invalid 按线程数分配。
+- **LBA 降级自洽验证 PASS**（判据③预案）：mpifxcorr 读 LBA+FILE 走基类 DataStream 路径，4 进程 100% CPU 失控死循环（上游陈年 bug 实锤）——基准不可用，降级 fxcorr 自洽验证（`fxcorr/test/p10/verify_lba.py`）：T1/T2 autocorr 峰位 1536/1024（1.5/1.0MHz）正确、SWIN 12 记录 weight 0.82-1.0。期间修复生成器位序 bug：**LBA 2bit 是低位先**（LBAMode lookup shift=0 起取 u16 低 2bit，与 VDIF/Mk5B 相同；生成器原 MSB-first 打包使 1.5MHz tone 被字节内时间反转调制到 fs/8 → 峰落 1MHz 位置）。
+- **五格式审查**（判据④，决策 B 通性验证）：MKIV/VLBA/VLBN/KVN5B/CODIF 无基准数据可造（磁带格式），以代码对照审查为验收依据：构造分派（datareader.cpp:50-55）与上游 mpifxcorr.cpp:431-469 映射一致；genMk5FormatName + new_mark5_stream_file 锚定首帧 + 帧对齐定位 + raw 顺序读，与上游 Mk5DataStream（mk5.cpp:315-390）同构；解包在 mark5access 库内与上游同一库同一 formatname；报错路径完整（fanout<0 / 打开失败 / 文件起点晚于 batch 起点）。读入架构与已验证的 KIND_MARK5B 路径同构（raw 读 + Mode 解包）。
+- **VDIF 单线程回归 PASS**（判据⑤）：cmp5 目录（标准 VDIF 配置）SWIN 6/6 全等，datareader 多格式改造 + mode/mk5mode/datamuxer 修复无回归。
+- 调试 dump 代码（FXCORR_*DUMP）已全部清理。
+
 ---
 
 ## 相关

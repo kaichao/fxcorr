@@ -148,8 +148,13 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
     unpackedarrays = new f32*[numrecordedbands];
     if (usecomplex) unpackedcomplexarrays = new cf32*[numrecordedbands];
     for(int i=0;i<numrecordedbands;i++) {
-      unpackedarrays[i] = vectorAlloc_f32(unpacksamples);
-      estimatedbytes += sizeof(f32)*unpacksamples;
+      // P10: Mk5Mode::unpack writes samplestounpack = unpacksamples +
+      // mark5stream->samplegranularity samples (mk5mode.cpp:53-55); the
+      // upstream allocation of exactly unpacksamples overruns by the
+      // granularity on every FFT and only survives by heap-layout luck.
+      // +8 covers the largest granularity mark5access uses.
+      unpackedarrays[i] = vectorAlloc_f32(unpacksamples + 8);
+      estimatedbytes += sizeof(f32)*(unpacksamples + 8);
       if (usecomplex) unpackedcomplexarrays[i] = (cf32*) unpackedarrays[i];
     }
 
@@ -1145,7 +1150,7 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
             else{
               status = vectorDFT_RtoC_f32(&(unpackedarrays[j][nearestsample - unpackstartsamples]), (f32*) fftptr, pDFTSpecR, fftbuffer);
               if (status != vecNoErr)
-                csevere << startl << "Error in DFT!!!" << status << endl;  
+                csevere << startl << "Error in DFT!!!" << status << endl;
             }
             if(config->getDRecordedLowerSideband(configindex, datastreamindex, i))
             {
