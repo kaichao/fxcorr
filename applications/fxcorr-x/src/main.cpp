@@ -143,7 +143,7 @@ int main(int argc, char **argv)
 	}
 	DifxMonitor monitor(0, expname, inputfile, containerprefix);
 
-	// V1 restrictions (impl-plan 1 / data-spec 12)
+	// V1 restrictions (v1-plan 1 / data-spec 12)
 	if(model->getNumScans() != 1)
 	{
 		ostringstream oss;

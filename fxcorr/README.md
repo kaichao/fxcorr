@@ -16,7 +16,7 @@
 - 按时间批量（batch）处理；V1 单线程，正确性优先
 - bash 编排；可容器化
 
-**非目标（近期）：** 替换 vex2difx / difxcalc / difx2fits；工具内再拆为“一算法一进程”。
+**非近期目标：** 替换 vex2difx / difxcalc / difx2fits；工具内再拆为“一算法一进程”。
 
 ---
 
@@ -56,6 +56,72 @@ vex2difx / difxcalc     （实验级，一次）
 - **fxcorr-x**：单批量、多站 F 输出；XMAC 与积分。
 - **编排**：本目录脚本；不负责算法。
 
+### 3.1 改造基准：mpifxcorr 三层分类
+
+把 mpifxcorr 看成一个整体进行比较，很容易把 MPI、管理、算法混在一起。改造基准按其内容拆成三层：
+
+| 类型 | mpifxcorr 中的内容 | fxcorr-f/x 是否需要 |
+|---|---|---|
+| **A. 科学算法** | unpack → delay/fringe → FFT → XMAC → accumulation → calibration/output | **必须迁移**（fxcorr-f：unpack→FFT；fxcorr-x：XMAC→积分→SWIN 写盘） |
+| **B. 算法辅助功能** | PCAL、autocorr、cross-pol、TCAL、zoom、MPC、pulsar、kurtosis、phased-array 等 | **必须迁移**（V2 算法改进清单 P0-P11，已全部完成，状态见 v2-plan.md 第 5 节） |
+| **C. MPI/运行时机制** | core × baseline process grid、MPI send/recv、manager、datastream process、MPI barrier 等 | **不直接迁移**——由 (batch, station) / (batch, 站组对) 任务模型 + 目录接口 + bash 编排替代 |
+
+### 3.2 Station / Baseline 拆分
+
+fxcorr-f/x 的总体设计即 mpifxcorr 按进程角色拆为两侧（C 层机制由任务模型与目录接口承接）：
+
+```
+                    mpifxcorr
+                       │
+          ┌────────────┴────────────┐
+          │                         │
+      Station side              Baseline side
+          │                         │
+       F engine                  X engine
+          │                         │
+      fxcorr-f                  fxcorr-x
+          │                         │
+        .sp                     SWIN
+```
+
+### 3.3 FX 相关器核心算法链
+
+```
+FX correlator 核心算法链
+raw data
+   │
+   ├─ format decode
+   ├─ delay correction
+   ├─ integer sample correction
+   ├─ fractional sample correction
+   ├─ phase/fringe rotation
+   ├─ FFT
+   │
+   ├───────────────┐
+   │               │
+ autocorrelation  PCAL / TCAL / kurtosis
+   │
+   └────── .sp ────┐
+                    │
+                fxcorr-x
+                    │
+              baseline selection
+                    │
+               conjugation
+                    │
+                   XMAC
+                    │
+          freq averaging / correction
+                    │
+        phase centre / pulsar processing
+                    │
+                integration
+                    │
+                  SWIN
+```
+
+（delay/integer/fractional correction 与 phase/fringe rotation 在 f 侧解包之后、FFT 之前；autocorrelation 与 PCAL/TCAL/kurtosis 是 f 侧旁路输出；phase centre/pulsar 处理在 x 侧 uvshift 段。）
+
 ---
 
 ## 4. 代码与目录落位
@@ -64,7 +130,7 @@ vex2difx / difxcalc     （实验级，一次）
 |------|------|
 | fxcorr-f | `applications/fxcorr-f` |
 | fxcorr-x | `applications/fxcorr-x` |
-| fxcorr-sim（仿真数据生成器） | `applications/fxcorr-sim`（已建成） |
+| fxcorr-sim（仿真数据生成器） | `applications/fxcorr-sim` |
 | 共享库 | `libraries/fxcorrcommon` |
 | bash 集成 | `fxcorr/`（本目录） |
 | 原 MPI 核心 | `mpifxcorr/`（保留） |

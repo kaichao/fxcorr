@@ -55,7 +55,7 @@ fxcorr-f <batch_id> <station> [workdir]
 - 资产在 `fxcorr/test/`：test.vex（上游 tests/Synthetic/test-usb.vex 原版）、test.v2d（2 站 T1/T2）、gen_test_vdif.py（生成 2bit 单 band VDIF；**低位先打包**，对齐 mark5access format_vdif.c lut2bit 位序——datasim 因上游 IPP 依赖无法 --noipp 构建，此脚本是替代品）、cmp_swin.py（SWIN 逐记录比较）。
 - 测试机工作目录 `/root/fxcortest/`：config/（vex2difx + difxcalc 产物）+ TEST1.vdif/TEST2-usb.vdif + fengine/<batch_id>/。跑法见 memory（test-machine.md）。
 - 已验证：两站 4 秒数据（8Ms/s 2bit，tone 1.5/1.0MHz）7 subint 跑通；autocorr 峰在 1.5/1.0MHz 通道；.sp header 字段与 data-spec 一致；对齐校验正负测试通过。
-- 对拍（fxcorr-x 完成后）：SWIN 逐记录比较通过（数据完整段 6/6 全等，见 impl-plan 2.3 实施记录）。
+- 对拍（fxcorr-x 完成后）：SWIN 逐记录比较通过（数据完整段 6/6 全等，见 v1-plan 2.3 实施记录）。
 
 **switched power（P6）检验步骤**：完整可复现命令与验收判据见 `fxcorr/test/tcal/README.md`（2026-09-13 验证过：switched power 前 2 个完整整秒窗与 mpifxcorr 逐位全等、SWIN 回归 6/6、位序对拍 BYTE-IDENTICAL、无 tcal 回归 6/6）。
 

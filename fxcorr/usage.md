@@ -7,7 +7,7 @@
 - 三工具均**无 MPI、串行**，通过目录接口衔接。
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认当前目录（`.`）；所有相对路径（batches、.input、raw、fengine、vis）均相对 `workdir` 解释。
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
-- 任务粒度：f 任务 = (batch_id, station)（fxcorr-f 的 station 参数即该维度）；x 任务 = (batch_id, 站组对)，V1 全站一组 = 全基线，多子集并行属 V2（data-spec 第 6 / 12 节）。
+- 任务粒度：f 任务 = (batch_id, station)（fxcorr-f 的 station 参数即该维度）；x 任务 = (batch_id, 站组对)，V1 全站一组 = 全基线，多子集并行属 V3（data-spec 第 6 / 12 节）。
 - 错误行为：参数不足或校验失败时打印原因到 stderr 并以非 0 退出；成功退出 0。
 - 前置安装：各工具与 `fxcorrcommon` 库，构建见 `build.md`。
 
@@ -120,7 +120,7 @@ fxcorr-f <batch_id> <station> [workdir]
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
 - 读 `workdir/<config_file>`（.input）；Model 由 .calc 内建，无 .im 依赖。
 - 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd，即 workdir）。
-- 输出 `workdir/fengine/<batch_id>/<station>/`（自动创建）：`band_XX.sp`、`pcal.bin`（配置了 phasecal 时）、`autocorr.bin`（二进制布局见 data-spec 5.3）。
+- 输出 `workdir/fengine/<batch_id>/<station>/`（自动创建）：`band_XX.sp`、`pcal.bin`（配置了 phasecal 时）、`autocorr.bin`（二进制布局见 data-spec 5.3）。配置 phasecal 时另在 OUTPUT FILENAME 目录（`vis/<exp>.difx/`）写实验级 `PCAL_<mjd>_<sec>_<station>` 文本（每 intTime 一行、重跑幂等，格式见 data-spec 5.4）。
 - 状态消息节奏（mpiId = dsindex+1，datastream/core 角色）：Starting（启动）→ 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误时 Alert + Aborting。RUNNING 不发（归 fxcorr-x，manager 角色）。
 
 程序内校验：batch 起点须在 subint 边界（1µs 容差，吸收 start_mjd 的 f64 表示误差）——batch.json 的 start_mjd 建议写精确 repr（如 `58948.291666666664`），否则报错退出。
@@ -192,4 +192,4 @@ fxcorr-x <batch_id>
 difx2fits <experiment>.input                 # 后处理按需
 ```
 
-以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_bench.sh` / `run_batch.sh`，规格见 impl-plan 2.4）。
+以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_bench.sh` / `run_batch.sh`，规格见 v1-plan 2.4）。

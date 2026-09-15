@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_bench.sh —— mpifxcorr 基准（对拍基准生成器，规格见 fxcorr/impl-plan.md 2.4）
+# run_bench.sh —— mpifxcorr 基准（对拍基准生成器，规格见 fxcorr/v1-plan.md 2.4）
 #
 # 步骤：① 定位 batch（DATA TABLE 软链 target 里的 batch_id，fallback batches/ 最新 json）
 # → ② 从 batch.json + .input 推导 EXECUTE TIME 截断（mpifxcorr 停写判定以积分起点

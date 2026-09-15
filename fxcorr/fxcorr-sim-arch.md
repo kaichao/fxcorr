@@ -1,6 +1,6 @@
 # fxcorr-sim 分布式架构（单二进制 `fxcorr-sim`）
 
-2026-09-14 定稿（前身：tmp/fxcorr-sim-distributed-architecture.md 草稿）。本文定 fxcorr-sim 的分布式形态与公共信号模型；命令行手册（参数/环境变量/示例）见 `usage.md`，源文件地图/实现要点见 `applications/fxcorr-sim/CLAUDE.md`，验证记录见 `applications/fxcorr-sim/VERIFICATION.md`，common/ 产物格式见 `data-spec.md`。
+2026-09-14 定稿。本文定 fxcorr-sim 的分布式形态与公共信号模型；命令行手册（参数/环境变量/示例）见 `usage.md`，源文件地图/实现要点见 `applications/fxcorr-sim/CLAUDE.md`，验证记录见 `applications/fxcorr-sim/VERIFICATION.md`，common/ 产物格式见 `data-spec.md`。
 
 ## 1. 定位与目标
 
@@ -182,6 +182,8 @@ fxcorr-sim
 | 量化阈值自适应（quantize d_tmul） | station 端打包层 | 已实现（FXSIM_ADAPTIVE，四电平版） |
 | 测试模式 -t / MPI 并行 / 多站一次生成+zipper/cat | — | 等价覆盖：batch.json 定时长、batch 编排分片、(batch,station) 任务 + band 交织帧直接生成 |
 | 依赖（GSL/IPP/MPI） | — | mt19937+Box-Muller / fftw3f / 无 MPI（fxcorr-sim 已链接 fftw3f，零新依赖） |
+
+**复核（2026-09-15，源码级逐项比对）**：通读 datasim.cpp 主流程 + subband.h 接口，结论 = **功能已等价、无表外遗漏**。表中"等价覆盖"项的源码依据：vdifzipper（多 band 帧合并，datasim.cpp:605-619）→ fxcorr-sim band 交织帧直接生成；catvdif（时间分片拼接，:627-646）→ batch 切分每 batch 独立文件；`-t` 测试模式（:319 强制 1 秒）→ batch.json 定时长。有意差异 4 处（非遗漏，均有验证背书）：① 量化映射——datasim 三电平 ±thresh×sign，fxcorr-sim 四电平 rint（实测弱信号下三电平效率低 4.5 倍，不照抄）；② 随机数——gsl_rng vs mt19937+Box-Muller（同 seed 确定性可复现，但不与 datasim 逐位一致）；③ CLI 形态——datasim 单命令一次全站 vs fxcorr-sim 两段式 common+station（单节点串行默认模式一键等价）；④ 依赖——GSL/IPP/MPI vs 零新增（仅 fftw3f）。datasim 的 MPI 并行（子带分发/时间分组/Bcast）对应 (batch,station) 任务模型 + P1 编排，scalebox 承接（第 13 节约束不变）。未验证项：与 datasim 本身逐位对拍（datasim 因 IPP 依赖无法构建，对拍基准 = gen_test_vdif.py 字节对拍 + mpifxcorr 科学对拍，已覆盖）。
 
 历史分析（A/B 类分类、方案 A 修上游 datasim 的讨论）见第 10 节与 git 历史。
 

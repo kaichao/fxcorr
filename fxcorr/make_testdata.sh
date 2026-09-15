@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# make_testdata.sh —— 构建 data-spec 布局的标准测试数据（规格见 fxcorr/impl-plan.md 2.4）
+# make_testdata.sh —— 构建 data-spec 布局的标准测试数据（规格见 fxcorr/v1-plan.md 2.4）
 #
 # 步骤：① config/ 前处理（vex2difx + difxcalc，幂等）→ ② 从 .input 推导 batch 参数
 # → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ fxcorr-sim 两段式生成 raw VDIF
@@ -132,7 +132,7 @@ mkdir -p "$CFG" "$WORKDIR/batches"
 # INT TIME 1.048576，6/6 对拍同配置）；帧对齐的 128ms SUBINT 变体只用于
 # -n 多 batch（连续切分起点须帧边界，0.524288s 与帧网格公倍数 65.5s 不可用）。
 # 128ms 变体会触发 mpifxcorr vdifmux 帧号 bit7 错读（~每 256 帧坏 0.5s，
-# 见 impl-plan 2.4），多 batch 对拍不做，仅 fxcorr 侧自测。
+# 见 v1-plan 2.4），多 batch 对拍不做，仅 fxcorr 侧自测。
 [ -f "$CFG/test.vex" ] || cp "$SCRIPTDIR/test/test.vex" "$CFG/test.vex"
 [ -f "$CFG/test.v2d" ] || cp "$SCRIPTDIR/test/test.v2d" "$CFG/test.v2d"
 # vex2difx 的 vex= 路径相对 cwd（非 v2d 目录），.input 也输出到 cwd；

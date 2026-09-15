@@ -4,9 +4,9 @@
 
 ## 文档分工
 
-- **README.md**：需求（R1-R7）、总体架构、实现阶段（V1/V2/V3）、设计要点。改架构/需求时改它。
+- **README.md**：需求（R1-R7）、总体架构（含 mpifxcorr 改造基准三层分类与核心算法链，3.1-3.3 节）、实现阶段（V1/V2/V3）、设计要点。改架构/需求时改它。
 - **data-spec.md**：数据规范（版本 1.1）—— 目录布局、D1-D13 数据类型、模块 I/O、band_XX.sp / pcal.bin / autocorr.bin / SWIN 二进制格式、时间轴与通道/偏振映射、切批约束。**改数据接口/文件格式时必须先同步它**。
-- **impl-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。改实施步骤时改它。
+- **v1-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。改实施步骤时改它。
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。改 V2 范围或镜像设计时改它。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、datasim 特性差距、P0-P4 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
@@ -19,10 +19,10 @@
 - **目录**：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`common/<batch_id>/`（仿真公共信号 D15，fxcorr-sim common 一次生成、各站只读；≥16× 单站 2bit 数据量，batch 站任务全完成后可删）、`raw/<station>/`（TB 级原始基带）、`fengine/<batch_id>/<station>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，二进制布局见 data-spec 5.3）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`product/`、`meta/`、`work/`（临时）。均不进 git。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
 - **batch.json**（`batches/<batch_id>.json`，D9 全字段单文件）：batch_id / start_mjd / start_time / duration_sec / stations / station_groups（可选，空间切分组）/ baselines / config_file / calc_file / im_file / n_subints / subint_ns / integration_sec / n_channels / polarizations / difx_dir / status / 版本字段。编排脚本一次写全，三工具只读。
 - **数据流**：vex2difx + difxcalc（实验级一次）→ [仿真分支：fxcorr-sim common（D15 公共信号，每 batch 一次）→ fxcorr-sim station × 各站（D7 VDIF）] → fxcorr-f × 各站（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。fxcorr-sim 架构（三入口/公共信号模型）见 fxcorr-sim-arch.md。
-- **三个敲定决策**：UVW 由 fxcorr-x 读 .calc/.im 求值（D1）；可见度直出 SWIN、difx2fits 零改造（D2）；偏振是 band 属性、偏振组合在 x 侧按 BASELINE TABLE 选（D3）。V1 边界与实施步骤见 impl-plan.md。
+- **三个敲定决策**：UVW 由 fxcorr-x 读 .calc/.im 求值（D1）；可见度直出 SWIN、difx2fits 零改造（D2）；偏振是 band 属性、偏振组合在 x 侧按 BASELINE TABLE 选（D3）。V1 边界与实施步骤见 v1-plan.md。
 - **SWIN 输出目录**：由 .input 的 OUTPUT FILENAME 决定（Visibility 写盘语义，difx2fits 零改造的前提），batch.json 的 difx_dir 仅为元数据。
 
-## 本目录脚本（规格见 impl-plan.md 2.4）
+## 本目录脚本（规格见 v1-plan.md 2.4）
 
 | 脚本 | 作用 | 状态 |
 |---|---|---|
@@ -42,7 +42,7 @@
 
 **容器模式**（V2，验收 4/5 已过）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装按工具→镜像映射（fxcorr-f/x/sim、vex2difx/difxcalc/difx2fits→difx-tools）加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd)` 前缀，FXSIM_NOISE/SEED 透传；默认 host = 宿主直跑（V1 行为不变）。run_batch.sh 调用时 cwd 须在 workdir（软链相对解析）。
 
-make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出、container 模式互斥；详见 impl-plan 2.4 实施记录。
+make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出、container 模式互斥；详见 v1-plan 2.4 实施记录。
 
 run_bench.sh 实现要点（实测）：batch 定位走 DATA TABLE 软链 target 的 batch_id（fallback batches/ 最新 json）；EXECUTE TIME 截断 = `floor(initsec + (N−1)×intTime) + 1`（mpifxcorr 停写判定按积分起点、整秒字段，N = batch 时长/intTime 不整除即报错）；OUTPUT FILENAME sed 指 `bench/<exp>.difx`；mpirun 在 workdir 内跑（DATA TABLE 相对路径）、root 加 --allow-run-as-root、`LD_LIBRARY_PATH=$DIFXROOT/lib`；mpifxcorr 拒绝覆盖已有 SWIN（脚本先 rm -rf）。batch 时长 < 1s 无整秒解（mpifxcorr 多写 weight-0 积分），默认配置 2.097s 无碍。
 
@@ -58,7 +58,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `test.v2d` | 配套 vex2difx 配置（antennas=T1,T2，tInt=1，nChan=4096） |
 | `gen_test_vdif.py` | 生成 2bit 单 band VDIF 测试数据（datasim 因上游 IPP 依赖无法 --noipp 构建，此脚本替代；**低位先打包**对齐 mark5access 位序；fxcorr-sim 的位序逐字节对拍参照，对拍已验证 BYTE-IDENTICAL；帧号公式已修为 `n % fps`（原 `n % 8000000 // 32000` 恒为 0，对拍时发现）） |
 | `test2b.vex` / `test2b.v2d` | 2 band 测试配置（test.vex 加 205MHz 第 2 band），fxcorr-sim 多 band 验证资产；**2026-09-13 修正 $TRACKS 帧长 8032→16032**（2 band VDIF 帧实长，原值让 vex2difx 生成错误 DATA FRAME SIZE、mpifxcorr vdifmux 帧长错乱） |
-| `cmp_swin.py` | SWIN 逐记录比较（74 字节头 + 可见度复数），通用对拍工具（impl-plan 验收标准 2） |
+| `cmp_swin.py` | SWIN 逐记录比较（74 字节头 + 可见度复数），通用对拍工具（v1-plan 验收标准 2） |
 | `pcal/test-pcal.vex` / `pcal/test-pcal.v2d` | 带 phasecal 的测试配置（PHASE_CAL_DETECT tone 列表 `2:3:4:5`、phaseCalInt=1 → .input 4 tones 201-204MHz），PCAL_*.pcal 对拍验证资产（algo-plan P0） |
 | `pcal/README.md` | P0 检验资产用法 + 验证方法与结果记录 |
 | `zoom/gen_test_zoom.py` | 从无 zoom 的 .input 生成 test-zoom.input + EXECUTE TIME 截断变体（P4a zoom 检验资产） |
@@ -76,7 +76,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 
-测试流程（测试机 /root/fxcortest/）：`vex2difx test.v2d` → `difxcalc test.calc`（出 .input/.calc/.im）→ 数据生成两种方式：**fxcorr-sim**（读 batch.json 生成 `raw/<station>/<station>_<batch_id>.vdif`，软链到 .input DATA TABLE 文件名）或 `gen_test_vdif.py TEST1.vdif 4 1.5 8`（对拍参照）→ 写 `batches/<batch_id>.json`（start_mjd 用精确 repr，否则 fxcorr-f 对齐校验报错）→ `fxcorr-f <batch_id> T1` / `T2` → `fxcorr-x <batch_id>` → `cmp_swin.py` 与 mpifxcorr 对拍。以上手工步骤已由 `make_testdata.sh` 自动化（tInt=0.25 变体 test-sim.input，SUBINT 128ms）。已验证（2026-09-12，fxcorr-sim 数据）：tone 峰落 1.5/1.0MHz 通道；SWIN 对拍 6/6 记录全等（可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS；pcal 链路 4 tones 检出；2 band（test2b）全链路跑通（mpifxcorr 读不了 2 band VDIF，2 band 对拍以物理验证为准，详见 applications/fxcorr-sim/CLAUDE.md）。对拍注意 mpifxcorr 的 mux 滞后（impl-plan 2.3 实施记录）；**对拍数据须 `FXSIM_NOISE=0` 生成**（带噪 2bit 数据触发 mpifxcorr vdifmux 读端错乱，0 积分输出）。
+测试流程（测试机 /root/fxcortest/）：`vex2difx test.v2d` → `difxcalc test.calc`（出 .input/.calc/.im）→ 数据生成两种方式：**fxcorr-sim**（读 batch.json 生成 `raw/<station>/<station>_<batch_id>.vdif`，软链到 .input DATA TABLE 文件名）或 `gen_test_vdif.py TEST1.vdif 4 1.5 8`（对拍参照）→ 写 `batches/<batch_id>.json`（start_mjd 用精确 repr，否则 fxcorr-f 对齐校验报错）→ `fxcorr-f <batch_id> T1` / `T2` → `fxcorr-x <batch_id>` → `cmp_swin.py` 与 mpifxcorr 对拍。以上手工步骤已由 `make_testdata.sh` 自动化（tInt=0.25 变体 test-sim.input，SUBINT 128ms）。已验证（2026-09-12，fxcorr-sim 数据）：tone 峰落 1.5/1.0MHz 通道；SWIN 对拍 6/6 记录全等（可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS；pcal 链路 4 tones 检出；2 band（test2b）全链路跑通（mpifxcorr 读不了 2 band VDIF，2 band 对拍以物理验证为准，详见 applications/fxcorr-sim/CLAUDE.md）。对拍注意 mpifxcorr 的 mux 滞后（v1-plan 2.3 实施记录）；**对拍数据须 `FXSIM_NOISE=0` 生成**（带噪 2bit 数据触发 mpifxcorr vdifmux 读端错乱，0 积分输出）。
 
 ## 相关指引
 

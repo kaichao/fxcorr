@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SWIN 逐记录比较（impl-plan 验收标准 2）.
+"""SWIN 逐记录比较（v1-plan 验收标准 2）.
 
 解析两个 SWIN 文件（74 字节二进制头 + nchan*8 数据/记录，见
 visibility.cpp appendSWINHeaderBuffered），逐记录比较头字段与可见度复数。
@@ -46,7 +46,7 @@ def cmp_record(ra, rb, tol=1e-6):
         diffs.append(f"pol: {ra['pol']} vs {rb['pol']}")
     if ra['uvw'] != rb['uvw']:
         diffs.append(f"uvw: {ra['uvw']} vs {rb['uvw']}")
-    # visibility: relative error vs |b|, tolerance like impl-plan 4.2
+    # visibility: relative error vs |b|, tolerance like v1-plan 4.2
     va = struct.unpack(f'<{nchan*2}f', ra['vis'])
     vb = struct.unpack(f'<{nchan*2}f', rb['vis'])
     maxrel = 0.0

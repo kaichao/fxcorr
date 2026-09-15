@@ -51,4 +51,4 @@
 - 架构设计（分布式形态/公共信号模型/datasim 特性差距/阶段 P0-P4）：`fxcorr/fxcorr-sim-arch.md`
 - 数据规范（common/ 产物格式）：`fxcorr/data-spec.md` 5.8
 - 验证档案：本目录 `VERIFICATION.md`
-- 测试资产与对拍流程：`fxcorr/CLAUDE.md`；编排（make_testdata.sh/run_batch.sh 两段式调用）：`fxcorr/impl-plan.md` 2.4
+- 测试资产与对拍流程：`fxcorr/CLAUDE.md`；编排（make_testdata.sh/run_batch.sh 两段式调用）：`fxcorr/v1-plan.md` 2.4

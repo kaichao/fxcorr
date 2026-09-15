@@ -36,7 +36,7 @@ fxcorr-x <batch_id> [workdir]
 - **weight 语义链**：.sp weights = 每 FFT 块 dataWeight（槽式回填，见 fxcorr-f CLAUDE.md）→ baselineweight = Σ weight1×weight2 → floatresults（bweightoffset×2 处）；autocorr weight = 各批次 getWeight 累加 → acweightoffset×2 处。writedata 内部除以 fftsperintegration 归一。
 - **V1 启动边界检查**（main.cpp）：单 scan、单相位中心、intTime 为 subintNS 整数倍（相位阵时跳过——不写 SWIN 无积分网格需求）、无 pulsar；batch 起点 subint 边界校验（容差 1µs，同 fxcorr-f）。**maxproducts>2 已放行（P7 2026-09-13）**：crosspol 由 autocorr.bin header 的 crosspol 标志驱动（f 侧写段、x 侧读段、Visibility 的 autocorrwidth=2 写盘全链零改造就位）。**相位阵已支持（P8 2026-09-13）**：phasedArrayOn 时走 main.cpp 的**早退分支**（readers 校验后 BeamEngine + per subint 读谱加权落盘，不构造 XmacEngine/Integrator、不写 SWIN），旧路径逐字节不动——相位阵改动一律放早退分支或 beamengine，**不要动 XMAC 路径**（曾因 if/else 包裹重构引发回归堆损坏，教训见 fxcorr/test/phasearr/README.md）。
 - **executeseconds 语义**（Visibility::writedata 停写判定）：executeseconds 以 **scan 起点**为基准（mpifxcorr EXECUTE TIME 语义），batch 起点偏移 initsec 时须 `executeseconds = batch时长 + initsec + 1`，否则 batch 起点非 scan 起点的 batch 全部静默不写盘（2026-09-12 修复，batch 起点 scan 起点时退化为原语义、对拍回归 6/6）。
-- **mpifxcorr mux 滞后**：对拍时 mpifxcorr 数据后段会有确定性的 invalid 边界 subint（vdifmux 流式管线滞后，两次运行可复现），fxcorr 无此滞后——对拍 batch 取数据完整覆盖段（见 impl-plan 2.3 实施记录）。
+- **mpifxcorr mux 滞后**：对拍时 mpifxcorr 数据后段会有确定性的 invalid 边界 subint（vdifmux 流式管线滞后，两次运行可复现），fxcorr 无此滞后——对拍 batch 取数据完整覆盖段（见 v1-plan 2.3 实施记录）。
 
 ## V1 边界
 

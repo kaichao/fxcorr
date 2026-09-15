@@ -10,7 +10,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 - **本仓库 V2 主线**：
   1. **容器化封装**：对已有工具做模块镜像，供 scalebox 容器再封装；
   2. **模块镜像的集成测试**：容器内跑通单 batch、对拍、性能测试数据链路；
-  3. **V1 未解决的高级问题（算法改进）**：清单见第 5 节，优先级后续细化。
+  3. **V1 未解决的算法改进问题**：清单见第 5 节，优先级后续细化。
 
 ## 2. 镜像体系
 
@@ -38,7 +38,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 
 ## 4. 早期任务与风险
 
-- **debian:13 构建全链验证**：install-difx --noipp 全绿是在 rocky 9.8 上验证的，构建环境换 debian:13 后需重验。已踩坑并解决（2026-09-12，构建验证进行中）：
+- **debian:13 构建全链验证**：install-difx --noipp 全绿是在 rocky 9.8 上验证的，构建环境换 debian:13 后需重验。已踩坑并解决（2026-09-12，构建验证已通过）：
   - `PKG_CONFIG_PATH` 必须显式设置（install-difx L584 直接拼接该变量，未设即 TypeError 崩溃；setup.bash 在容器内不 source）；
   - `MPICXX=g++` 必设（install-difx 对 dompicxx=True 组件直接拼接 MPICXX，difx2profile/vis2screen 等上游组件需它；fxcorr-f/x/sim 注册已改 dompicxx=False 用 g++）；
   - debian 下 difxcalc11 的 .o 由 gcc 默认编译、f77 链接却按 PIE 处理，报 `relocation R_X86_64_32S`——builder ENV 仅设 `LDFLAGS=-no-pie`。**编译参数必须保持默认**：实测 `-fno-pie` 编译会改变 fxcorr-f 运行行为（容器跑批数据范围越界，宿主直跑正常）；容器 vs 宿主对拍 6/6 全等已在修正后验证；

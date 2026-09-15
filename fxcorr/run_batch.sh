@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_batch.sh —— fxcorr 流水线（规格见 fxcorr/impl-plan.md 2.4）
+# run_batch.sh —— fxcorr 流水线（规格见 fxcorr/v1-plan.md 2.4）
 #
 # 步骤：① 读 batches/<batch_id>.json + .input，前置校验对齐（batch 起点 subint
 # 边界、batch 时长 INT TIME 整数倍、INT TIME 为 subint 整数倍，容差同 fxcorr-f/x

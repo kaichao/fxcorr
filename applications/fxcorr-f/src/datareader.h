@@ -17,7 +17,7 @@
  * @class DataReader
  * @brief Sequential, MPI-free reader of local raw files for one datastream.
  *
- * V1 (see fxcorr/impl-plan.md 2.2): local VDIF files as produced by datasim;
+ * V1 (see fxcorr/v1-plan.md 2.2): local VDIF files as produced by datasim;
  * single scan per file, single mux thread.  Coarse delay and frame-aligned
  * byte offsets are ported from DataStream::calculateControlParams
  * (datastream.cpp:381-394, 516-573) and VDIFDataStream::calculateControlParams
