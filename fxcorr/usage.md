@@ -7,7 +7,7 @@
 - 三工具均**无 MPI、串行**，通过目录接口衔接。
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认当前目录（`.`）；所有相对路径（batches、.input、raw、fengine、vis）均相对 `workdir` 解释。
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
-- 任务粒度：f 任务 = (batch_id, station)（fxcorr-f 的 station 参数即该维度）；x 任务 = (batch_id, 站组对)，V1 全站一组 = 全基线，多子集并行属 V3（data-spec 第 6 / 12 节）。
+- 任务粒度：f 任务 = (batch_id, station, ds_index)（fxcorr-f 的 station/ds_index 参数即该两维；多 datastream 站每记录线程一个 f 任务）；x 任务 = (batch_id) 全站全基线（fxcorr-x 无站参数，站列表由 .input 枚举）。并行模型见 data-spec 第 12 节。
 - 错误行为：参数不足或校验失败时打印原因到 stderr 并以非 0 退出；成功退出 0。
 - 前置安装：各工具与 `fxcorrcommon` 库，构建见 `build.md`。
 
@@ -96,7 +96,7 @@ FXSIM_FLUX=100 FXSIM_SEFD=1000 fxcorr-sim station 60512_45000 T1 . 1.5
 ## fxcorr-f
 
 ```
-fxcorr-f <batch_id> <station> [workdir]
+fxcorr-f <batch_id> <station> [workdir] [ds_index]
 ```
 
 | 参数 | 说明 |
@@ -104,6 +104,7 @@ fxcorr-f <batch_id> <station> [workdir]
 | `batch_id` | 批量标识 |
 | `station` | 站名（须在 .input 的 DATA TABLE / datastream 中） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
+| `ds_index` | 站内 datastream 序号（0-based，默认 0；多 datastream 站每记录线程一个 f 任务）；输出目录 `fengine/<batch_id>/<station>/ds_<ds_index>/` |
 
 环境变量（DifxMessage 状态发送，algo-plan P1）：
 
@@ -114,6 +115,7 @@ fxcorr-f <batch_id> <station> [workdir]
 | `FXCORR_KURTOSIS` | 未设 | `1` 时每 subint 末向 `DIFX_BINARY_GROUP/PORT` 组播 DifxMessageSTARecord（STA_KURTOSIS，谱峰度，无 weight 门槛与归一化，P9） |
 | `DIFX_BINARY_GROUP` / `DIFX_BINARY_PORT` | 未设 | STA 二进制组播目标；未设时 STA 静默 |
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态/STA 降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
+| `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：块级并行线程数（Mode 副本分块并行，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
 
 输入输出：
 
@@ -154,6 +156,7 @@ fxcorr-x <batch_id> [workdir]
 |---|---|---|
 | `DIFX_MESSAGE_GROUP` / `DIFX_MESSAGE_PORT` | 未设（静默） | host 模式组播目标（setup.bash 默认 224.2.2.1:50201）；未设时不发状态消息 |
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
+| `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：基线循环并行线程数（scratch 按线程私有化，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
 
 输入输出：
 

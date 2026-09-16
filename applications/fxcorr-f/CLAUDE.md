@@ -5,13 +5,14 @@ station-based 相关器前端（F-Engine）：无 MPI 串行程序，逐站处�
 ## 调用方式
 
 ```
-fxcorr-f <batch_id> <station> [workdir]
+fxcorr-f <batch_id> <station> [workdir] [ds_index]
 ```
 
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
+- `ds_index`（默认 0）：站内 datastream 序号（0-based）——多 datastream 站（每记录线程一个 datastream，真实观测常态）每流一个 f 任务；输出 `fengine/<batch_id>/<station>/ds_<ds_index>/`（单流站也是 ds_0/，布局统一）。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file。
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），Model 由 .calc 内建（无 .im 依赖）。
-- 输出目录 `workdir/fengine/<batch_id>/<station>/`（自动创建）。
+- 输出目录 `workdir/fengine/<batch_id>/<station>/ds_<ds_index>/`（自动创建）。
 - 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd）。
 - **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = dsindex+1（datastream/core 角色），identifier = .input basename。节奏：Starting → 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。RUNNING 不发（归 fxcorr-x）。`FXCORR_STA=1` 时每 autocorr 批次（writeAutocorrelationBatch 前、本批次 zeroAutocorrelations 前）发 DifxMessageSTARecord 到 `DIFX_BINARY_GROUP/PORT`（组装照 core.cpp averageAndSendAutocorrs 1195-1253：data = 实部之和×renorm、最低权重门槛 0.333、时间戳当日秒系；**P9 补平均分支**：minpostavfreqchannels ≥ STADumpChannels 时 STA 前先 averageFrequency、renorm/通道数按平均后修正、写盘跳过重复平均，MTU gate 同上游）。`FXCORR_KURTOSIS=1`（P9）时每 subint 末发 STA_KURTOSIS（照 averageAndSendKurtosis 1378-1434：无 weight gate、无 renorm、整 subint 时间戳）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>_<station>.xml/.sta`（构造时截断，重跑幂等）。
 
@@ -19,12 +20,13 @@ fxcorr-f <batch_id> <station> [workdir]
 
 | 本目录 | 作用 | 对照源 |
 |---|---|---|
-| main.cpp | 参数/batch.json 解析、subint 循环驱动、ac 批次触发、**SwitchedPower 切块喂入（P6）**、**STA 发送与 kurtosis（P1/P9）** | 骨架参照 core.cpp:694-801（zeroAutocorrelations→setValidFlags→setData→setOffsets→resetpcal→process 循环）+ :993-1003（acblockcount/maxacblocks 批次）；对齐校验为新增（data-spec 12 节）；switched power 喂入照 vdiffile.cpp:945-964（段粒度 + increment）；sendSTA 照 :1195-1253（P9 补 :1181-1187 平均分支与 :1249-1254 renorm 修正、:1191 MTU gate）、sendKurtosis 照 :1378-1434（P9） |
+| main.cpp | 参数/batch.json 解析、subint 循环驱动、ac 批次触发、**SwitchedPower 切块喂入（P6）**、**STA 发送与 kurtosis（P1/P9）**、**P3 OpenMP 块并行（2026-09-15）**：Mode 副本构造 + 每 subint 一个并行区（连续段分块 process + 主线程块序归约 + worker 槽拷贝/副本清零与写盘并行）+ 线程数设置 | 骨架参照 core.cpp:694-801（zeroAutocorrelations→setValidFlags→setData→setOffsets→resetpcal→process 循环）+ :993-1003（acblockcount/maxacblocks 批次）；对齐校验为新增（data-spec 12 节）；switched power 喂入照 vdiffile.cpp:945-964（段粒度 + increment）；sendSTA 照 :1195-1253（P9 补 :1181-1187 平均分支与 :1249-1254 renorm 修正、:1191 MTU gate）、sendKurtosis 照 :1378-1434（P9） |
 | datareader.{h,cpp} | 多格式读取：粗延迟 + 帧对齐/字节率定位 + 顺序读文件（**P10 五路径**：KIND_VDIF / KIND_MUXEDVDIF / KIND_MARK5B / KIND_MK5STREAM / KIND_LBA）；**P11 delay 重对齐（2026-09-14）**：修正起点早于数据起点（segment 0）时按 FFT 块跳块 + tosubtract 补偿（含上游 quirk：仅补偿压回时扣+再跳一块重算）+ 2 字节/整数 ns 对齐，跳块数存 lastcount 供 fillValidFlags 置前 count 块 invalid；−nsinc 整 subint 丢弃早退 | datastream.cpp:381-394（延迟/第一个 offsetns）、:516-573（采样→字节偏移）、:463-470（−nsinc 早退）、:538-568（跳块/tosubtract）、:757-761（bytesbetweenintegerns 累加）、vdiffile.cpp:417-444（帧对齐、framesin×framebytes）；sendbytes = getDataBytes（configuration.cpp，已帧对齐含 guard）；**getLastFileOffset（P6）** 暴露上次读入的文件偏移供喂入重叠剔除；P10 各路径对照源见 algo-plan.md P10 上游路径映射表、P11 等价映射见 P11 设计/实施记录 |
 | fenginewriter.{h,cpp} | .sp / pcal.bin / autocorr.bin 写盘 | 布局照 data-spec 5.3；写入序照 core.cpp:1145-1153（finalisepcal→getPcal）、:993-1003（autocorr 批次节奏）、:1260-1265（averageFrequency→getAutocorrelation）；**autocorr.bin 覆盖 total bands（P4a 2026-09-13）**：头/写循环用 getDNumTotalBands、per-band nchan = getDTotalFreqIndex 的 nchan/chanstoavg，zoom 段 weight 从父 recorded band 取（getWeight(false, l)，映射同 core.cpp:1324-1339）；**crosspol 段（P7 2026-09-13）**：header v2 + crosspol 标志（writeAutoCorrs && maxproducts>2），批次记录平行段后接 crosspol 段（getAutocorrelation(true, j)/getWeight(true, j)，zoom 的 crosspol weight 从父 band 取 getWeight(true, l)，照 core.cpp:1288-1301/1342-1369） |
 
 ## 关键实现要点（易错，改前必读）
 
+- **P3 OpenMP 五条（2026-09-15，改并行相关代码前必读）**：① **副本模式**——并行 = 每线程一个 Mode 副本（getMode 工厂重建，工作缓冲独立；共享读：Configuration/Model/interpolator/FFTW plan 并发 execute 安全），subint 级的 setData/setOffsets/setValidFlags/resetpcal/zero* 须对每个副本调用；fxcorrcommon 只加了 mode.h 的归约接口（getFreqsWrite/setDataWeight/addWeight/addPcal/getKurtosisProducts*/addKurtosisProducts），Mode::process 内部零改动。② **块序归约是逐位一致的关键**——连续段分块（t*numffts/nthreads）+ 副本按线程序累加进主 Mode = 串行块序；浮点加法不可交换，任何重排归约顺序（如并行归约、round-robin 分块）都会破坏对拍。③ **归约节奏**——每 fftloop 一次（writeSpectra 与 ac 批次检查都在主线程 t==0 段）：累积归约（串行）+ 槽拷贝（worker 各拷各段，与累积归约并行）+ 写盘/批次（主线程，与 worker 的副本清零并行）；acblockcount/acshiftcount 只由 t==0 读写、区外主线程读（barrier 分隔）。④ **线程数语义**——main 开头 OMP_NUM_THREADS 未设 = omp_set_num_threads(1)（默认串行，V2 回归不破）；副本在 setDumpKurtosis 之后构造（dokurtosis 须先定）。⑤ **并行区粒度**——每 subint 一个并行区（不是每 fftloop，fork/join 会吃光收益），fftloop 间用 barrier；无 OpenMP 编译时 ompcompat.h 退化串行。
 - **process(i, subloop) 的槽复用**：subloop 是缓冲槽索引（0..NUM BUFFERED FFTS-1），i 是 subint 内 FFT 全局序号。必须双循环 `fftloop × numBufferedFFTs`（core.cpp:786-801 同构），每 fftloop 结束立即写盘该批槽（writeSpectra），不能攒到 subint 尾——槽被后续 fftloop 覆盖。
 - **Mode 零改造**：`Configuration::getMode(configindex, dsindex)` 工厂现成（configuration.cpp:857）；getFreqs/getPcal/getAutocorrelation/getWeight/getDataWeight 全为 public。
 - **对齐校验**：batch 起点必须落在 subint 边界（容差 1µs，吸收 start_mjd 的 f64 表示误差），非对齐报错退出。batch.json 的 start_mjd 用精确 repr（如 58948.291666666664）。
@@ -38,6 +40,7 @@ fxcorr-f <batch_id> <station> [workdir]
 
 - 输入格式（**P10 已补齐，2026-09-14**）：本地 **VDIF/VDIFL**（单线程）、**INTERLACEDVDIF**（多线程 corner-turn，KIND_MUXEDVDIF）、**MARK5B**（mark5bfix 修复）、**LBA 家族**（LBASTD/LBAVSOP/LBA8BIT/LBA16BIT，ASCII 头+raw）、**MKIV/VLBA/VLBN/KVN5B/CODIF**（mark5access 通用流，KIND_MK5STREAM）；K5VSSP/K5VSSP32 上游不可用仍报错退出；硬件访问（StreamStor/Mark6）不迁移。
 - 多 mux thread 仅限 INTERLACEDVDIF 语义（fanout corner-turn）；vdifmux 输出为 mark5access 期望布局（含 EDV4 头）。
+- **进程内多线程已支持（P3 2026-09-15）**：`OMP_NUM_THREADS=N` 启用块级并行（Mode 副本 + 块序归约，结果与串行逐位一致，usage.md）；未设 = 串行。构建经 AC_OPENMP（无 OpenMP 编译环境退化串行，ompcompat.h）。
 - **单 scan**、文件序号 = scan 序号（每个数据文件一个 scan，从 scan 起点开始连续记录）。
 - **delay 重对齐已补（P11 2026-09-14）**：修正起点早于数据起点（segment 0）时跳 FFT 块 + tosubtract 补偿（含上游 quirk 照抄）+ 2 字节/整数 ns 对齐 + 前 count 块 valid flags invalid，语义与上游 calculateControlParams 逐行对照（algo-plan P11 设计/实施记录）；valid flag 跨段续接子句在单文件连续读下自动等价（读窗口无段边界），不显式实现。delay≠0 对拍 6/6、回归 6/6（fxcorr/test/p11）。
 - **数据文件起点 = batch 起点**（data-spec 5.2 file-per-batch 布局）：datareader 构造接收 batch 起点的绝对 sec/ns（main.cpp 由 batchstartjob 换算），locate 的字节偏移相对 batch 起点计算（batch 起点 = scan 起点时退化为原语义）。**数据块时间（*sec/*ns）须保持 scan 相对系**（Mode::setData 与 setOffsets 同系）；换算注意 batchstartabsns 是当日秒系、currentscanstartsec 是 scan 相对系（曾混用导致 nearestsample 越界、weight 全 0，2026-09-12 修复并回归对拍 6/6）。

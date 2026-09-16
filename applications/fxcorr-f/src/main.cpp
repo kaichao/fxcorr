@@ -17,6 +17,7 @@
 #include "datareader.h"
 #include "fenginewriter.h"
 #include "pcaltextwriter.h"
+#include "ompcompat.h"
 
 using namespace std;
 
@@ -225,9 +226,16 @@ int main(int argc, char **argv)
 {
 	if(argc < 3)
 	{
-		cerr << "usage: fxcorr-f <batch_id> <station> [workdir]" << endl
+		cerr << "usage: fxcorr-f <batch_id> <station> [workdir] [ds_index]" << endl
 		     << "  env: FXCORR_WORKDIR (default .), overridden by the workdir argument" << endl;
 		return EXIT_FAILURE;
+	}
+	// P3 (algo-plan.md): thread count from OMP_NUM_THREADS; unset = serial
+	// (V2 behaviour unchanged).  Must run before any OpenMP parallel region.
+	{
+		const char *env = getenv("OMP_NUM_THREADS");
+		if(env == 0 || env[0] == '\0')
+			omp_set_num_threads(1);
 	}
 	string batchid = argv[1];
 	string station = argv[2];
@@ -236,6 +244,17 @@ int main(int argc, char **argv)
 		workdir = wd;
 	if(argc > 3)
 		workdir = argv[3];	// argument takes precedence over the environment
+	// multi-datastream stations (real observations: one datastream per
+	// recording thread): ds_index selects the station's n-th datastream
+	// (0-based, default 0; fengine output goes to ds_<ds_index>/)
+	int dsarg = 0;
+	if(argc > 4)
+		dsarg = atoi(argv[4]);
+	if(dsarg < 0)
+	{
+		cerr << "fxcorr-f: ds_index must be >= 0" << endl;
+		return EXIT_FAILURE;
+	}
 
 	// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
 	string batchjsonpath = workdir + "/batches/" + batchid + ".json";
@@ -272,19 +291,27 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	// find this station's datastream index
+	// find this station's datastream indices (multi-datastream stations have
+	// several entries with the same TELESCOPE name); dsarg picks the n-th
 	int dsindex = -1;
-	for(int d=0;d<config.getNumDataStreams();d++)
 	{
-		if(config.getDStationName(0, d) == station)
+		int count = 0;
+		for(int d=0;d<config.getNumDataStreams();d++)
 		{
-			dsindex = d;
-			break;
+			if(config.getDStationName(0, d) == station)
+			{
+				if(count == dsarg)
+				{
+					dsindex = d;
+					break;
+				}
+				count++;
+			}
 		}
 	}
 	if(dsindex < 0)
 	{
-		cerr << "fxcorr-f: station " << station << " not found in .input" << endl;
+		cerr << "fxcorr-f: station " << station << " ds_index " << dsarg << " not found in .input" << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -344,6 +371,24 @@ int main(int argc, char **argv)
 	// set (mode.cpp:1236, upstream core.cpp:702)
 	mode->setDumpKurtosis(dokurtosis);
 
+	// P3 (algo-plan.md): replica Modes for block-parallel processing.  Each
+	// replica shares the read-only config/model and owns its work buffers;
+	// the per-subint setup calls and the per-fftloop reduction below keep the
+	// replicas consistent with the primary Mode (bit-identical results).
+	int nthreads = omp_get_max_threads();
+	vector<Mode *> replicas;
+	for(int t=1;t<nthreads;t++)
+	{
+		Mode *m = config.getMode(0, dsindex);
+		if(!m->initialisedOK())
+		{
+			cerr << "fxcorr-f: replica mode initialisation failed for station " << station << endl;
+			return EXIT_FAILURE;
+		}
+		m->setDumpKurtosis(dokurtosis);
+		replicas.push_back(m);
+	}
+
 	// autocorrelation averaging batch, same formula as core.cpp:769-783
 	int numbufferedffts = config.getNumBufferedFFTs(0);
 	double blockns = (double)config.getSubintNS(0)/(double)reader.getBlocksPerSend();
@@ -355,7 +400,10 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-f: requested autocorrelation shift/average time of " << model->getMaxNSBetweenACAvg(0) << " ns cannot be met with " << numbufferedffts << " FFTs being buffered; the time resolution which will be attained is " << maxacblocks*blockns << " ns" << endl;
 	}
 
-	string outdir = workdir + "/fengine/" + batchid + "/" + station;
+	// fengine layout: per datastream subdirectory (ds_N, N = station-local
+	// datastream index), so multi-datastream stations (one stream per
+	// recording thread) never collide (data-spec 5.3)
+	string outdir = workdir + "/fengine/" + batchid + "/" + station + "/ds_" + to_string(dsarg);
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
 		return fail(monitor, "fxcorr-f: cannot create " + outdir);
@@ -503,48 +551,154 @@ int main(int argc, char **argv)
 		mode->setOffsets(scan, offsetsec, offsetns);
 		if(haspcal)
 			mode->resetpcal();
+		// P3: the subint setup applies to every replica as well
+		for(Mode *m : replicas)
+		{
+			m->zeroAutocorrelations();
+			if(dokurtosis)
+				m->zeroKurtosis();
+			m->setValidFlags(validflags);
+			m->setData(databuf, bytes, scan, datasec, datans);
+			m->setOffsets(scan, offsetsec, offsetns);
+			if(haspcal)
+				m->resetpcal();
+		}
 
 		writer.writeSubintHeader(scan, offsetsec, offsetns, mode, validflags);
 
 		// same loop structure as core.cpp:786-801: buffered slot reuse over fftloops
 		int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
 		int acblockcount = 0, acshiftcount = 0;
-		for(int fftloop=0;fftloop<fftloops;fftloop++)
+
+		// P3 (algo-plan.md): one parallel region per subint (not per fftloop,
+		// so team fork/join happens once per subint and fftloops are
+		// separated by plain barriers).  Each thread processes contiguous
+		// block segments (t*numffts/nthreads) with its own Mode, so per-block
+		// computation is bit-identical to the serial form; thread 0 then
+		// reduces the replicas block-ordered (accumulation sequence equals
+		// the serial one) and writes the batch.  acblockcount/acshiftcount
+		// are only touched by thread 0 and read after the region.
+		int nrecordedbands = config.getDNumRecordedBands(0, dsindex);
+		#pragma omp parallel num_threads(nthreads)
 		{
-			int numffts = blockspersend - fftloop*numbufferedffts;
-			if(numffts > numbufferedffts)
-				numffts = numbufferedffts;
+			int t = omp_get_thread_num();
+			Mode *m = (t == 0) ? mode : replicas[t-1];
 
-			for(int b=0;b<numbufferedffts;b++)
+			for(int fftloop=0;fftloop<fftloops;fftloop++)
 			{
-				int i = fftloop*numbufferedffts + b;
-				if(i >= blockspersend)
-					break;
-				mode->process(i, b);
-			}
-			writer.writeSpectra(fftloop, mode);
+				int numffts = blockspersend - fftloop*numbufferedffts;
+				if(numffts > numbufferedffts)
+					numffts = numbufferedffts;
 
-			// autocorrelation averaging batches, core.cpp:993-1003
-			acblockcount += numffts;
-			if(acblockcount == maxacblocks)
-			{
-				if(haspcal)
-					pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
-				// P9: STA may demand the post-average spectrum (core.cpp:1181-1187):
-				// average before the dump, let the writer skip its own average
-				bool datastreamsaveraged = false;
-				if(dosta && config.getMinPostAvFreqChannels(0) >= config.getSTADumpChannels())
+				int bstart = (int)((long long)t*numffts/nthreads);
+				int bend = (int)((long long)(t+1)*numffts/nthreads);
+				for(int b=bstart;b<bend;b++)
 				{
-					mode->averageFrequency();
-					datastreamsaveraged = true;
+					int i = fftloop*numbufferedffts + b;
+					m->process(i, b);
 				}
-				if(dosta)
-					sendSTA(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
-					        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns, maxacblocks*blockns, datastreamsaveraged, config.getJobName());
-				writer.writeAutocorrelationBatch(mode, datastreamsaveraged);
-				mode->zeroAutocorrelations();
-				acblockcount = 0;
-				acshiftcount++;
+				#pragma omp barrier
+
+				// P3: thread 0 reduces the replicas' accumulations in block
+				// order (the only part that must stay serial for bit-identity),
+				// while every worker copies its own output slots into the
+				// primary Mode's -- disjoint memory, no races.
+				if(t == 0)
+				{
+					for(size_t rt=0;rt<replicas.size();rt++)
+					{
+						Mode *rm = replicas[rt];
+
+						// accumulate this replica's autocorrelations/weights/kurtosis
+						int crosspols = mode->writeCrossAutoCorrs() ? 2 : 1;
+						for(int i=0;i<crosspols;i++)
+						{
+							for(int j=0;j<nrecordedbands;j++)
+							{
+								int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
+								int nchan = config.getFNumChannels(freqindex);
+								const cf32 *src = rm->getAutocorrelation(i, j);
+								cf32 *dst = mode->getAutocorrelation(i, j);
+								for(int k=0;k<nchan;k++)
+								{
+									dst[k].re += src[k].re;
+									dst[k].im += src[k].im;
+								}
+								mode->addWeight(i, j, rm->getWeight(i, j));
+								if(dokurtosis)
+									mode->addKurtosisProducts(j, rm->getKurtosisProducts1(j), rm->getKurtosisProducts2(j), nchan);
+							}
+						}
+
+						// accumulate this replica's raw pcal tone accumulations
+						if(haspcal)
+						{
+							for(int j=0;j<nrecordedbands;j++)
+							{
+								int localfreqindex = config.getDLocalRecordedFreqIndex(0, dsindex, j);
+								int ntonesband = config.getDRecordedFreqNumPCalTones(0, dsindex, localfreqindex);
+								for(int tone=0;tone<ntonesband;tone++)
+									mode->addPcal(j, tone, rm->getPcal(j, tone));
+							}
+						}
+					}
+				}
+				else
+				{
+					// copy this worker's output slots (spectra + per-slot
+					// weights) into the primary Mode's buffered slots
+					for(int b=bstart;b<bend;b++)
+					{
+						for(int j=0;j<nrecordedbands;j++)
+						{
+							int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
+							int nchan = config.getFNumChannels(freqindex);
+							memcpy(mode->getFreqsWrite(j, b), m->getFreqs(j, b), sizeof(cf32)*nchan);
+							mode->setDataWeight(j, b, m->getDataWeight(j, b));
+						}
+					}
+				}
+				#pragma omp barrier
+
+				if(t == 0)
+				{
+					writer.writeSpectra(fftloop, mode);
+
+					// autocorrelation averaging batches, core.cpp:993-1003
+					acblockcount += numffts;
+					if(acblockcount == maxacblocks)
+					{
+						if(haspcal)
+							pcaltext->accumulateWeight(mode);	// before zeroAutocorrelations clears weights
+						// P9: STA may demand the post-average spectrum (core.cpp:1181-1187):
+						// average before the dump, let the writer skip its own average
+						bool datastreamsaveraged = false;
+						if(dosta && config.getMinPostAvFreqChannels(0) >= config.getSTADumpChannels())
+						{
+							mode->averageFrequency();
+							datastreamsaveraged = true;
+						}
+						if(dosta)
+							sendSTA(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
+							        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns, maxacblocks*blockns, datastreamsaveraged, config.getJobName());
+						writer.writeAutocorrelationBatch(mode, datastreamsaveraged);
+						mode->zeroAutocorrelations();
+						acblockcount = 0;
+						acshiftcount++;
+					}
+				}
+				else
+				{
+					// the replica's accumulation window is one fftloop: zero it
+					// (after the reduction above) so the next reduction adds
+					// only this worker's new blocks
+					m->zeroAutocorrelations();
+					if(dokurtosis)
+						m->zeroKurtosis();
+					if(haspcal)
+						m->resetpcal();
+				}
+				#pragma omp barrier
 			}
 		}
 		if(acblockcount != 0)
@@ -606,6 +760,8 @@ int main(int argc, char **argv)
 	delete [] databuf;
 	delete [] validflags;
 	delete mode;
+	for(Mode *m : replicas)
+		delete m;
 
 	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
 	monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);

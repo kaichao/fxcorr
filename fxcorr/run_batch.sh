@@ -129,34 +129,40 @@ trem = inttime * 1.0e9 % subint
 if min(trem, subint - trem) > 1.0:
     sys.exit('run_batch.sh: INT TIME %g is not a multiple of SUBINT %d ns' % (inttime, subint))
 
-# 站列表：batch.json stations（make_testdata.sh 已写全）；缺失时从 .input
-# DATASTREAM 解析（TELESCOPE INDEX + TELESCOPE TABLE，同 make_testdata.sh）
-stations = bj.get('stations')
+# f 任务展开按 .input datastream 序（TELESCOPE INDEX 逐个；多 datastream 站
+# 重复出现，每 datastream 一个 f 任务带站内序号 dsidx）；batch.json 的
+# stations 是去重元数据（data-spec 5.3），仅作交叉校验
+telnames = re.findall(r'^TELESCOPE NAME \d+:\s*(\S+)\s*$', text, re.M)
+ds_tel = re.findall(r'^TELESCOPE INDEX:\s*(\d+)\s*$', text, re.M)
+stations = [telnames[int(t)] for t in ds_tel]
+if bj.get('stations') is not None and set(bj['stations']) != set(stations):
+    sys.exit('run_batch.sh: batch.json stations do not match .input datastreams')
+dsidx = []
+seen = {}
+for st in stations:
+    dsidx.append(seen.get(st, 0))
+    seen[st] = dsidx[-1] + 1
 datafiles = re.findall(r'^FILE \d+/\d+:\s*(\S+)\s*$', text, re.M)
-if stations is None:
-    telnames = re.findall(r'^TELESCOPE NAME \d+:\s*(\S+)\s*$', text, re.M)
-    ds_tel = re.findall(r'^TELESCOPE INDEX:\s*(\d+)\s*$', text, re.M)
-    stations = [telnames[int(t)] for t in ds_tel]
 if len(stations) != len(datafiles):
     sys.exit('run_batch.sh: station/file count mismatch in %s (%d stations, %d files)' % (cfgrel, len(stations), len(datafiles)))
 
-# ② DATA TABLE 软链重指本 batch 的 VDIF（fxcorr-f 按 DATA TABLE 文件名读数据）；
-# raw 数据不存在即报错（跑 fxcorr-f 前就挡）。软链 target 用相对 workdir 路径。
+# ② DATA TABLE 软链重指本 batch 的 VDIF（fxcorr-f 按 DATA TABLE 文件名读数据）。
+# make_testdata.sh 布局（raw/<st>/<st>_<bid>.vdif）下软链重指本 batch；
+# 真实观测场景 FILE 行已是数据文件路径（绝对路径或直接可见），不软链。
 for st, fn in zip(stations, datafiles):
     src = 'raw/%s/%s_%s.vdif' % (st, st, bid)
-    if not os.path.isfile(os.path.join(workdir, src)):
-        sys.exit('run_batch.sh: raw data %s not found (run make_testdata.sh first)' % src)
-    tgt = os.path.join(workdir, fn)
-    if os.path.islink(tgt) or os.path.exists(tgt):
-        os.unlink(tgt)
-    os.symlink(src, tgt)
+    if os.path.isfile(os.path.join(workdir, src)):
+        tgt = os.path.join(workdir, fn)
+        if os.path.islink(tgt) or os.path.exists(tgt):
+            os.unlink(tgt)
+        os.symlink(src, tgt)
 
 outdir = os.path.join(workdir, one('OUTPUT FILENAME').rstrip('/'))
 print('CFGIN=%s' % cfgrel)
 print('OUTDIR=%s' % outdir)
 print('--')
-for st, fn in zip(stations, datafiles):
-    print('%s %s' % (st, fn))
+for st, di, fn in zip(stations, dsidx, datafiles):
+    print('%s %s %s' % (st, di, fn))
 PYEOF
 
 CFGIN= OUTDIR=
@@ -171,8 +177,8 @@ while IFS= read -r line && [ "$line" != "--" ]; do
 done < "$OUT"
 [ -n "$CFGIN" ] || { echo "run_batch.sh: failed to parse batch $BID" >&2; exit 2; }
 declare -a DSTATION
-while read -r st fn; do
-	DSTATION+=("$st")
+while read -r st di fn; do
+	DSTATION+=("$st $di")
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
 
 # ---- ③④⑤⑥⑦ status 流转与逐站/基线执行 ----
@@ -197,11 +203,14 @@ if st == "done":
 }
 mark_status running
 
-# 逐站 fxcorr-f：任一失败 → status=failed、非 0 退出，不跑后续站（规格③④）
-for st in "${DSTATION[@]}"; do
-	echo "run_batch.sh: fxcorr-f $BID $st" >&2
-	if ! fxc fxcorr-f "$BID" "$st" "$WORKDIR"; then
-		echo "run_batch.sh: fxcorr-f failed for station $st" >&2
+# 逐 datastream fxcorr-f（多 datastream 站每流一个 f 任务，带站内序号）：
+# 任一失败 → status=failed、非 0 退出，不跑后续站（规格③④）
+for entry in "${DSTATION[@]}"; do
+	st=${entry%% *}
+	di=${entry#* }
+	echo "run_batch.sh: fxcorr-f $BID $st ds$di" >&2
+	if ! fxc fxcorr-f "$BID" "$st" "$WORKDIR" "$di"; then
+		echo "run_batch.sh: fxcorr-f failed for station $st ds$di" >&2
 		mark_status failed
 		exit 1
 	fi

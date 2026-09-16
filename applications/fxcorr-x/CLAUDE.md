@@ -10,7 +10,7 @@ fxcorr-x <batch_id> [workdir]
 
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。
-- 数据源 `workdir/fengine/<batch_id>/<station>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream。
+- 数据源 `workdir/fengine/<batch_id>/<station>/ds_<N>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream；N = 站内 datastream 序号（按 .input datastream 序累计，多 datastream 站每记录线程一个 f 任务，见 fxcorr-f 的 ds_index）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘沿用 config 语义，difx2fits 零改造），batch.json 的 difx_dir 仅为元数据。
 - **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = 0（manager 角色），identifier = .input basename。节奏：Starting → 每积分写盘一条 Running（Integrator::sendRunning，writedata 后、increment 前——increment 清零 floatresults，时序同上游 fxmanager loopwrite；weight 照抄 visibility.cpp:1100-1146，f32 截断点一致，对拍逐位一致）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>.xml`（构造时截断，重跑幂等）。
 
@@ -20,12 +20,13 @@ fxcorr-x <batch_id> [workdir]
 |---|---|---|
 | main.cpp | batch.json 解析、V1 边界检查、逐 subint 驱动（xcblockcount/maxxcblocks 批次、尾批、时间推进） | core.cpp:657-784（批控制）、:985-991 / :1055-1060（uvshift 触发）；fxmanager.cpp:650-698 的单 Visibility 串行替代 |
 | spreader.{h,cpp} | .sp 读取：256 字节头校验 + 按 subint fseek 读头/flags/weights/spectra（线性 FFT 序）；**zoom 切片视图（P4a 2026-09-13）**：构造参数 (channeloffset, nchanoverride) 时每 FFT 块只读父 .sp 的切片段，spectra()/numChannels() 语义不变 | 布局见 data-spec 5.3；对应 fxcorr-f 的 FEngineWriter |
-| xmac.{h,cpp} | XMAC 批循环 + baselineweight 累加 + uvshiftAndAverage（含 pulsar binning 与多相位中心） | core.cpp:867-982（删 phased array）、:1005-1052、:1431-1938（单线程、无锁）；**脉冲星（P4c）**：bins 计算 + pulsar/scrunch 分支照 :803-812/:914-975，scrunch 折叠照 :1438-1475，bin 展开照 :1626-1631/:1781-1789，bweight bin 循环照 :1080-1087，工作区分配照 :1940-2064；**多相位中心（P4b）**：差分延迟 + rotator 生成 + 旋转 + 结果区步进 + decorr 段照 :1636-1725/:1746-1815/:1877-1923，工作区分配照 :416-433，shiftdecorr 写段照 :1090-1105；vis2 逐块 `vectorConj_cf32` 后 `vectorAddProduct_cf32`（等价 getConjugatedFreqs）；zoom band 由 config 表驱动零改动（band index = ds total 序，readers 已含 zoom 视图） |
+| xmac.{h,cpp} | XMAC 批循环 + baselineweight 累加 + uvshiftAndAverage（含 pulsar binning 与多相位中心）；**P3 OpenMP（2026-09-15）**：xmacBatch 的 used (freq, xmac-pass) 对预收集 + 基线循环并行（per-(f,x) baseoffset 表替代顺序累加 resultindex，threadcrosscorrs 布局不变）、uvshiftAndAverage 的 (freq, baseline) collapse(2) 并行、accumulateWeights 基线循环最外层并行（循环交换后每基线累加序列不变）；conjbuf/pulsarscratchspace/chanfreqs/rotator/rotated/argument 按 nthreads 私有副本（ompcompat.h 无 OpenMP 时退化串行） | core.cpp:867-982（删 phased array）、:1005-1052、:1431-1938（单线程、无锁）；**脉冲星（P4c）**：bins 计算 + pulsar/scrunch 分支照 :803-812/:914-975，scrunch 折叠照 :1438-1475，bin 展开照 :1626-1631/:1781-1789，bweight bin 循环照 :1080-1087，工作区分配照 :1940-2064；**多相位中心（P4b）**：差分延迟 + rotator 生成 + 旋转 + 结果区步进 + decorr 段照 :1636-1725/:1746-1815/:1877-1923，工作区分配照 :416-433，shiftdecorr 写段照 :1090-1105；vis2 逐块 `vectorConj_cf32` 后 `vectorAddProduct_cf32`（等价 getConjugatedFreqs）；zoom band 由 config 表驱动零改动（band index = ds total 序，readers 已含 zoom 视图） |
 | integrate.{h,cpp} | 单 Visibility（numvis=1）：addData 满 intTime → writedata → increment；autocorr.bin 逐批次累加进 results 自相关段/acweight 段 | fxmanager.cpp:168-185（构造+polnames）、:114-133（todiskbuffer 预算）；core.cpp:1260-1370（autocorr 累加，**P4a 2026-09-13 起覆盖 total bands**：nbands 校验 getDNumTotalBands、freqindex 用 getDTotalFreqIndex、acbuf 取最大 nchan，zoom 的 weight 已是 f 侧换算好的父 band 值）；**P7 2026-09-13**：header 支持 version 1/2（v2 多 u32 crosspol 标志），crosspol=1 时每条批次记录平行段后接 crosspol 段，读段 lambda 两次调用、resultindex/weightindex 从平行 walk 结束处**连续**接续（core.cpp:1288-1301/1342-1369 的 results 串联布局，非独立 offset 区） |
 | beamengine.{h,cpp} | **相位阵波束形成（P8 2026-09-13）**：per (freq,papol) 段表（recorded band 优先、zoom 兜底）+ per subint per acc 窗口 Σ_ds DWeight×频谱落盘 beam/<batch_id>/beam.bin | core.cpp:818-865（f 侧波束加权，Mode 换成 .sp 频谱）；输出端上游死代码无对照，beam.bin 布局 fxcorr 自定（data-spec 5.5）；通道数用 getFNumChannels(f)（上游 :821 误传 configindex） |
 
 ## 关键实现要点（易错，改前必读）
 
+- **P3 OpenMP 三条（2026-09-15，改并行相关代码前必读）**：① **逐位一致靠"基线写区独立 + 序列不变"**——并行化只重排基线间执行顺序，单基线的运算序列（conj→mul→累加、uvshift 平均）与串行完全一致；resultindex 顺序累加已改为 per-(f,x) baseoffset 表（xmacBatch 预收集段照原步进逻辑重放，含 localfreqindex<0 不占位的 quirk），threadcrosscorrs 布局不变。② **scratch 必须按线程私有**——conjbuf/pulsarscratchspace（xmacBatch 内每 (j,p) 复用）与 chanfreqs/argument/rotator/rotated（MPC 的 uvshiftAndAverageBaselineFreq 内复用）都是成员单缓冲，已改 [nthreads] 副本并加 omp_get_thread_num() 取用；新加并行循环时先查复用缓冲。③ **线程数语义**——main 开头 OMP_NUM_THREADS 未设 = omp_set_num_threads(1)（默认串行，V2 回归不破）；XmacEngine 构造取 omp_get_max_threads() 分配 scratch 副本，因此线程数设置必须在 XmacEngine 构造之前（main 已保证）。shifterrorcount（MPC 错误计数）用 `#pragma omp atomic`。
 - **results 三层结构**：subintresults（coreresultlength，每 subint 清零）→ XMAC/uvshift/自相关累加 → `Visibility::addData` 加进长积分。offset 体系（threadresult*/coreresult*）全部沿用 configuration 预算，**resultindex 累加顺序必须与 populateResultLengths 一致**（f→x→baseline→pol）。
 - **uvshiftAndAverage 简化版**：nsoffset/nswidth 参数保留但单相位中心下不用（rotator/decorr 全跳过）；频谱平均段照 core.cpp:1829-1853（virtualplacement/bin 平均，非 d260 老版）。
 - **自相关批次节奏**：autocorr.bin 每 subint 存 ac_batches=ceil(bps/maxacblocks) 条记录（f 侧每批次 averageFrequency+zero），x 侧必须**全部读入逐条累加**，与 mpifxcorr 的 averageAndSendAutocorrs 节奏一致——否则 weight 与数值都对不上。
@@ -42,6 +43,7 @@ fxcorr-x <batch_id> [workdir]
 
 - 输入仅 fxcorr-f 的 .sp（**zoom band 已支持（P4a 2026-09-13）**：x 侧按 .input 的 zoom 定义对父 .sp 做通道切片视图，无新文件；**多相位中心已支持（P4b）**：.im 的 NUM PHASE CENTRES 驱动，每源一套 .s 文件，写盘零改造；**脉冲星 binning 已支持（P4c）**：.input PULSAR BINNING + pulsar config + polyco，.b 文件与 SCRUNCH 两种模式，写盘零改造；**相位阵已支持（P8）**：phasedArrayOn 时只出 beam/<batch_id>/beam.bin、不写 SWIN）；STA/PCAL 文件生成均不做（V2）。
 - 无流式：整 batch 逐 subint 顺序读 .sp（每 subint 各站各 band 一次 fseek），谱数据按 subint 常驻（blockspersend×nchan cf32/站/band）。
+- **进程内多线程已支持（P3 2026-09-15）**：`OMP_NUM_THREADS=N` 启用基线循环并行（scratch 按线程私有化，结果与串行逐位一致，usage.md）；未设 = 串行。构建经 AC_OPENMP（无 OpenMP 编译环境退化串行，ompcompat.h）。
 
 ## 构建与注册
 

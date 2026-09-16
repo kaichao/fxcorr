@@ -5,17 +5,17 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 ## 动机分类（贯穿全文的两类原因）
 
 - **功能未迁移**：上游 mpifxcorr 有该功能，V1 按边界裁剪未迁移（pcal 只落 pcal.bin 不出文本；zoom / 多相位中心 / 脉冲星 binning 上游有、V1 不支持；difxmessage 上游有、拆分后无进程发送）。
-- **串行环境新变化**：去 MPI 后单进程串行，上游靠 D×B 进程网格取得的并行性消失，需要新的并行手段（多 x 子集、多线程）；容器 / scalebox 编排环境引入新约束与新机会（组播受限、网络流输入）。
+- **串行环境新变化**：去 MPI 后单进程串行，上游靠 D×B 进程网格取得的并行性消失，需要新的并行手段（进程内多线程，P3；多 x 子集方案 P2 已取消——并行维度改为时间片 batch，见 P2 节）；容器 / scalebox 编排环境引入新约束与新机会（组播受限、网络流输入）。
 
 ## 优先级
 
-排序依据（2026-09-13 调整）：**V2 只做 mpifxcorr 串行算法的迁移与完善——先补齐数据链路完整性（P0/P1，成本低、科学产出与可观测性受损），再科学功能（P4、P6-P8 按改动量递增），再监控消息（P9）、输入格式（P10）、reader 细节（P11）；并行化（P2/P3）与流式新能力（P5）挪 V3（README：模块级 OpenMP / 按需 GPU，并行与流式阶段）**。
+排序依据（2026-09-13 调整；2026-09-15 V3 定案同步）：**V2 只做 mpifxcorr 串行算法的迁移与完善——先补齐数据链路完整性（P0/P1，成本低、科学产出与可观测性受损），再科学功能（P4、P6-P8 按改动量递增），再监控消息（P9）、输入格式（P10）、reader 细节（P11）；并行化（P2/P3）与流式新能力（P5）挪 V3（README：模块级 OpenMP / 按需 GPU，并行与流式阶段）**。V3 定案（2026-09-15）：P2 取消（时间片 batch 并行取代，见 P2 节）、P3 实施（V3 唯一实现项）、P5 不做（留 scalebox 阶段）。
 
 | 优先级 | 改进项 | 动机分类 |
 |---|---|---|
 | P0 | PCAL_*.pcal 文件生成 | 功能未迁移 |
 | P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 |
-| P2 | 多 x 子集并行 | 串行环境新变化（⤴ V3，2026-09-13 挪出） |
+| P2 | 多 x 子集并行 | 串行环境新变化（✂ 2026-09-15 取消：时间片 batch 并行取代，见 P2 节） |
 | P3 | 多线程（f/x 进程内并行） | 串行环境新变化（⤴ V3，2026-09-13 挪出） |
 | P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | ✅ 2026-09-13（P4a zoom 对拍 12/12、P4b 多源对拍 8/8、P4c 非 scrunch 14/14 + scrunch 6/6，各无开关回归 6/6；详见 P4 节） |
 | P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力，⤴ V3，2026-09-13 挪出） |
@@ -28,7 +28,7 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 
 P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，均已补节细化并实施（P6-P10 2026-09-13，P11 2026-09-14）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
 
-对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P6/P8 SWIN 对拍、P2/P3（V3 实现时）与单 x 全量结果全等。
+对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P6/P8 SWIN 对拍、P3（V3 实现时）与单线程全量结果全等。
 
 ---
 
@@ -257,49 +257,76 @@ containerPrefix 如 `meta/difxmsg/test_60512_45000_T1`（.xml/.sta 由封装按�
 
 ---
 
-## P2：多 x 子集并行
+## P2：多 x 子集并行（✂ 2026-09-15 取消）
 
 ### 动机分类
 
 串行环境新变化。上游 XMAC 由 B 基线进程网格并行（每个 baseline 进程串行做若干基线）；拆分后单进程 fxcorr-x 串行全部基线。XMAC 是算力热点，大站网/高通道数下单核处理不完。
 
-### 要解决的问题
+### 取消结论（V3 讨论定案，2026-09-15）
 
-x 侧吞吐不足成为流水线瓶颈；单机多核（测试机 100 核）与多节点无从利用。
+原方案（基线集合切 N 子集、N 个 fxcorr-x 进程并行、各子集写独立子目录后合并）**取消**。定案理由：
 
-### 预期效果
+- **并行维度改为时间**："时间片"就是 batch——batch 即并行/调度单元，多 batch 并发由 scalebox 编排承担（编排外置，不在本项目）；空间维度切分（站组/基线子集）不再需要。
+- **同实验 batch 串行（路线 B）**：同一实验的 batch 按时间序串行处理，实验级共享文件（PCAL_* 文本读改写、SWITCHEDPOWER_* 追加、SWIN 跨 batch 追加）不存在并发写点，无需子集目录与合并逻辑（data-spec 12 节）。
+- **进程内并行交给 P3**：单进程算力不足由模块级 OpenMP 解决（P3 节），不靠多进程切分。
 
-基线集合切 N 个子集、N 个 fxcorr-x 进程并行，x 侧吞吐约 ×N（受共享存储读 .sp 带宽与 SWIN 写带宽约束）；子集可分布到多节点。
+### 遗留记录
 
-### 设计
-
-- **切分**：基线集合按算力均衡切成子集（.input BASELINE TABLE 驱动，round-robin 或按基线通道数加权分配）；每子集一个 fxcorr-x 进程。
-- **输出合并**：各子集写独立子目录（如 `vis/<exp>.difx.s<N>/`），difx2fits 前合并成实验级 `vis/<exp>.difx/`（SWIN 追加保序，与 data-spec 12 节约定一致，实施前同步细节）。
-- **元数据**：batch.json 增子集描述字段（baselines 切分表），编排脚本与 x 进程共用。
-- **编排**：run_batch.sh 本地多进程并发（wait 收口）；scalebox 环境下改为分发（各子集一个 module 实例）。
-- **验证**：N 子集结果合并后与单 x 全量输出 cmp_swin.py 全等；性能测试测吞吐增益（fxcorr-sim 生成大数据量）。
+原设计（基线切分、独立子目录、合并、baselines 切分表元数据、run_batch.sh wait 收口）作废，不实现。若未来 scalebox 编排层遇到"同实验多 batch 并行追赶积压"场景，实验级文件的并发语义（PCAL 读改写竞态、SWITCHEDPOWER 行序、SWIN 时间序）届时再评估。
 
 ---
 
-## P3：多线程（f/x 进程内并行）
+## P3：多线程（f/x 进程内并行）——V3 唯一实现项
 
 ### 动机分类
 
-串行环境新变化。上游核心计算（channelization/XMAC）单线程，靠进程网格并行；拆分后进程数 = 1，进程内无并行手段，P2 之外仍有上限。
+串行环境新变化。上游核心计算（channelization/XMAC）单线程，靠进程网格并行；拆分后进程数 = 1，进程内无并行手段。
 
 ### 要解决的问题
 
-单进程只能用一个核：f 侧 channelization/FFT 在大数据量下也是热点；x 侧即使 P2 子集化，单子集仍是单核。
+单进程只能用一个核：f 侧 channelization/FFT 在大数据量下也是热点；x 侧 XMAC 串行全部基线。
 
 ### 预期效果
 
-f 侧 FFT 批并行、x 侧基线循环并行，近线性加速（受内存带宽约束）；与 P2 叠加使用。
+f 侧 FFT 批并行、x 侧基线循环并行，近线性加速（受内存带宽约束）。P2 取消后（见 P2 节），P3 是本项目唯一的并行实现项；batch 间并行由 scalebox 编排承担（多 batch 并发）。
 
-### 设计
+### 设计（2026-09-15 定稿，实测热点驱动）
 
-- f 侧：OpenMP 并行 FFT 批（上游 datamuxer corner turn 已有 OpenMP 先例，线程数取 OMP_NUM_THREADS）。
-- x 侧：基线循环并行化（基线间无依赖，embarrassingly parallel；注意 XMAC 工作区按线程私有化）。
-- 顺序：P2 进程级先行（隔离简单、可跨节点），P3 是进程内补充，两者不互斥。
+性能剖析（fxcorr/test/p3/README.md，4 站 61s batch，测试机 8 核）：f 侧热点 = 条纹旋转（apply/apply_dit）> FFT > 写盘 > unpack；x 侧 = 读 .sp fread 与 XMAC 大致对半（4MHz/4096 配置，nChan 放大后 XMAC 占 ~90%）。基线耗时 f 7.8s/站、x 7.2s。
+
+**f 侧：Mode 副本 + 连续段分块 + 块序归约**（fxcorrcommon 零改动）：
+
+- 每 fftloop 的块循环（≤ numbufferedffts 块）按连续段分给 T 个线程，每线程一个 Mode 副本（同 config/datastream 构造参数，工作缓冲独立分配）。每块 process(i, b) 的输入独立（unpackedarrays 槽 + interpolator 只读 + FFTW plan 并发 new-array execute 线程安全）、输出 fftoutputs[j][subloop] 槽独立 → 并行计算结果与串行逐位一致。
+- 归约按块序：副本 fftoutputs 槽拷回主 Mode（writeSpectra 零改动）+ autocorrelations/weights/pcalresults/kurtosis 累积按块序累加进主 Mode。连续段分块保证全局累积序列 = 串行块序 → 结果逐位一致（浮点加法不可交换，块序必须保）。
+- 旁路（writeSpectra / pcaltext 累积 / STA / autocorr 批次 / zeroAutocorrelations）全部串行作用于归约后的主 Mode，节奏与 V2 一致。
+
+**x 侧：基线循环并行 + scratch 线程私有化**：
+
+- xmacBatch 基线循环（xmac.cpp:288）、uvshiftAndAverage 的 freq×baseline 循环（xmac.cpp:469-476）、accumulateWeights 基线循环并行化；基线间写区独立（threadcrosscorrs 按 getThreadResultBaselineOffset 布局、baselineweight/subintresults 独立条目），无数据竞态。
+- 共享 scratch（conjbuf / pulsarscratchspace / rotator）改为按线程数的多副本，并行区内按 omp_get_thread_num() 取用；每基线运算序列与串行一致 → 逐位一致。
+- 结果偏移：基线循环内以 per-(f, x) 预计算的基线偏移表替代顺序累加 resultindex（threadcrosscorrs 布局不变，populateResultLengths 语义照旧）。
+
+**线程数与默认行为**：线程数取 OMP_NUM_THREADS，未设 = 1（启动时 omp_set_num_threads(1)）——默认串行，V2 回归不破对拍。构建：configure.ac 加 AC_OPENMP、src/Makefile.am 用 OPENMP_CXXFLAGS。
+
+**线程安全前置（审计结论）**：Configuration/Model 解析后只读共享 ✓；FFTW new-array execute 线程安全、plan 创建在构造期串行 ✓；Mode/XmacEngine 的写状态（工作缓冲/累积数组）以上述副本/私有化方案隔离，不改 fxcorrcommon 的 Mode 内部结构。
+
+**验证**：OMP_NUM_THREADS=N 与未设（串行）SWIN cmp_swin.py 全等（f/x 两侧）+ 加速比测试（8 站 nChan 32768 放大场景，fxcorr/test/p3/）。
+
+### 实施记录（2026-09-15）
+
+**x 侧**：xmacBatch 重构为 used (freq, xmac-pass) 对预收集（baseoffset 照原 resultindex 步进重放，含 localfreqindex<0 不占位）→ `#pragma omp parallel for` 基线循环；uvshiftAndAverage 主循环 collapse(2)；accumulateWeights 基线循环最外层（循环交换后每基线累加序列不变）；conjbuf/pulsarscratchspace/chanfreqs/rotator/rotated/argument 改 [nthreads] 副本（omp_get_thread_num 取用，串行时索引 0）；shifterrorcount atomic；main 开头 OMP_NUM_THREADS 未设 = omp_set_num_threads(1)。对拍：串行回归 580/580 全等（4 站 61s batch）、OMP_NUM_THREADS=4 与串行 580/580 逐位全等；4 线程 1.76×、8 线程 2.09×（4MHz/4096 配置读盘主导，接近 Amdahl 上限）。
+
+**f 侧**：Mode 副本 + 每 subint 一个并行区（连续段分块 process，主线程 t==0 块序归约，worker 各拷各段槽、副本清零与主线程写盘并行）。fxcorrcommon 仅 mode.h 加 7 个归约接口（getFreqsWrite/setDataWeight/addWeight/addPcal/getKurtosisProducts1/2/addKurtosisProducts），Mode::process 零改动。踩坑：① 初版每 fftloop 一个并行区，fork/join 开销吃光收益（gdb 采样 gomp_barrier 主导、user 6×串行）——改每 subint 一个并行区 + barrier 协调；② AC_OPENMP([CXX]) 探测的是 C 编译器（输出 "gcc option"）——须 AC_LANG_PUSH([C++]) 包裹；③ SWIN 追加语义使重跑对拍必须清 vis 目录（3 次运行 = 3×580 条）。对拍：串行全链路 580/580 全等、OMP_NUM_THREADS=4 全链路 580/580 逐位全等。4MHz/4096 配置加速有限（写盘 ~40% 串行，Amdahl 上限低），加速比以放大场景为准（fxcorr/test/p3/README.md）。
+
+**放大场景加速比**（8 站 28 基线 + nChan 32768、61s batch，SWIN 2088 条；对拍：4/8 线程全链路 2088/2088 逐位全等）：
+
+| 侧 | 串行 | OMP 4 | OMP 8 | 受限因素 |
+|---|---|---|---|---|
+| f（每站） | 8.8s | 4.1s（2.15×） | 4.0s（2.2×，见顶） | 读 122MB + 写 2GB .sp 串行 I/O 主导 |
+| x | 30.0s | 13.3s（2.26×） | 10.3s（2.92×） | 读 7.8GB .sp 串行 fread + uvshift 串行段；user 37.8s 含 spin 浪费（active 默认；OMP_WAIT_POLICY=passive 降 user 到 30.7 但 wall 11.0 不改善——futex 唤醒开销抵消） |
+
+结论：正确性全达标（默认串行回归 + 多线程逐位全等）；加速比受串行 I/O 限制（f ~2.2×、x ~2.9×），并行计算部分本身的提速由 user 时间印证（f 4 线程 user 14.4 ≈ 2×7.4 计算并行 + spin）。进一步提速需异步写盘/预读（超出 P3 范围，留待有真实观测数据量需求时评估）。
 
 ---
 
@@ -500,7 +527,7 @@ x 侧支持 .input PULSAR BINNING + pulsar 配置文件，出 .b 文件（SCRUNC
 
 ---
 
-## P5：网络输入 / 数据流化
+## P5：网络输入 / 数据流化（✂ 2026-09-15 V3 定案：不做）
 
 ### 动机分类
 
@@ -519,6 +546,7 @@ f（与 fxcorr-sim）支持网络流输入（VDIF over UDP），固定时长 bat
 - datareader 加网络源抽象（上游 vdifmux 有网络输入先例，可参考其 socket 层）。
 - 丢包统计与重传策略；batch 收齐校验后触发处理。
 - 排最后：依赖真实采集环境联调，属新能力而非迁移补齐。
+- **定案（2026-09-15）**：不做，留到 scalebox 阶段——真实采集环境联调依赖编排层，届时再评估（上游 vdifnetwork.cpp 现成实现可参照）。
 
 ---
 
@@ -848,4 +876,4 @@ fxcorr 现状差距：locate 对修正起点 < batch 起点只做 `framesin=0` �
 ## 相关
 
 - 优先级与验收总览：v2-plan.md 第 5/6 节
-- 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（子集目录与合并约定，12 节）、**P7（autocorr.bin 增 crosspol 段与 header 字段，5.3 节）**、**P8（新增 beam.bin 数据类型 D14 与 5.5 节，上游无对照格式自定）**
+- 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（已取消，无变更）、**P7（autocorr.bin 增 crosspol 段与 header 字段，5.3 节）**、**P8（新增 beam.bin 数据类型 D14 与 5.5 节，上游无对照格式自定）**

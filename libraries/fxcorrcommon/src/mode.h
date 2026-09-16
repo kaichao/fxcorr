@@ -196,6 +196,46 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   */
   inline const cf32* getConjugatedFreqs(int outputband, int subloopindex) const { return conjfftoutputs[outputband][subloopindex]; }
 
+ // ---- P3 reduction interfaces (fxcorr-f block-parallel replica reduction) ----
+ // The primary Mode accumulates the replicas' per-block outputs in block
+ // order; callers must not use these to reorder floating point operations.
+
+ /** Writable FFT output slot (reduction copies a replica's slot here). */
+  inline cf32* getFreqsWrite(int outputband, int subloopindex) { return fftoutputs[outputband][subloopindex]; }
+
+ /** Sets the per-slot data weight (reduction copies a replica's slot value here). */
+  inline void setDataWeight(int outputband, int subloopindex, f32 w)
+  {
+    if(perbandweights)
+      perbandweights[subloopindex][outputband] = w;
+    else
+      dataweight[subloopindex] = w;
+  }
+
+ /** Accumulates a replica's band weight into this Mode's weight. */
+  inline void addWeight(bool crosspol, int outputband, f32 w) { weights[(crosspol)?1:0][outputband] += w; }
+
+ /** Accumulates a replica's raw pcal tone accumulation into this Mode's. */
+  inline void addPcal(int outputband, int tone, cf32 v)
+  {
+    pcalresults[outputband][tone].re += v.re;
+    pcalresults[outputband][tone].im += v.im;
+  }
+
+ /** Raw kurtosis products (s1/s2 accumulation) of a replica, for reduction. */
+  inline const f32* getKurtosisProducts1(int outputband) const { return s1[outputband]; }
+  inline const f32* getKurtosisProducts2(int outputband) const { return s2[outputband]; }
+
+ /** Accumulates a replica's kurtosis products into this Mode's. */
+  inline void addKurtosisProducts(int outputband, const f32 *s1src, const f32 *s2src, int nchan)
+  {
+    for(int k=0;k<nchan;k++)
+    {
+      s1[outputband][k] += s1src[k];
+      s2[outputband][k] += s2src[k];
+    }
+  }
+
  /**
   * Returns the estimated number of bytes used by the Mode
   * @return Estimated memory size of the Mode (bytes)

@@ -45,6 +45,17 @@ if test "x$enable_ipp" = xno; then
 fi
 PKG_CHECK_MODULES(IPP, ipp, [AC_DEFINE([HAVE_IPP], 1, [1=has IPP])], ipp_enabled=0)
 AC_SUBST(ipp_enabled)
+dnl IPP headers are not on the default include path and libfxcorrcommon.a
+dnl contains IPP calls: both the header path and the link flags must travel
+dnl with the .pc file for downstream packages
+IPP_PC_CFLAGS=""
+IPP_PC_LIBS=""
+if test ${ipp_enabled} = 1; then
+	IPP_PC_CFLAGS="${IPP_CFLAGS}"
+	IPP_PC_LIBS="${IPP_LIBS}"
+fi
+AC_SUBST(IPP_PC_CFLAGS)
+AC_SUBST(IPP_PC_LIBS)
 dnl **********************************************************
 
 AC_CHECK_LIB(pthread, pthread_create,,[AC_MSG_ERROR("need libpthread")])

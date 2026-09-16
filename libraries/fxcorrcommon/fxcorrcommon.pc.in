@@ -7,5 +7,5 @@ Name: fxcorrcommon
 Description: shared non-MPI correlator core split from mpifxcorr (station- and baseline-based processing)
 Requires: difxmessage mark5access vdifio codifio
 Version: @PACKAGE_VERSION@
-Libs: -L${libdir} -lfxcorrcommon
-Cflags: -I${includedir}
+Libs: -L${libdir} -lfxcorrcommon @IPP_PC_LIBS@
+Cflags: -I${includedir} @IPP_PC_CFLAGS@

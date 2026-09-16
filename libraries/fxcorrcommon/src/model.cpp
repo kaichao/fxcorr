@@ -163,7 +163,7 @@ Model::~Model()
     delete [] scantable;
   }
   if(maxrate)
-    delete maxrate;
+    delete [] maxrate;	// new double[numstations] in readStationData (upstream latent: mpifxcorr never destructs its Model)
 }
 
 void Model::updateClock(int antennaindex, int order, double * deltaclock)

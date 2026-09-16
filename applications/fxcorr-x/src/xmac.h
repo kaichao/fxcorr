@@ -9,6 +9,7 @@
 #include <fxcorrcommon/polyco.h>
 
 #include "spreader.h"
+#include "ompcompat.h"
 
 /**
  * @class XmacEngine
@@ -76,17 +77,18 @@ private:
 	cf32 *threadcrosscorrs;
 	f32 ****baselineweight;	// [freqtablelength][corebinloop][numbaselines][numpolproducts]
 	f32 ***baselineshiftdecorr; // [freqtablelength][numbaselines][numphasecentres], only if >1 phase centres
-	cf32 *conjbuf;		// scratch for vis2 conjugation
+	int nthreads;		// omp_get_max_threads() at construction (P3)
+	cf32 **conjbuf;		// scratch for vis2 conjugation, [nthreads] private copies
 	// pulsar scratchspace (core.cpp:407-453, 1940-2064)
 	s32 ***bins;		// [numbufferedffts][freqtablelength][freqchannels], only used freqs allocated
-	cf32 *pulsarscratchspace;	// cf32[max xmacstridelength]
+	cf32 **pulsarscratchspace;	// cf32[max xmacstridelength], [nthreads] private copies
 	cf32 *******pulsaraccumspace; // [freq][xmacstride][baseline][1 source][polproduct][bin][chan], scrunch only
-	// multi phase centre scratchspace (core.cpp:416-433)
+	// multi phase centre scratchspace (core.cpp:416-433), [nthreads] private copies
 	int maxchan, maxrotatestrideplussteplength;
-	f64 *chanfreqs;
-	cf32 *rotator;
-	cf32 *rotated;
-	f32 *argument;
+	f64 **chanfreqs;
+	cf32 **rotator;
+	cf32 **rotated;
+	f32 **argument;
 	int shifterrorcount;
 };
 

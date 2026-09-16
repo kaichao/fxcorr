@@ -51,16 +51,16 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 
 ## 5. 算法改进清单（2026-09-13 调整：V2 = 串行算法迁移，并行/流式挪 V3）
 
-每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。定位修正：V2 只做 mpifxcorr **串行算法**的迁移与完善——原 P2/P3（并行化）与 P5（流式新能力）挪 V3（README 的 V3 = 模块级 OpenMP / 按需 GPU），P4 符合串行迁移标准保留；2026-09-13 完整审查 mpifxcorr 后新增 P6-P11。排序依据：先补齐数据链路完整性（P0/P1），再科学功能（P4、P6-P8 按改动量），再监控消息（P9）、输入格式（P10）、reader 细节（P11）。
+每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。定位修正：V2 只做 mpifxcorr **串行算法**的迁移与完善——原 P2/P3（并行化）与 P5（流式新能力）挪 V3（README 的 V3 = 模块级 OpenMP / 按需 GPU；V3 定案 2026-09-15：P2 取消、P3 实施为唯一实现项、P5 不做，见 algo-plan 各节与 v3-plan.md），P4 符合串行迁移标准保留；2026-09-13 完整审查 mpifxcorr 后新增 P6-P11。排序依据：先补齐数据链路完整性（P0/P1），再科学功能（P4、P6-P8 按改动量），再监控消息（P9）、输入格式（P10）、reader 细节（P11）。
 
 | 优先级 | 改进项 | 动机分类 | 一句话说明 |
 |---|---|---|---|
 | P0 | `PCAL_*.pcal` 文件生成 | 功能未迁移 | ✅ 2026-09-13（f 按 intTime 聚合 tone 写实验级文本，追加幂等；单 batch 与 mpifxcorr 基准逐字节对拍通过，多 batch 追加/重跑幂等验证通过） |
 | P1 | difxmessage 状态/STA 消息 | 功能未迁移 + 环境变化 | ✅ 2026-09-13（fxcorrcommon 增 difxmonitor 封装；f = datastream/core 角色发 Starting/Diagnostic/STA，x = manager 角色发 Starting/Running/Ending/Done；host 组播与 mpifxcorr 基准逐字段对拍通过，container 落盘 meta/difxmsg/ 与组播字节一致、重跑幂等） |
-| P2 | 多 x 子集并行 | 串行环境新变化 | ⤴ V3（2026-09-13 挪出）：进程级分片属并行化阶段；编排侧按 README 归 scalebox 仓库 |
-| P3 | 多线程（f/x 进程内并行） | 串行环境新变化 | ⤴ V3（2026-09-13 挪出）：即 V3 定义的模块级 OpenMP |
+| P2 | 多 x 子集并行 | 串行环境新变化 | ✂ 2026-09-15 取消（V3 定案）：并行维度改为时间片 batch（scalebox 编排多 batch 并发）；同实验 batch 串行（路线 B），实验级文件无并发点；详见 algo-plan P2 节 |
+| P3 | 多线程（f/x 进程内并行） | 串行环境新变化 | ⤴ V3（2026-09-13 挪出）：即 V3 定义的模块级 OpenMP；V3 唯一实现项（2026-09-15 定案），设计见 algo-plan P3 节 |
 | P4 | zoom band → 多相位中心 → 脉冲星 binning | 功能未迁移 | 主体在 x 侧（zoom 另需 f 侧 autocorr.bin 补段），按改动量排序；详细设计见 algo-plan.md。P4a zoom ✅ 2026-09-13（对拍 12/12 全等、无 zoom 回归 6/6）；P4b 多相位中心 ✅ 2026-09-13（多源对拍 8/8 全等、单源回归 6/6，rotator/decorr 非平凡，见 fxcorr/test/mpc/README.md）；P4c 脉冲星 binning ✅ 2026-09-13（非 scrunch 对拍 14/14 全等、scrunch 对拍 6/6、无 pulsar 回归 6/6，见 fxcorr/test/pulsar/README.md） |
-| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） | ⤴ V3（2026-09-13 挪出）：流式新能力而非串行迁移；上游 vdifnetwork.cpp 现成实现可参照 |
+| P5 | 网络输入 / 数据流化 | 串行环境新变化（新能力） | ✂ 2026-09-15 不做（V3 定案）：留到 scalebox 阶段（真实采集环境联调依赖编排层）；上游 vdifnetwork.cpp 现成实现可参照 |
 | P6 | SwitchedPower（TCAL 噪声功率） | 功能未迁移 | ✅ 2026-09-13（f 侧 SwitchedPower 类（fxcorrcommon）+ SWITCHEDPOWER_* 落盘；前 2 个完整整秒窗与 mpifxcorr 逐位全等、SWIN 回归 6/6、无 tcal 回归 6/6，见 fxcorr/test/tcal/README.md） |
 | P7 | 交叉极化自相关（WRITE AUTOCORRS / maxproducts>2） | 功能未迁移 | ✅ 2026-09-13（Mode/Visibility 的 crosspol 路径随 fxcorrcommon 零改造就位，改动仅 f 的 autocorr.bin crosspol 段（v2 + flag）、x 的读段累加与 V1 拒绝删除；dual-pol 全链路跑通、单 pol + WRITE AUTOCORRS 对拍 6/6 全等、无 crosspol 回归 2/2、位序 BYTE-IDENTICAL；mpifxcorr 读 2 band 样本交织 VDIF 上游不可用，2 band 对拍以物理验证为准） |
 | P8 | 相位阵（phased array）频率域加权 | 功能未迁移 | ✅ 2026-09-13（x 侧 BeamEngine 波束加权求和（core.cpp:818-865）+ beam.bin 落盘（上游输出端全死代码，格式自定，data-spec 5.5/D14）；fxcorrcommon 仅补一行 getFPhasedArrayAccumulationNS getter；DWeight 0.5/0.5 与 1.0/0.0 两变体 50×4 窗口逐位 PASS、谱峰落位正确、不写 SWIN；无相位阵回归 6/6 全等） |

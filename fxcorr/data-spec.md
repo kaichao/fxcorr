@@ -30,7 +30,7 @@
 
 分布部署原则（V2 多节点预留；V1 单机同机无差别，不冲突）：
 
-- **计算本地化**：f/x 都在节点本地计算，充分利用本地 CPU——f 任务（batch×站）调度到该站 raw 数据所在节点；x 任务（batch×站组对）优先调度到输入谱数据所在节点。
+- **计算本地化**：f/x 都在节点本地计算，充分利用本地 CPU——f 任务（batch×站×datastream）调度到该站 raw 数据所在节点；x 任务（batch，全站全基线）优先调度到输入谱数据所在节点。
 - **共享存储主数据流**：配置与元数据（config/、batches/、meta/、product/）及跨 batch 追加的 SWIN（vis/）放共享存储，全部节点一致可见；大批量数据（raw/、fengine/）可放本地存储，目录逻辑集中、物理分布（每节点只持有自己写的部分，见第 2 节存储归属表）。
 - **网络/计算/存储权衡**：必要时以**重复计算**（同一数据各节点各算一份，省网络传输、费 CPU）或**网络传输**（拉数到计算节点，省 CPU、费网络）为调节手段，在三者复用上取平衡；实现不应做死"必须本地"或"必须共享"的假设。
 
@@ -58,7 +58,7 @@ project/                          # 项目根目录（可自定义）
 |---|---|---|
 | `config/` `batches/` `meta/` `product/` | 共享存储 | 配置、元数据、索引、产品；量小，全部节点须一致可见 |
 | `common/` | 共享存储 | 仿真公共信号（fxcorr-sim common 一次生成、各站 station 任务只读；≥16× 单站 2bit 数据量，见 11 节）；batch 的全部 station 完成后可删（生命周期同 fengine/，见 12 节） |
-| `vis/` | 共享存储 | SWIN 跨 batch 追加、difx2fits 直读；多 x 子集并行时按 subset 子目录分写（第 12 节） |
+| `vis/` | 共享存储 | SWIN 跨 batch 追加、difx2fits 直读（追加保序前提：同实验 batch 串行，见第 12 节） |
 | `beam/` | 共享存储 | 相位阵波束频谱，按 batch 组织；下游波束消费者直读 |
 | `raw/` | 本地存储 | TB 级原始基带；各站数据在各记录节点 |
 | `fengine/` | 本地存储 | 各站 f 输出在计算节点；目录逻辑集中、物理分布（每节点只持有自己写的站） |
@@ -77,7 +77,7 @@ project/                          # 项目根目录（可自定义）
 | D5 | 标记文件 | `*.flag` | 前处理 | 文本 | KB | 可选，数据标记 |
 | D6 | 延迟模型 | `*.im` | 前处理 | 文本/二进制 | MB 级 | 延迟/uvw 多项式（被 .calc 引用） |
 | D7 | 原始基带数据 | `raw/<station>/` | 观测记录 | VDIF/Mark5B/Mark6 等 | **TB 级** | 各台站原始采样数据 |
-| D8 | 频域谱数据 | `fengine/<batch_id>/<station>/band_XX.sp` | fxcorr-f | 二进制（.sp） | 较大 | Station-based 结果：延迟对齐、条纹旋转、小数采样校正、FFT 后的复数频谱 |
+| D8 | 频域谱数据 | `fengine/<batch_id>/<station>/ds_<N>/band_XX.sp` | fxcorr-f | 二进制（.sp） | 较大 | Station-based 结果：延迟对齐、条纹旋转、小数采样校正、FFT 后的复数频谱；N = 站内 datastream 序号 |
 | D9 | 批量元数据 | `batch.json` | 编排脚本（make_testdata.sh / run_batch.sh，一次写全） | JSON | KB | 每个批量的描述信息；三工具只读 |
 | D10 | 可见度数据 | `vis/<experiment>.difx/DIFX_*.s*.b*` | fxcorr-x | SWIN 二进制 | MB~GB | Baseline-based 结果，difx2fits/difx2mark4 直读 |
 | D11 | FITS 科学产品 | `*.FITS` | 后处理 | FITS-IDI | MB~GB | 天文标准格式 |
@@ -168,19 +168,27 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 fengine/
 ├── 60512_45000/                      # batch_id
 │   ├── STA1/
-│   │   ├── band_00.sp                # D8：recorded band 频谱
-│   │   ├── band_01.sp
-│   │   ├── ...
-│   │   ├── pcal.bin                  # 脉冲校准 tone（每 subint）
-│   │   └── autocorr.bin              # 自相关（每 subint，已频率平均）
+│   │   ├── ds_0/                     # 站内 datastream 序号（多 datastream 站
+│   │   │   │                         #   每记录线程一个，f 任务带 ds_index）
+│   │   │   ├── band_00.sp            # D8：recorded band 频谱
+│   │   │   ├── band_01.sp
+│   │   │   ├── ...
+│   │   │   ├── pcal.bin              # 脉冲校准 tone（每 subint）
+│   │   │   └── autocorr.bin          # 自相关（每 subint，已频率平均）
+│   │   └── ds_1/
+│   │       └── ...
 │   ├── STA2/
-│   │   └── ...
+│   │   └── ds_0/
+│   │       └── ...
 │   └── STA3/
-│       └── ...
+│       └── ds_0/
+│           └── ...
 ├── 60512_45030/
 │   └── ...
 └── ...
 ```
+
+单 datastream 站同样是 `ds_0/`（布局统一，无平铺特例）。f 任务 = (batch_id, station, ds_index)；`ds_index` 是站内 datastream 序号（0-based，按 .input datastream 序），fxcorr-x 按同一规则回读。
 
 **batch.json 示例**（D9，全字段单文件）：
 
@@ -191,7 +199,6 @@ fengine/
   "start_time": "2026-09-08T12:30:00",
   "duration_sec": 30.0,
   "stations": ["STA1", "STA2", "STA3"],
-  "station_groups": [["STA1", "STA2"], ["STA3"]],
   "baselines": ["STA1-STA2", "STA1-STA3", "STA2-STA3"],
   "config_file": "config/experiment.input",
   "calc_file": "config/experiment.calc",
@@ -213,7 +220,7 @@ fengine/
 
 - 时间与结构：`batch_id` / `start_mjd` / `start_time` / `duration_sec` / `n_subints` / `subint_ns`——fxcorr-sim 与 fxcorr-f 读（start_mjd 建议写精确 repr，如 58948.291666666664）。
 - `config_file` / `calc_file` / `im_file`：三工具读 .input（config_file）；calc/im 为元数据。
-- `stations`：全部参与站。`station_groups`（可选）：空间切分组，缺省 = 全部站一组 = 全基线；任务集推导见第 6 节。
+- `stations`：全部参与站（x 任务 = 全站全基线，任务集推导见第 6 节）。
 - `baselines` / `integration_sec` / `n_channels` / `polarizations` / `difx_dir`：可见度输出元数据，均可由 .input 提前推导（baselines = 全部基线组合，polarizations 由 BASELINE TABLE 定）；fxcorr-x 读 `difx_dir` 作元数据，实际输出目录以 .input 的 OUTPUT FILENAME 为准。
 - `status`：running / done / failed，编排脚本更新。
 
@@ -441,7 +448,7 @@ common/
 - 可按字符串排序即时间顺序
 - 同一批量在 `fengine/` 与 `vis/` 下使用相同 `batch_id`
 - batch 时长必须是 `intTime`（.input）的整数倍；batch 起点与 subint 边界对齐（第 12 节）
-- **空间维度不进 batch_id**（batch_id 只回答"哪个时间段"，排序语义不被破坏）：f 任务 = (batch_id, station)，x 任务 = (batch_id, 站组对)；任务集由调度器从 batch.json 的 `stations` / `station_groups` 推导（station_groups 缺省 = 全站一组 = 全基线；组对取三角部分含 (G,G) 组内）
+- **空间维度不进 batch_id**（batch_id 只回答"哪个时间段"，排序语义不被破坏）：f 任务 = (batch_id, station, ds_index)（多 datastream 站每记录线程一个，见 5.3），x 任务 = (batch_id)（全站全基线）；任务集由调度器从 batch.json 的 `stations` 与 .input 的 datastream 表推导（x 任务取全部基线）
 
 ---
 
@@ -581,7 +588,7 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
 - **fengine 覆盖**：重跑某 batch 时，fxcorr-f 覆盖写 `fengine/<batch_id>/` 下文件；fxcorr-x 以 batch.json 的 `status=done` 判定是否需要重跑。
 - **batch duration 选择**：硬约束 = intTime 整数倍 + 起点 subint 边界（上文）+ batch_id 秒唯一（时长 ≥1s）。之上权衡：① **调度并行度**——batch 是并行/调度单元（scalebox task，编排外置 V2+），batch 数越多多节点并行越好；② **内存**——x 侧 .sp 整 batch 常驻（V1），duration × 站数 × D8 数据率须在节点内存内；③ **重试成本**——失败重跑整个 batch（V1 无 batch 内回滚）；④ **吞吐 vs 延迟**——启动开销（配置读入、目录、SWIN 头）摊销想大，首个结果的可见延迟与 fengine/ 存储峰值想小。**大 duration 不利**：x 侧内存线性涨（OOM 风险）、失败重算面大、并行度下降（batch 少 → 节点闲置）、端到端延迟高、fengine/ 中间数据峰值大（D8 ≈ 16×D7，见 11 节）。
 - **站间时间同步**：per-station 串行架构下站间不靠 MPI 屏障同步，同步信息全在数据时间戳（VDIF 帧 epoch/帧号、.sp header 的 scan/sec/ns）+ .im/.calc 的时钟与几何延迟模型；fxcorr-f 的粗延迟（采样级移位）+ 条纹旋转/小数采样即"把两站拉到同一时刻"。站间残余延迟误差 Δτ 的后果按量级分档：**< 1 采样** → 被小数采样校正吸收；**1 采样～亚 subint** → 带宽 smearing 去相关（幅度 ×sinc(Δτ·Δν)，4MHz 带宽 1 采样误差即 -36%）+ 跨频相位斜坡 2πΔf·Δτ；**帧级（4ms）** → 两站乘不同时刻信号，完全去相关、weight 崩；**subint 级** → .sp 时间戳错位，错位相乘、静默错数据。注意：fxcorr-x 按 .sp header 时间对齐、**不校验站间一致性**（站间错位不报错、静默产出低质量数据，与 mpifxcorr 行为一致）；真实观测的站钟漂移靠 .im 时钟多项式补偿，模型不准的残余误差随时间演化。
-- **多 x 子集并行（V3，原 V2 P2 已挪出）**：x 任务按站组对切分并行时，各子集写独立子目录 `vis/<experiment>.difx/<subset_id>/`（SWIN 文件名规则不变），difx2fits 前合并到同一目录。V1 单子集（全基线一个任务）无此问题。
+- **并行模型（V3，2026-09-15 定案）**：并行维度只有时间——batch 即并行/调度单元（多 batch 并发由 scalebox 编排承担，编排外置不在本项目）；无空间切分（原 V2 P2 基线子集方案已取消，见 algo-plan P2 节）。**同实验 batch 串行约定（路线 B）**：同一实验的 batch 按时间序串行处理，实验级共享文件（PCAL_* 文本读改写、SWITCHEDPOWER_* 追加、SWIN 跨 batch 追加）不存在并发写点，无需加锁；同实验多 batch 并行（积压追赶场景）属 scalebox 编排层职责，届时再评估这些文件的并发语义。
 - **work/**：临时文件（如中间缓冲），进程结束后可安全清理，不进 git。
 
 ---

@@ -18,6 +18,7 @@
 #include "xmac.h"
 #include "integrate.h"
 #include "beamengine.h"
+#include "ompcompat.h"
 
 using namespace std;
 
@@ -88,6 +89,13 @@ int main(int argc, char **argv)
 		cerr << "usage: fxcorr-x <batch_id> [workdir]" << endl
 		     << "  env: FXCORR_WORKDIR (default .), overridden by the workdir argument" << endl;
 		return EXIT_FAILURE;
+	}
+	// P3 (algo-plan.md): thread count from OMP_NUM_THREADS; unset = serial
+	// (V2 behaviour unchanged).  Must run before any OpenMP parallel region.
+	{
+		const char *env = getenv("OMP_NUM_THREADS");
+		if(env == 0 || env[0] == '\0')
+			omp_set_num_threads(1);
 	}
 	string batchid = argv[1];
 	string workdir = ".";
@@ -193,7 +201,16 @@ int main(int argc, char **argv)
 	for(int ds=0;ds<numdatastreams;ds++)
 	{
 		string station = config.getDStationName(configindex, ds);
-		string sdir = workdir + "/fengine/" + batchid + "/" + station;
+		// fengine layout: ds_<N>/ subdirectory, N = station-local datastream
+		// index (data-spec 5.3; multi-datastream stations from fxcorr-f's
+		// ds_index parameter)
+		int dswithinstation = 0;
+		for(int d=0;d<ds;d++)
+		{
+			if(config.getDStationName(configindex, d) == station)
+				dswithinstation++;
+		}
+		string sdir = workdir + "/fengine/" + batchid + "/" + station + "/ds_" + to_string(dswithinstation);
 		int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
 		int ntotalbands = config.getDNumTotalBands(configindex, ds);
 		readers[ds].resize(ntotalbands);

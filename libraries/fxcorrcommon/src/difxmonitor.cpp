@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
 

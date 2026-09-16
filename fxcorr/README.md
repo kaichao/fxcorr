@@ -64,7 +64,7 @@ vex2difx / difxcalc     （实验级，一次）
 |---|---|---|
 | **A. 科学算法** | unpack → delay/fringe → FFT → XMAC → accumulation → calibration/output | **必须迁移**（fxcorr-f：unpack→FFT；fxcorr-x：XMAC→积分→SWIN 写盘） |
 | **B. 算法辅助功能** | PCAL、autocorr、cross-pol、TCAL、zoom、MPC、pulsar、kurtosis、phased-array 等 | **必须迁移**（V2 算法改进清单 P0-P11，已全部完成，状态见 v2-plan.md 第 5 节） |
-| **C. MPI/运行时机制** | core × baseline process grid、MPI send/recv、manager、datastream process、MPI barrier 等 | **不直接迁移**——由 (batch, station) / (batch, 站组对) 任务模型 + 目录接口 + bash 编排替代 |
+| **C. MPI/运行时机制** | core × baseline process grid、MPI send/recv、manager、datastream process、MPI barrier 等 | **不直接迁移**——由 (batch, station) / (batch) 任务模型 + 目录接口 + bash 编排替代 |
 
 ### 3.2 Station / Baseline 拆分
 
@@ -175,7 +175,7 @@ raw data
 |------|------|
 | V1 | 两程序串行 + 目录接口 + bash 跑通单 batch |
 | V2 | 容器化封装（模块镜像）+ 镜像集成测试 + V1 遗留算法改进；scalebox 编排与分片参数化放其他仓库 |
-| V3 | 并行化（多 x 子集进程级 + 模块级 OpenMP，P2/P3）+ 网络输入/数据流化（P5）；按需 GPU |
+| V3 | 模块级 OpenMP（P3）；按需 GPU |
 | 可选 | 输出与 difx2fits 更好衔接 |
 
 ---
