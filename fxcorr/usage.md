@@ -116,7 +116,7 @@ fxcorr-f <batch_id> <station> [workdir] [ds_index]
 | `DIFX_BINARY_GROUP` / `DIFX_BINARY_PORT` | 未设 | STA 二进制组播目标；未设时 STA 静默 |
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态/STA 降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
 | `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：块级并行线程数（Mode 副本分块并行，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
-| `FXCORR_LOGLEVEL` | 未设（`info`） | stderr 诊断详略，取 `error`/`warn`/`info`/`verbose`/`debug`（无法识别时报错一行并回落 `info`）。`info` 出错误、告警与 `GAPCHECK summary` 等单行小结；`verbose` 追加逐条 gap/filler/boundary 明细（boundary 上限 40 条）。只影响输出，不影响产物 |
+| `FXCORR_LOGLEVEL` | 未设（`info`） | 诊断输出详略，取 `error`/`warn`/`info`/`verbose`/`debug`（无法识别时报错一行并回落 `info`）。**管住 f/x 的全部输出**：工具自己的打印（`FXLOG` 宏）与 fxcorrcommon 里上游代码的 `Alert` 流（`cinfo`/`cverbose`/`cdebug`，配置加载阶段约 85 行）。`info` 出错误、告警、单行小结（`GAPCHECK summary`）与配置加载进度（约 21 行）；`verbose` 追加逐条 gap/filler/boundary 明细（boundary 上限 40 条）；`warn` 及以下只剩错误与告警。只影响输出，不影响产物 |
 
 输入输出：
 

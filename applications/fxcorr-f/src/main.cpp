@@ -17,6 +17,7 @@
 #include "datareader.h"
 #include "fenginewriter.h"
 #include "pcaltextwriter.h"
+#include "log.h"
 #include "ompcompat.h"
 
 using namespace std;
@@ -279,6 +280,11 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-f: batch.json missing required fields" << endl;
 		return EXIT_FAILURE;
 	}
+
+	// FXCORR_LOGLEVEL has to be in force before the configuration is loaded:
+	// fxcorrcommon reports the whole parsing pass through the Alert streams
+	// (see log.h), which is most of what the tool otherwise prints.
+	fxApplyAlertLevel();
 
 	// parse .input (non-MPI constructor)
 	Configuration config((workdir + "/" + inputfile).c_str(), 0);

@@ -18,6 +18,7 @@
 #include "xmac.h"
 #include "integrate.h"
 #include "beamengine.h"
+#include "log.h"
 #include "ompcompat.h"
 
 using namespace std;
@@ -129,6 +130,11 @@ int main(int argc, char **argv)
 	}
 	if(!extractJsonString(json, "difx_dir", &difxdir))
 		difxdir = "vis/" + batchid + ".difx";
+
+	// FXCORR_LOGLEVEL has to be in force before the configuration is loaded:
+	// fxcorrcommon reports the whole parsing pass through the Alert streams
+	// (see log.h), which is most of what the tool otherwise prints.
+	fxApplyAlertLevel();
 
 	// parse .input (non-MPI constructor)
 	Configuration config((workdir + "/" + inputfile).c_str(), 0);
@@ -323,7 +329,7 @@ int main(int argc, char **argv)
 			}
 			beam.processSubint(s, scan, expectedsec, expectedns);
 		}
-		cout << "fxcorr-x: batch " << batchid << " complete, " << nsubints << " subints of beam output written" << endl;
+		FXLOG(FXLOG_INFO) << "fxcorr-x: batch " << batchid << " complete, " << nsubints << " subints of beam output written" << endl;
 		for(int ds=0;ds<numdatastreams;ds++)
 			for(size_t band=0;band<readers[ds].size();band++)
 				delete readers[ds][band];
@@ -457,7 +463,7 @@ int main(int argc, char **argv)
 			integrationswritten++;
 	}
 
-	cout << "fxcorr-x: batch " << batchid << " complete, " << nsubints << " subints, " << integrationswritten << " integrations written" << endl;
+	FXLOG(FXLOG_INFO) << "fxcorr-x: batch " << batchid << " complete, " << nsubints << " subints, " << integrationswritten << " integrations written" << endl;
 
 	for(int ds=0;ds<numdatastreams;ds++)
 		for(size_t band=0;band<readers[ds].size();band++)
