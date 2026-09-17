@@ -16,12 +16,18 @@
  *        Visibility::writeSWIN pcal section (visibility.cpp:989-1051) and
  *        header (visibility.cpp:107-136).  See algo-plan.md P0.
  *
+ * One file per station, shared by that station's datastreams (upstream
+ * visibility.cpp:120-122); the datastream is carried by the 4th field of each
+ * data line, so jobs writing the same station never clash as long as they
+ * only ever replace their own (datastream, timestamp) line.
+ *
  * Per-subint tones (Mode::getPcal after finalisepcal) are accumulated in
  * subint order -- same summation order as Core::copyPCalTones
  * (core.cpp:1131-1153), so the f32 results are bit-identical to upstream.
- * Every intTime boundary the accumulated line is appended idempotently
- * (existing lines at or after this timestamp are dropped, so rerunning a
- * batch does not duplicate lines).
+ * Every intTime boundary the accumulated line is appended idempotently:
+ * the previous line for this datastream at this timestamp is dropped while
+ * every other line (other intTimes, other batches, sibling datastreams) is
+ * kept, so rerunning a batch does not duplicate lines.
  */
 class PcalTextWriter {
 public:

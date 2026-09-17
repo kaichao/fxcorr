@@ -8,6 +8,39 @@
 
 using namespace std;
 
+namespace {
+
+// Frame number of frame i of a raw VDIF buffer: word 1 of the VDIF header,
+// low 24 bits (word layout per vdifio's vdif_header, not the vlbi.org spec).
+inline long long vdifFrameNumber(const u8 *buffer, int i, int framebytes)
+{
+	const u8 *p = buffer + (long long)i*framebytes;
+	u32 w1 = (u32)p[4] | ((u32)p[5] << 8) | ((u32)p[6] << 16) | ((u32)p[7] << 24);
+	return (long long)(w1 & 0xFFFFFF);
+}
+
+// Is frame i a filler -- a frame the recorder wrote where a recording
+// interruption left it without data?  Two shapes occur: the VDIF invalid bit
+// (word 0 bit 31) set, or a completely zero header (which is what t25362's BA
+// thread 2 uses -- seconds 0, frame number 0, frame length 0, so the frame
+// also claims a length of 0 bytes).  Such a frame occupies its bytes in the
+// file but no slot on the time axis: after a run of them the frame number
+// picks up from the last real frame plus the frames actually lost, not plus
+// the filler count.  Counting them as missing frames instead (which the
+// frame-number step alone cannot distinguish) inflates the correction by
+// roughly a whole second's worth of frames per run boundary.
+inline bool vdifIsFiller(const u8 *buffer, int i, int framebytes)
+{
+	const u8 *p = buffer + (long long)i*framebytes;
+	u32 w0 = (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+	if(w0 & 0x80000000u)
+		return true;	// invalid bit set
+	u32 w1 = (u32)p[4] | ((u32)p[5] << 8) | ((u32)p[6] << 16) | ((u32)p[7] << 24);
+	return (w0 & 0x3FFFFFFFu) == 0 && (w1 & 0xFFFFFFu) == 0;
+}
+
+}
+
 DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
                        long long batchstartsec, int batchstartns) :
 	config(conf), model(mdl), configindex(confindex), dsindex(ds),
@@ -20,7 +53,14 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 	currentscan(0), batchstartabsns(0), lastfileoffset(0), anchorbytes(0),
 	muxer(0),
 	readbuffer(0), readbuffersize(0),
-	headerbytes(0), bytesperns(0.0)
+	headerbytes(0), bytesperns(0.0),
+	gapchecksubints(0), gapcheckframes(0), gapcheckgaps(0),
+	gapcheckmissing(0), gapcheckfillers(0), gapchecklastfr(0),
+	gapcheckcrossmin(0), gapcheckcrossmax(0), gapcheckcrosscount(0),
+	gapcheckcrossprinted(0), gapchecklastoff(0), gapchecklastvalid(false),
+	gapshiftbytes(0), gapcountedthrough(0), gapcountedvalid(false),
+	fillershiftbytes(0), fillercountedthrough(0), fillercountedvalid(false),
+	gapbuffer(0)
 {
 	batchstartabsns = batchstartsec*1000000000LL + (long long)batchstartns;
 
@@ -103,6 +143,48 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 		payloadbytes = config->getFramePayloadBytes(configindex, dsindex);
 		framespersecond = config->getFramesPerSecond(configindex, dsindex);	// nthreads==1 here
 		framebytes = config->getFrameBytes(configindex, dsindex);
+
+		// The file does not have to begin on the batch's first second: the
+		// frame counters of the recording systems are not in phase, so a file
+		// can start partway into a second (t25362's BA starts 1269 frames in,
+		// while S6 starts on the boundary).  Every later read position is
+		// computed relative to the file's own start, so that distance has to
+		// be absorbed here -- the same thing the other kinds do with the first
+		// frame's timestamp (vdiffile.cpp:429-444; upstream learns it from
+		// vdifmux's output, which is why it never had to care).
+		{
+			ifstream hf(datafilenames[0].c_str(), ios::in | ios::binary);
+			unsigned char h[8];
+			if(!hf.is_open() || !hf.read(reinterpret_cast<char *>(h), 8))
+			{
+				cerr << "DataReader: cannot read the first frame of " << datafilenames[0] << endl;
+				exit(EXIT_FAILURE);
+			}
+			u32 w0 = (u32)h[0] | ((u32)h[1] << 8) | ((u32)h[2] << 16) | ((u32)h[3] << 24);
+			u32 w1 = (u32)h[4] | ((u32)h[5] << 8) | ((u32)h[6] << 16) | ((u32)h[7] << 24);
+			long long sec = (long long)(w0 & 0x3FFFFFFF);	// word 0: seconds
+			long long fr = (long long)(w1 & 0xFFFFFF);	// word 1: frame number
+			// VDIF carries no day, so the second is taken as a time of day;
+			// batchstartabsns is in the same (StartSeconds-based) frame
+			long long filefirstabsns = (long long)(sec % 86400)*1000000000LL
+				+ (long long)((double)fr*1.0e9/framespersecond + 0.5);
+			long long delta = batchstartabsns - filefirstabsns;
+			// Normalise across midnight; a file may also start *after* the
+			// batch's first second (t25362's BA starts 79.3 ms late), in which
+			// case the batch head simply has no data: the anchor is negative
+			// and those subints fail to seek and come back invalid.
+			if(delta > 43200LL*1000000000LL)
+				delta -= 86400LL*1000000000LL;
+			else if(delta < -43200LL*1000000000LL)
+				delta += 86400LL*1000000000LL;
+			// floor(), not a plain cast: for a negative delta (the file starts
+			// after the batch does) truncation rounds *up*, which puts the
+			// whole anchor one frame off -- one frame at 16 kfps is 62.5 us,
+			// and 62.5 us is exactly 100 ns short of an integer number of
+			// 5 MHz pcal cycles, which flips every tone of odd order (the
+			// "alternate tones inverted" signature seen on t25362's BA).
+			anchorbytes = (long long)floor((double)delta*framespersecond/1.0e9 + 0.5)*(long long)framebytes;
+		}
 	}
 	else if(kind == KIND_MUXEDVDIF)
 	{
@@ -149,8 +231,12 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 			cerr << "DataReader: file " << datafilenames[0] << " starts after the batch start" << endl;
 			exit(EXIT_FAILURE);
 		}
+		// floor(), not a plain cast: rounding must stay "nearest" if the
+		// non-negative guarantee from the check above is ever relaxed (see the
+		// VDIF branch, where a negative distance is legitimate and truncation
+		// would round the anchor up by a whole frame)
 		anchorbytes = fileSummary.firstFrameOffset
-			+ (long long)((double)(batchstartabsns - filefirstabsns)*framespersecond/1.0e9 + 0.5)*framebytes;
+			+ (long long)floor((double)(batchstartabsns - filefirstabsns)*framespersecond/1.0e9 + 0.5)*framebytes;
 
 		// fix buffer: one subint plus two frames of margin for interlopers
 		readbuffersize = sendbytes + 2*framebytes;
@@ -198,7 +284,7 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 			cerr << "DataReader: file " << datafilenames[0] << " starts after the batch start" << endl;
 			exit(EXIT_FAILURE);
 		}
-		anchorbytes += (long long)((double)(batchstartabsns - filefirstabsns)*framespersecond/1.0e9 + 0.5)*framebytes;
+		anchorbytes += (long long)floor((double)(batchstartabsns - filefirstabsns)*framespersecond/1.0e9 + 0.5)*framebytes;
 	}
 	else	// KIND_LBA
 	{
@@ -261,7 +347,7 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 		// no framing: time<->byte mapping is the pure payload rate (upstream
 		// base DataStream::calculateControlParams); bytesperns is the common
 		// per-sample value set above
-		anchorbytes = (long long)((double)(batchstartabsns - filefirstabsns)*bytesperns + 0.5);
+		anchorbytes = (long long)floor((double)(batchstartabsns - filefirstabsns)*bytesperns + 0.5);
 	}
 }
 
@@ -273,6 +359,325 @@ DataReader::~DataReader()
 		delete muxer;
 	if(readbuffer)
 		delete [] readbuffer;
+	if(gapbuffer)
+		delete [] gapbuffer;
+
+	// P12 step 1: report the frame-number continuity statistics (observation
+	// only; see checkFrameContinuity)
+	if(gapchecksubints > 0)
+	{
+		cerr << "GAPCHECK summary: buffers " << gapchecksubints
+		     << " frames " << gapcheckframes
+		     << " discontinuities " << gapcheckgaps
+		     << " missing frames " << gapcheckmissing
+		     << " filler frames " << gapcheckfillers
+		     << " boundaries " << gapcheckcrosscount;
+		if(gapcheckcrosscount > 0)
+			cerr << " step range " << gapcheckcrossmin << ".." << gapcheckcrossmax;
+		cerr << endl;
+	}
+}
+
+// P12 step 1: frame-number continuity check.
+//
+// The VDIF header carries a frame number in word 1 ([23:0]; word layout per
+// vdifio's vdif_header, not the vlbi.org spec).  Within one file the frame
+// number advances by one per frame, so any other step means the file is
+// missing frames there -- the byte stream is then shorter than the time axis
+// and every later subint is read from the wrong position (the locate()
+// arithmetic assumes a strictly linear time<->byte mapping).
+//
+// Filler frames are the other way round and are skipped here: they occupy
+// bytes in the file but no slot on the time axis, so they do not break the
+// frame-number chain, and what they say about the read position has the
+// opposite sign to a gap.
+//
+// P12 step 2a turns both observations into corrections -- gapshiftbytes and
+// fillershiftbytes, applied in readSubint -- and step 2b (shiftFrameGaps)
+// rebuilds this buffer's frame grid.  A file with neither follows exactly the
+// old code path.
+void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffset)
+{
+	if(kind != KIND_VDIF || framebytes < 8 || framespersecond < 1)
+		return;
+
+	int nframes = bytes/framebytes;
+	gapchecksubints++;
+	// Both gap lists describe the CURRENT buffer only and are rebuilt from
+	// scratch on every scan: the holes are refilled by this subint's own read,
+	// and a stale entry would invalidate blocks of every later subint.
+	gapinvalid.clear();
+	if(nframes < 1)
+		return;
+
+	// The frame counter restarts once per second, so all steps below are
+	// taken modulo frames-per-second.
+	long long fps = (long long)framespersecond;
+	long long firstany = -1, lastany = -1;
+	long long missing = 0;
+
+	// Gaps are looked for strictly *inside* this buffer.  A step between the
+	// end of one buffer and the start of the next is not a gap: the read
+	// position advances by the subint length while the frame counter advances
+	// by whole frames, so the two drift by a fraction of a frame per subint
+	// and the boundary step comes out as overlap or a small skip of its own
+	// accord (synthetic test data with no gaps at all shows +-4 frame steps
+	// there).  Only an interior discontinuity moves data inside the buffer.
+	long long pfr = -1;
+	long long fillernew = 0;
+	bool reorder = false;
+
+	// A buffer whose filler made fillershiftbytes grow also moved the next
+	// read position forward by that growth, so the next buffer starts past a
+	// stretch that was never scanned.  Those frames still have to be counted
+	// (nothing else will ever look at them) but they cannot be assumed to be
+	// filler -- the stretch is "the filler this buffer found" plus ordinary
+	// data, and counting the data as filler overshoots the correction, which
+	// moves the following read even further and runs away.  So read the
+	// stretch and count what is really there.  It is bounded by the filler run
+	// that caused it (hundreds of frames in t25362, i.e. a few hundred kB),
+	// and happens only when a run is found.
+	if(fillercountedvalid && readoffset > fillercountedthrough)
+		fillernew += countFillerRange(fillercountedthrough, readoffset);
+
+	for(int i=0;i<nframes;i++)
+	{
+		if(vdifIsFiller(buffer, i, framebytes))
+		{
+			// Filler: bytes in the file, no slot on the time axis.  It
+			// neither breaks the frame-number chain (the real frames either
+			// side of a run are consecutive apart from the frames actually
+			// lost) nor counts as missing, but everything after it sits
+			// further along the file than the time axis says -- that is
+			// fillershiftbytes, applied in readSubint with the opposite sign
+			// to a real gap.  Counted once per filler frame, by file position
+			// (the corrected read position stays monotonic), because
+			// consecutive subint reads overlap by their guard margin.
+			long long fpos = readoffset + (long long)i*framebytes;
+			if(!fillercountedvalid || fpos >= fillercountedthrough)
+				fillernew++;	// frames in the guard overlap were counted before
+			reorder = true;
+			continue;	// not part of the frame-number chain
+		}
+		long long fr = vdifFrameNumber(buffer, i, framebytes);
+		gapcheckframes++;
+		if(firstany < 0)
+			firstany = fr;
+		lastany = fr;
+
+		if(pfr >= 0)
+		{
+			long long step = (fr - pfr + fps) % fps;
+			if(step != 1)
+			{
+				long long m = (step == 0) ? 0 : step - 1;
+				if(m > 0)
+				{
+					reorder = true;
+					// the read-position correction counts every missing frame
+					// exactly once.  Successive subints keep seeing the same
+					// gap while the corrected read position catches up with
+					// it, and the frame number wraps once a second, so a gap
+					// is identified by where it sits in the file: the offset
+					// of the frame right after it.  readoffset is the
+					// corrected position actually read from, which stays
+					// monotonic despite the corrections.
+					long long gapend = readoffset + (long long)i*framebytes;
+					if(!gapcountedvalid || gapend > gapcountedthrough)
+					{
+						missing += m;
+						gapcountedthrough = gapend;
+						gapcountedvalid = true;
+						gapcheckgaps++;
+						cerr << "GAPCHECK buffer " << gapchecksubints << " frame " << i
+						     << ": frameno " << pfr << " -> " << fr
+						     << " (step " << step << ", missing " << m << ")" << endl;
+					}
+				}
+			}
+		}
+		pfr = fr;
+	}
+
+	// P12 step 2a: account for the newly found missing frames and filler
+	// bytes.  A gap makes the file shorter than the time axis (later reads are
+	// too far along, so subtract); filler makes it longer (later reads are too
+	// early, so add).  Both are whole frames, so frame alignment is preserved.
+	if(missing > 0)
+	{
+		gapcheckmissing += missing;
+		gapshiftbytes += missing*(long long)framebytes;
+	}
+	if(fillernew > 0)
+	{
+		gapcheckfillers += fillernew;
+		fillershiftbytes += fillernew*(long long)framebytes;
+	}
+
+	// watermark for the next buffer: the furthest whole frame this scan
+	// covered, so the guard overlap between consecutive reads is not counted
+	// twice and the distance to the next read position is a whole number of
+	// frames
+	{
+		long long end = readoffset + (long long)(bytes/framebytes)*framebytes;
+		if(!fillercountedvalid || end > fillercountedthrough)
+		{
+			fillercountedthrough = end;
+			fillercountedvalid = true;
+		}
+	}
+
+	// P12 step 2b: put the frames where the time axis says they belong
+	if(reorder)
+		shiftFrameGaps(buffer, nframes);
+
+	// Boundary to the next buffer.  The step across buffers is not a gap by
+	// itself -- one subint spans 81.92 frames here, so consecutive buffers
+	// overlap or skip by a frame depending on the frame/sample alignment --
+	// so only the range of observed steps is recorded for later analysis.
+	if(gapchecklastvalid)
+	{
+		long long step = firstany - gapchecklastfr;
+		if(gapcheckcrosscount == 0 || step < gapcheckcrossmin)
+			gapcheckcrossmin = step;
+		if(gapcheckcrosscount == 0 || step > gapcheckcrossmax)
+			gapcheckcrossmax = step;
+		gapcheckcrosscount++;
+		// one subint spans 81.92 frames and each read carries a frame-aligned
+		// guard overlap, so a healthy boundary steps by -1..1; anything
+		// further off means the read position itself moved, which is worth
+		// seeing explicitly
+		if((step < -3 || step > 3) && gapcheckcrossprinted < 40)
+		{
+			gapcheckcrossprinted++;
+			long long offdelta = lastfileoffset - gapchecklastoff;
+			cerr << "GAPCHECK boundary " << gapcheckcrosscount << ": prev end frameno "
+			     << gapchecklastfr << " -> first " << firstany << " (step " << step
+			     << "; read offsets " << gapchecklastoff << " -> " << lastfileoffset
+			     << ", advance " << offdelta << " bytes = "
+			     << (framebytes ? offdelta/framebytes : 0) << " frames)" << endl;
+		}
+	}
+	gapchecklastfr = lastany;
+	gapchecklastoff = lastfileoffset;
+	gapchecklastvalid = true;
+
+	// TEMPORARY DIAGNOSTIC (FXCORR_GAPDEBUG): per-buffer read position and
+	// correction, to see when the correction takes effect relative to the
+	// buffer that found the gap.  Remove before committing.
+	if(getenv("FXCORR_GAPDEBUG"))
+		cerr << "GAPDBG " << gapchecksubints << " read " << readoffset
+		     << " gapshift " << gapshiftbytes
+		     << " fillershift " << fillershiftbytes << " n " << nframes
+		     << " first " << firstany << " last " << lastany
+		     << " miss " << missing << endl;
+}
+
+// P12 step 2b: rebuild the subint's frame grid inside the buffer.
+//
+// mark5_unpack_with_offset walks the buffer by sample offset and therefore
+// assumes position i is the i-th frame of the subint, but the file hands over
+// frames in file order, which is not time order:
+//
+//   * a gap leaves the frames behind it sitting too early -- they have to move
+//     up by the number of frames missing there, and the vacated slots (whose
+//     data lives in the file but belongs to another subint's time) are
+//     recorded as invalid;
+//   * filler frames have no time slot at all -- they are dropped and the
+//     frames behind them move up to close the space.
+//
+// Both are just "walk the source frames and place each where its frame number
+// says", so the two cases are handled by one pass: filler is skipped and a
+// jump in the frame number advances the destination by the jump instead of by
+// one.  Slots past the last placed frame are invalid too -- their data is not
+// in this buffer (it belongs to a later subint, which reads it from the file
+// itself).  Without gaps or filler the destination always runs one ahead of
+// the source, so the buffer comes back unchanged.
+void DataReader::shiftFrameGaps(u8 *buffer, int nframes)
+{
+	if(!gapbuffer)
+		gapbuffer = new u8[sendbytes];
+	memset(gapbuffer, 0, (size_t)sendbytes);
+
+	gapinvalid.clear();
+	long long fps = (long long)framespersecond;
+	int dst = 0;
+	long long prevfr = -1;
+
+	for(int src=0; src<nframes && dst<nframes; src++)
+	{
+		if(vdifIsFiller(buffer, src, framebytes))
+			continue;	// no time slot: drop it, later frames move up
+
+		long long fr = vdifFrameNumber(buffer, src, framebytes);
+		if(prevfr >= 0)
+		{
+			long long miss = (fr - prevfr - 1 + fps) % fps;
+			if(miss > 0)
+			{
+				long long hole = miss;
+				if(hole > nframes - dst)
+					hole = nframes - dst;
+				if(hole > 0)
+					gapinvalid.push_back(make_pair(dst, dst + (int)hole));
+				dst += (int)miss;
+				if(dst >= nframes)
+					break;
+			}
+		}
+		memcpy(gapbuffer + (long long)dst*framebytes,
+		       buffer + (long long)src*framebytes, (size_t)framebytes);
+		dst++;
+		prevfr = fr;
+	}
+
+	// everything the source did not fill (a dropped filler run at the end, or
+	// frames pushed past the buffer) holds no data
+	if(dst < nframes)
+		gapinvalid.push_back(make_pair(dst, nframes));
+
+	memcpy(buffer, gapbuffer, (size_t)nframes*framebytes);
+}
+
+// Count the filler frames in a file range the read position skipped over.
+//
+// Called with the stretch between where the last scan stopped and where the
+// current buffer starts, which is non-empty only after a filler run moved the
+// read position forward.  Those frames have to be counted -- the scan will
+// never see them again -- but reading the stretch is the only honest way:
+// assuming it is all filler overshoots by the data frames that sit after the
+// run, and an overshoot moves the next read position further still, so the
+// error grows on every run.
+long long DataReader::countFillerRange(long long start, long long end)
+{
+	if(end <= start || framebytes < 8)
+		return 0;
+	long long nframes = (end - start)/(long long)framebytes;
+	if(nframes < 1)
+		return 0;
+
+	const long long nbuf = 512;
+	u8 *buf = new u8[(size_t)(nbuf*(long long)framebytes)];
+	long long counted = 0;
+	long long pos = 0;
+	while(pos < nframes)
+	{
+		long long want = (nframes - pos > nbuf) ? nbuf : (nframes - pos);
+		input.clear();
+		input.seekg(start + pos*(long long)framebytes, ios::beg);
+		if(!input.good())
+			break;
+		input.read(reinterpret_cast<char *>(buf), (streamsize)(want*(long long)framebytes));
+		int gotframes = (int)(input.gcount()/(streamsize)framebytes);
+		if(gotframes <= 0)
+			break;
+		for(int i=0;i<gotframes;i++)
+			if(vdifIsFiller(buf, i, framebytes))
+				counted++;
+		pos += gotframes;
+	}
+	delete [] buf;
+	return counted;
 }
 
 void DataReader::openFile(int fileindex)
@@ -445,6 +850,37 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 		*ns = 0;
 		return 0;
 	}
+
+	// P12 step 2a: locate() maps time onto file bytes linearly, which only
+	// holds while the file's frame sequence is one frame per time slot.  Both
+	// kinds of damage seen so far shift the map, in opposite directions:
+	//
+	//   * a frame missing from the file leaves it shorter than the time axis,
+	//     so a later subint's position points too far along -- subtract;
+	//   * a filler frame has bytes but no time slot, leaving the file longer
+	//     than the time axis, so a later position points too early -- add.
+	//
+	// Both shifts are whole frames, so frame alignment is preserved.
+	//
+	// A negative result is NOT clamped: it means the subint asks for data
+	// before the file's first frame (the file can start after the batch does
+	// -- see anchorbytes), and letting the seek fail makes the subint come
+	// back invalid, which is the honest answer.
+	fileoffset += fillershiftbytes - gapshiftbytes;
+	if(fileoffset < 0)
+	{
+		// TEMPORARY DIAGNOSTIC (FXCORR_GAPDEBUG); remove before committing
+		if(getenv("FXCORR_GAPDEBUG"))
+			cerr << "GAPDBG-INVALID t=" << offsetsec << "." << offsetns
+			     << " pos " << fileoffset << " gapshift " << gapshiftbytes
+			     << " fillershift " << fillershiftbytes << endl;
+		// the subint asks for data before the file's first frame (the file
+		// starts after the batch does, see anchorbytes): there is nothing to
+		// read here, so the subint is invalid
+		*sec = Mode::INVALID_SUBINT;
+		*ns = 0;
+		return 0;
+	}
 	lastfileoffset = fileoffset;
 
 	if(kind == KIND_MUXEDVDIF)
@@ -539,7 +975,11 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 		return 0;
 	}
 	input.read(reinterpret_cast<char *>(buffer), sendbytes);
-	return input.gcount();
+	int got = input.gcount();
+	// lastfileoffset (the corrected position actually read from) is what maps
+	// a frame index onto the file, so that is what identifies a gap
+	checkFrameContinuity(buffer, got, lastfileoffset);	// P12: gaps and their fix
+	return got;
 }
 
 void DataReader::fillValidFlags(s32 *flags, int validbytes) const
@@ -555,5 +995,25 @@ void DataReader::fillValidFlags(s32 *flags, int validbytes) const
 	{
 		if((long long)(i-lastcount)*blockbytes < validbytes)
 			flags[i/FLAGS_PER_INT] |= 1<<(i%FLAGS_PER_INT);
+	}
+
+	// P12 step 2b: the frames a gap swallowed carry no data, so the blocks
+	// covering the holes left by shiftFrameGaps are cleared.  Block i is
+	// unpacked at payload byte (i-lastcount)*blockbytes of the buffer
+	// (mode.cpp:677-679 turns the block index into a sample offset, and the
+	// sample the buffer starts at carries the delay-realignment skip), while
+	// frame f contributes its payload at payload byte f*payloadbytes -- the
+	// two are in the same coordinate system, so the blocks to clear are the
+	// ones overlapping the hole.
+	if(blockbytes > 0 && payloadbytes > 0)
+	{
+		for(size_t g=0; g<gapinvalid.size(); g++)
+		{
+			long long f0 = gapinvalid[g].first, f1 = gapinvalid[g].second;
+			long long b0 = (f0*(long long)payloadbytes)/blockbytes + lastcount;
+			long long b1 = (f1*(long long)payloadbytes + blockbytes - 1)/blockbytes + lastcount;
+			for(long long b=b0; b<b1 && b<blockspersend; b++)
+				flags[b/FLAGS_PER_INT] &= ~(1<<(b%FLAGS_PER_INT));
+		}
 	}
 }

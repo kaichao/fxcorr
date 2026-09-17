@@ -14,6 +14,35 @@ using namespace std;
 // Line and header format byte-compatible with mpifxcorr
 // Visibility::writeSWIN (visibility.cpp:989-1051) and
 // Visibility::initialisePcalFiles (visibility.cpp:107-136).
+//
+// One file per station, shared by that station's datastreams (upstream
+// comments this explicitly in visibility.cpp:120-122): the datastream is
+// distinguished by the 4th field of each data line, not by the filename.
+// Each fxcorr-f job owns exactly one datastream, so the rerun-idempotent
+// rewrite below must key on (datastream, timestamp) or the datastreams
+// would delete each other's lines.
+
+namespace {
+
+// one data line of the PCAL file: <station> <mjd> <intTime> <dsindex> ...
+struct PcalLine
+{
+	double mjd;
+	int ds;
+	std::string text;
+};
+
+// sort by timestamp, then by datastream so the per-intTime block of lines is
+// stable across reruns (%17.11f round-trips to the same double for all
+// datastreams of one intTime, so plain double comparison groups them)
+bool pcalline_less(const PcalLine &a, const PcalLine &b)
+{
+	if(a.mjd != b.mjd)
+		return a.mjd < b.mjd;
+	return a.ds < b.ds;
+}
+
+}	// namespace
 
 PcalTextWriter::PcalTextWriter(const string &pcaldir, Configuration *conf, int confindex, int ds) :
 	config(conf), configindex(confindex), dsindex(ds), nrecordedbands(0), maxtones(0)
@@ -162,16 +191,17 @@ void PcalTextWriter::flush(long long timestartsec, int timestartns)
 	}
 
 	// Idempotent append (algo-plan.md P0 strategy A): keep the comment header
-	// and every line except one at this intTime's own timestamp (rerunning a
-	// batch rewrites each intTime line in place, leaving all other intTimes
-	// and batches intact), then rewrite all data lines sorted by MJD so the
-	// file stays in timestamp order even after a middle-batch rerun.  One
-	// line per intTime, so timestamp equality is the exact replacement key;
-	// tolerance absorbs the %17.11f -> strtod round-trip error (~1e-11 days)
-	// and is far below half an intTime.
+	// and every line except this datastream's line at this intTime (rerunning
+	// a batch rewrites each intTime line in place, leaving all other intTimes,
+	// all other batches and the sibling datastreams of this station intact),
+	// then rewrite all data lines sorted by (timestamp, datastream) so the
+	// file stays in timestamp order even after a middle-batch rerun.  There is
+	// one line per (datastream, intTime), so that pair is the exact
+	// replacement key; tolerance absorbs the %17.11f -> strtod round-trip
+	// error (~1e-11 days) and is far below half an intTime.
 	double tol = 1e-8;	// days ~= 0.86 ms
 	ostringstream header;
-	vector<pair<double,string> > datalines;
+	vector<PcalLine> datalines;
 	ifstream in(filepath.c_str());
 	if(in.is_open())
 	{
@@ -185,10 +215,16 @@ void PcalTextWriter::flush(long long timestartsec, int timestartns)
 				header << pline << "\n";
 				continue;
 			}
-			double oldmjd = 0.0;
-			if(sscanf(pline.c_str(), "%*s %lf", &oldmjd) == 1 && fabs(oldmjd - pcalmjd) < tol)
-				continue;	// same intTime: superseded by this rerun
-			datalines.push_back(make_pair(oldmjd, pline));
+			// fields: <station> <mjd> <intTime> <datastream> ...  a line that
+			// does not parse is kept as-is (never another job's replacement)
+			PcalLine old;
+			old.mjd = 0.0;
+			old.ds = -1;
+			if(sscanf(pline.c_str(), "%*s %lf %*f %d", &old.mjd, &old.ds) == 2
+			   && fabs(old.mjd - pcalmjd) < tol && old.ds == dsindex)
+				continue;	// same datastream, same intTime: superseded by this rerun
+			old.text = pline;
+			datalines.push_back(old);
 		}
 		in.close();
 	}
@@ -202,8 +238,12 @@ void PcalTextWriter::flush(long long timestartsec, int timestartns)
 		       << "# Start seconds = " << config->getStartSeconds() << "\n"
 		       << "# Telescope name = " << config->getDStationName(configindex, dsindex) << "\n";
 	}
-	datalines.push_back(make_pair(pcalmjd, line.str()));
-	sort(datalines.begin(), datalines.end());
+	PcalLine current;
+	current.mjd = pcalmjd;
+	current.ds = dsindex;
+	current.text = line.str();
+	datalines.push_back(current);
+	sort(datalines.begin(), datalines.end(), pcalline_less);
 
 	ofstream out(filepath.c_str(), ios::trunc);
 	if(!out.is_open())
@@ -212,8 +252,8 @@ void PcalTextWriter::flush(long long timestartsec, int timestartns)
 		exit(EXIT_FAILURE);
 	}
 	out << header.str();
-	for(vector<pair<double,string> >::const_iterator it = datalines.begin(); it != datalines.end(); ++it)
-		out << it->second << "\n";
+	for(vector<PcalLine>::const_iterator it = datalines.begin(); it != datalines.end(); ++it)
+		out << it->text << "\n";
 	out.close();
 
 	// reset the accumulators for the next intTime

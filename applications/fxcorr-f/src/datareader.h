@@ -3,6 +3,8 @@
 
 #include <fstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/model.h>
@@ -70,6 +72,27 @@ private:
 	bool locate(int scan, int offsetsec, int offsetns, int *sec, int *ns, long long *fileoffset);
 	void openFile(int fileindex);
 
+	// P12: frame-number continuity check on each freshly read buffer, in two
+	// halves.  checkFrameContinuity scans the frames *inside* this buffer only
+	// -- a step across a buffer boundary is normal alignment drift between the
+	// subint length and whole frames, not a gap (synthetic data without any
+	// gaps shows exactly that at the boundaries) -- and accumulates into
+	// gapshiftbytes / fillershiftbytes what the read position has to be
+	// corrected by; the frame-number jump across a run of filler frames is
+	// what the real gaps look like once the filler is skipped.  shiftFrameGaps
+	// then rebuilds the buffer's frame grid, so that buffer position i really
+	// is the i-th frame of the subint: frames behind a gap move forward, filler
+	// frames are dropped, and the slots left without data are recorded in
+	// gapinvalid (post-shift frame indices) for fillValidFlags.  A buffer with
+	// neither a gap nor filler is passed through untouched.
+	//
+	// VDIF only: the frame number lives in word 1 of the VDIF header in
+	// vdifio's word layout; muxed VDIF output frames are synthesised by the
+	// corner-turner and the other kinds have no such field.
+	void checkFrameContinuity(u8 *buffer, int bytes, long long readoffset);
+	void shiftFrameGaps(u8 *buffer, int nframes);
+	long long countFillerRange(long long start, long long end);
+
 	Configuration *config;
 	Model *model;
 	int configindex;
@@ -124,6 +147,51 @@ private:
 	long long headerbytes;		// bytes of ASCII header in front of the payload
 	double bytesperns;		// payload byte rate (upstream base DataStream
 					// bufferindex conversion; common to all kinds)
+
+	// P12 step 1 diagnostics (see checkFrameContinuity); lifetime totals,
+	// reported once in the destructor
+	long long gapchecksubints;	// buffers scanned
+	long long gapcheckframes;	// frames scanned
+	long long gapcheckgaps;		// frame-number discontinuities inside a buffer
+	long long gapcheckmissing;	// frames missing across those discontinuities
+	long long gapcheckfillers;	// filler (header-less zero) frames passed over
+	long long gapchecklastfr;	// last frame number seen in the previous buffer
+	long long gapcheckcrossmin;	// smallest frame-number step across a buffer boundary
+	long long gapcheckcrossmax;	// largest step across a buffer boundary
+	long long gapcheckcrosscount;	// buffer boundaries seen
+	long long gapcheckcrossprinted;	// anomalous boundaries reported so far
+	long long gapchecklastoff;	// file offset the previous buffer was read from
+	bool gapchecklastvalid;		// whether gapchecklastfr is set
+
+	// P12 step 2a: locate() maps time onto file bytes linearly, which only
+	// holds while the file's frame sequence is one frame per time slot.  Two
+	// kinds of damage break that and they pull in opposite directions:
+	//
+	//   * a real gap -- the file is missing frames, so it is *shorter* than
+	//     the time axis and every later read position is too far along by
+	//     exactly the bytes of the missing frames (gapshiftbytes);
+	//   * a filler run -- the recorder wrote header-less zero frames where a
+	//     recording interruption left no data (t25362's BA thread 2 has 1162
+	//     of them), so the file is *longer* than the time axis and every
+	//     later read position is too early by the filler bytes
+	//     (fillershiftbytes).
+	//
+	// Both are accumulated here, each frame counted once, and readSubint
+	// applies fillershiftbytes - gapshiftbytes.  Counting is deduplicated by
+	// where the frame sits in the file (the *corrected* position stays
+	// monotonic watch-to-watch even though it steps back when a correction
+	// grows), because consecutive subint reads overlap by their guard margin.
+	long long gapshiftbytes;
+	long long gapcountedthrough;
+	bool gapcountedvalid;
+	long long fillershiftbytes;
+	long long fillercountedthrough;
+	bool fillercountedvalid;
+
+	// P12 step 2b: holes left in the current buffer by shiftFrameGaps, as
+	// post-shift frame ranges for fillValidFlags
+	std::vector<std::pair<int,int> > gapinvalid;
+	u8 *gapbuffer;			// scratch for the shifted buffer (sendbytes)
 };
 
 #endif
