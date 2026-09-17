@@ -1,4 +1,5 @@
 #include "datareader.h"
+#include "log.h"
 
 #include <cmath>
 #include <cstring>
@@ -363,8 +364,10 @@ DataReader::~DataReader()
 		delete [] gapbuffer;
 
 	// P12 step 1: report the frame-number continuity statistics (observation
-	// only; see checkFrameContinuity)
-	if(gapchecksubints > 0)
+	// only; see checkFrameContinuity).  One line per run, and the only signal
+	// that a datastream had gaps or filler at all, so it sits at info while
+	// the per-event lines behind it sit at verbose.
+	if(gapchecksubints > 0 && fxLogLevel() >= FXLOG_INFO)
 	{
 		cerr << "GAPCHECK summary: buffers " << gapchecksubints
 		     << " frames " << gapcheckframes
@@ -489,7 +492,7 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 						gapcountedthrough = gapend;
 						gapcountedvalid = true;
 						gapcheckgaps++;
-						cerr << "GAPCHECK buffer " << gapchecksubints << " frame " << i
+						FXLOG(FXLOG_VERBOSE) << "GAPCHECK buffer " << gapchecksubints << " frame " << i
 						     << ": frameno " << pfr << " -> " << fr
 						     << " (step " << step << ", missing " << m << ")" << endl;
 					}
@@ -546,12 +549,13 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 		// one subint spans 81.92 frames and each read carries a frame-aligned
 		// guard overlap, so a healthy boundary steps by -1..1; anything
 		// further off means the read position itself moved, which is worth
-		// seeing explicitly
+		// seeing explicitly at verbose -- capped, since a datastream whose
+		// position jumps at every boundary would otherwise flood the log
 		if((step < -3 || step > 3) && gapcheckcrossprinted < 40)
 		{
 			gapcheckcrossprinted++;
 			long long offdelta = lastfileoffset - gapchecklastoff;
-			cerr << "GAPCHECK boundary " << gapcheckcrosscount << ": prev end frameno "
+			FXLOG(FXLOG_VERBOSE) << "GAPCHECK boundary " << gapcheckcrosscount << ": prev end frameno "
 			     << gapchecklastfr << " -> first " << firstany << " (step " << step
 			     << "; read offsets " << gapchecklastoff << " -> " << lastfileoffset
 			     << ", advance " << offdelta << " bytes = "
@@ -561,16 +565,6 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 	gapchecklastfr = lastany;
 	gapchecklastoff = lastfileoffset;
 	gapchecklastvalid = true;
-
-	// TEMPORARY DIAGNOSTIC (FXCORR_GAPDEBUG): per-buffer read position and
-	// correction, to see when the correction takes effect relative to the
-	// buffer that found the gap.  Remove before committing.
-	if(getenv("FXCORR_GAPDEBUG"))
-		cerr << "GAPDBG " << gapchecksubints << " read " << readoffset
-		     << " gapshift " << gapshiftbytes
-		     << " fillershift " << fillershiftbytes << " n " << nframes
-		     << " first " << firstany << " last " << lastany
-		     << " miss " << missing << endl;
 }
 
 // P12 step 2b: rebuild the subint's frame grid inside the buffer.
@@ -869,11 +863,6 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 	fileoffset += fillershiftbytes - gapshiftbytes;
 	if(fileoffset < 0)
 	{
-		// TEMPORARY DIAGNOSTIC (FXCORR_GAPDEBUG); remove before committing
-		if(getenv("FXCORR_GAPDEBUG"))
-			cerr << "GAPDBG-INVALID t=" << offsetsec << "." << offsetns
-			     << " pos " << fileoffset << " gapshift " << gapshiftbytes
-			     << " fillershift " << fillershiftbytes << endl;
 		// the subint asks for data before the file's first frame (the file
 		// starts after the batch does, see anchorbytes): there is nothing to
 		// read here, so the subint is invalid
