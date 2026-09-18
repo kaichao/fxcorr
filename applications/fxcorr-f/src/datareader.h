@@ -76,9 +76,10 @@ private:
 	// halves.  checkFrameContinuity scans the frames *inside* this buffer only
 	// -- a step across a buffer boundary is normal alignment drift between the
 	// subint length and whole frames, not a gap (synthetic data without any
-	// gaps shows exactly that at the boundaries) -- and accumulates into
-	// gapshiftbytes / fillershiftbytes what the read position has to be
-	// corrected by; the frame-number jump across a run of filler frames is
+	// gaps shows exactly that at the boundaries) -- and accumulates what the
+	// read position has to be corrected by: the gaps themselves (gapspan,
+	// applied through gapshiftAt) and the filler bytes (fillershiftbytes);
+	// the frame-number jump across a run of filler frames is
 	// what the real gaps look like once the filler is skipped.  shiftFrameGaps
 	// then rebuilds the buffer's frame grid, so that buffer position i really
 	// is the i-th frame of the subint: frames behind a gap move forward, filler
@@ -92,6 +93,15 @@ private:
 	void checkFrameContinuity(u8 *buffer, int bytes, long long readoffset);
 	void shiftFrameGaps(u8 *buffer, int nframes);
 	long long countFillerRange(long long start, long long end, long long chainfr, long long *gapsp, long long *lastfrp);
+
+	// frames missing before frame index t on the time axis, moving t forward
+	// past any gap it falls inside (see gapspan)
+	long long gapshiftAt(long long &t) const;
+
+	// P12 diagnostics: the correction the last subint was read with, and the
+	// slot shiftFrameGaps started it at (both reported by READPOS)
+	long long lastgapframes;
+	int lastshiftdst;
 
 	Configuration *config;
 	Model *model;
@@ -169,24 +179,40 @@ private:
 	//
 	//   * a real gap -- the file is missing frames, so it is *shorter* than
 	//     the time axis and every later read position is too far along by
-	//     exactly the bytes of the missing frames (gapshiftbytes);
+	//     exactly the bytes of the missing frames (gapspan / gapshiftAt);
 	//   * a filler run -- the recorder wrote header-less zero frames where a
 	//     recording interruption left no data (t25362's BA thread 2 has 1162
 	//     of them), so the file is *longer* than the time axis and every
 	//     later read position is too early by the filler bytes
 	//     (fillershiftbytes).
 	//
-	// Both are accumulated here, each frame counted once, and readSubint
-	// applies fillershiftbytes - gapshiftbytes.  Counting is deduplicated by
-	// where the frame sits in the file (the *corrected* position stays
-	// monotonic watch-to-watch even though it steps back when a correction
-	// grows), because consecutive subint reads overlap by their guard margin.
-	long long gapshiftbytes;
+	// readSubint applies fillershiftbytes minus what gapshiftAt() reports
+	// missing before this subint.  Counting is deduplicated by where the frame
+	// sits in the file (the *corrected* position stays monotonic watch-to-watch
+	// even though it steps back when a correction grows), because consecutive
+	// subint reads overlap by their guard margin.
 	long long gapcountedthrough;
 	bool gapcountedvalid;
 	long long fillershiftbytes;
 	long long fillercountedthrough;
 	bool fillercountedvalid;
+
+	// Where a gap sits decides whether it applies, which is a question about
+	// the time axis and not about which scan happened to notice it.  Gaps are
+	// recorded here as (offset of the frame *after* the gap, frames lost),
+	// ascending, and gapshiftAt() answers "how much is missing before time t"
+	// -- so a gap whose frames still lie ahead of t does not shorten this
+	// subint's read.  Applying one the moment it is seen is what made t25362's
+	// boundary subint read 51 frames early: its gap was noticed inside the
+	// previous subint's buffer, but sits on the time axis after that subint's
+	// end (fxcorr/test/gaps/run_boundary.sh reproduces it on synthetic data).
+	std::vector<std::pair<long long,long long> > gapspan;
+	long long lastframesin;		// the frame index locate() mapped the last
+					// subint onto: file position and time-axis slot
+					// coincide only until a gap turns up
+	int lastframens;		// in-second frame number of that slot, which
+					// is what the buffer's first frame has to be
+					// measured against (shiftFrameGaps)
 
 	// P12 step 2b: holes left in the current buffer by shiftFrameGaps, as
 	// post-shift frame ranges for fillValidFlags

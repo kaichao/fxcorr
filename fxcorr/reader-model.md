@@ -85,7 +85,7 @@ fxcorr-f 的改造可视为已完成（V1 全链路跑通、合成数据与 mpif
 |---|---|---|
 | 文件起点偏移 | 由帧时间戳自动获得 | 必须算 `anchorbytes`（首帧 (sec, frame number) → `floor(Δ×fps + 0.5) × framebytes`） |
 | 读到哪里了 | 数据自己说的 | `locate()` 线性换算 |
-| 中间缺帧 | 数据流层（`vdifmux`）在缺口处标 invalid 位 | `checkFrameContinuity` 检测 + `gapshiftbytes` 修正读取位置 + `shiftFrameGaps` 整帧后移 + `gapinvalid` 标无效 |
+| 中间缺帧 | 数据流层（`vdifmux`）在缺口处标 invalid 位 | `checkFrameContinuity` 检测 + `gapspan`/`gapshiftAt` 修正读取位置 + `shiftFrameGaps` 整帧后移 + `gapinvalid` 标无效 |
 | filler 帧 | 顺读时与普通帧一同流过（上游**无专门识别**；这类帧对 mpifxcorr 结果的实际影响**未实测**） | 必须单独识别（`vdifIsFiller`）、**方向与缺口相反**地修正、并从帧号链里跳过 |
 | 有效性 | 来自帧头（`unpack` 的 goodsamples） | 由位置推算（`fillValidFlags` 按块判界） |
 | 出错的表现 | 局部、可定位 | **整段静默错位**——读到了错误时间的数据，全部标为有效 |
@@ -114,7 +114,7 @@ mpifxcorr 的数据路径建立在三条假设上。它们在**顺序读模型�
   - **缺口**：文件中间直接缺帧，字节流**短**于时间轴，线性换算的位置**偏后**（t25362 的 BA 每个 ds 有 7–8 处、单处缺 1–64 帧，合计 144–148 帧／12 秒；S6 无中间缺口、仅部分 ds 在文件末尾少 1 帧）；
   - **filler**：记录系统写入帧头全零的帧占位，字节流**长**于时间轴，线性换算的位置**偏前**（t25362 的 BA ds_2 有 1162 帧 filler / 8 段）。
 - **定位读的后果**：两种偏移**持续累积**，之后读到的每一段都是错误位置的数据。
-- **显式解**：`gapshiftbytes` / `fillershiftbytes`，见缺陷 B 类与 C 类。
+- **显式解**：`gapspan`（按时间轴位置查询，`gapshiftAt`）/ `fillershiftbytes`，见缺陷 B 类与 C 类。
 
 ### 3.3 假设三：读到即有效
 
@@ -129,7 +129,7 @@ mpifxcorr 的数据路径建立在三条假设上。它们在**顺序读模型�
 
 > 如果数据不连续、文件起点不听话，这个式子还成立吗？
 
-答案是否定的地方，就是必须新增的显式修正量。三条假设对应的三个修正量（`anchorbytes` / `gapshiftbytes`+`fillershiftbytes` / `gapinvalid`）**都不是新算法**，而是把上游隐式承担的责任搬到调用方。
+答案是否定的地方，就是必须新增的显式修正量。三条假设对应的三个修正量（`anchorbytes` / `gapspan`+`fillershiftbytes` / `gapinvalid`）**都不是新算法**，而是把上游隐式承担的责任搬到调用方。
 
 配套的第二条教训：**合成数据全绿不等于真实数据能跑对**。`fxcorr/test/` 的 P0–P11 全部特性测试都用 fxcorr-sim 生成的理想数据，上述病态情况在 t25362 之前**从未被测试覆盖**。
 
@@ -163,7 +163,7 @@ mpifxcorr 的数据路径建立在三条假设上。它们在**顺序读模型�
 | **B2** | 缺口只在 buffer **内部**找——跨 buffer 的帧号步进是"读取位置按 subint 长度推进、帧号按帧长推进"的**正常漂移** | 跨 buffer 边界报出大量**假**缺口 | 合成无缺口数据实测 ±4 帧 | 已修 |
 | **B3** | 缺口去重键错误（用帧号——每秒回绕不可比；或用未修正位置——同一缺口在不同 buffer 里相差整数个 subint） | `missing frames` 虚增 3–4 倍 | 145 虚增到 536 | 已修 |
 | **B4** | `gapinvalid` 未按 subint 重建 | weight **全局塌陷**（缺口之后的所有 subint） | — | 已修 |
-| **B5** | `gapshiftbytes` 按"**已检测到**"而非"**读取位置之前**"累计 | **只有含缺口的积分** weight 偏，其余积分与基准一致在 7e-7 浮动内 | 积分 4 差 1.6e-3、积分 10 差 3.3e-3 | **未修** |
+| **B5** | 缺口按"**已检测到**"而非"**时间位置在读取点之前**"累计 | **只有含缺口的积分** weight 偏，其余积分与基准一致在 7e-7 浮动内 | 积分 4 差 1.6e-3、积分 10 差 3.3e-3 | 已修（2026-09-18，见 4.5） |
 
 **B3 的正解**：去重键用**修正后**的读取位置（`lastfileoffset + i*framebytes`）——它随缺口被计入而**单调**（即使修正量增大时会回退也仍单调可比）。
 
@@ -173,7 +173,7 @@ mpifxcorr 的数据路径建立在三条假设上。它们在**顺序读模型�
 
 C 类的核心语义：**filler 帧占文件字节、不占时间轴**。判据是段后帧号只跳过**真实丢失**的帧数，与 filler 帧数无关。t25362 的 BA ds_2 实测：段前帧号 4053、段后 4064（只缺 10 帧），而该段**本身有 81 帧**。识别**不需要额外元数据**——填充帧的帧头本身就是判据（invalid 位置位，或 word0/word1/word2 全零使 invalid 位=0、帧长度字段=0）。
 
-**方向不能反**：缺口让读取位置**减**（文件短），filler 让读取位置**加**（文件长）。`readSubint` 的修正是 `fileoffset += fillershiftbytes - gapshiftbytes`。
+**方向不能反**：缺口让读取位置**减**（文件短），filler 让读取位置**加**（文件长）。`readSubint` 的修正是 `fileoffset += fillershiftbytes - gapshiftAt(本 subint 的帧序号) × framebytes`。
 
 | 编号 | 病根 | 症状指纹 | 实测 | 状态 |
 |---|---|---|---|---|
@@ -189,7 +189,7 @@ C 类的核心语义：**filler 帧占文件字节、不占时间轴**。判据�
 **C5 的辨识要点**（极易误判）：`weight` 完全一致（都 1.0）而可见度**符号相反、数值无关**——`cmp_swin.py` 的 rel 分母被 `max(1.0,·)` 顶到 1，报出的是绝对差 3–5e-2，而信号幅度只有 ~7e-3。**别被"幅度均值比值 0.98"误导**，那只是两者都是同类噪声分布。覆盖形态是"**只有该 ds**，同站其他 ds 与另一站全部正常"。
 
 **C5/C6 的修复四处**（缺一不可）：
-1. 补扫增加帧号链，用与主循环**同一去重键**把 missing 计入同一份 `gapshiftbytes`；
+1. 补扫增加帧号链，用与主循环**同一去重键**把 missing 计入同一份缺口账（当时的 `gapshiftbytes`，现为 `gapspan`）；
 2. 补扫把区段末帧号回传，主循环用它作 `pfr` 初值——**接缝**正是另外两个缺口所在；
 3. **全 filler 的 buffer 不再把 `gapchecklastfr` 清成 -1**（长 filler 段跨整个 buffer，清链会让其后的缺口没有前驱可比）；
 4. 补扫结束后**把链推进到区段末帧**，否则链一保持不断，每个后续补扫都从同一旧帧号重新比较。
@@ -204,7 +204,7 @@ C 类的核心语义：**filler 帧占文件字节、不占时间轴**。判据�
 
 D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapinvalid` 解决"信不信"。两者坐标系必须一致——`fillValidFlags` 的块映射 `f*payloadbytes/blockbytes + lastcount` 与判界式 `(i-lastcount)*blockbytes < validbytes` 用的是同一个 `lastcount`（块↔帧换算系数 = `payloadbytes/blockbytes`，t25362 为 8000/512 = **15.625**）。
 
-### 4.5 未修：B5——缺口跨 subint 边界时修正超前
+### 4.5 B5——缺口跨 subint 边界时修正超前（2026-09-18 已修）
 
 **病根**：`gapshiftbytes` 记的是"**已检测到**的缺口总量"；而缺口在哪个 buffer 被**检测到**、与它的**时间位置**属于哪个 subint，是两回事。
 
@@ -221,12 +221,34 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 
 **自检判据**：`READPOS` 的 `firstfno` 应等于该 subint 起点的时间轴帧号（= `batchrel × fps` 的秒内余数，相邻 subint 差 `subint 时长 × fps`，t25362 为 81.92 帧取整）；跨界处会偏早"尚未到达的缺口字节数"。**对照同站另一个 ds 的同一 subint 是最快的方法**（两者的 `firstfno` 应相同或差 0–1 帧）。
 
-**修复方向**（两条独立修改，互为保险）：
+**修复（2026-09-18，两条，`applications/fxcorr-f/src/datareader.cpp`）**：
 
-1. **`gapshiftbytes` 按位置过滤**——只计入**读取位置之前**的缺口；`checkFrameContinuity` 判缺口时同时拿到缺口的时间轴帧号，据此过滤，跨界那部分不计入当前 subint。这一条修的是**读哪**（seek 位置）。
-2. **`dst` 由帧号的时间轴位置算出**——`dst = 帧号时间轴位置 − framesin`，而非假设 `buffer[0] = subint 起点`；落在 `[0, blockspersend)` 外的帧丢弃。这一条修的是**标哪**（valid flags），即使第 1 条有残差也不会标错块。
+1. **读取位置按缺口的时间轴位置过滤**——每个缺口记入 `gapspan`（**缺口后第一帧的文件位置** + 丢失帧数，去重键不变）；`readSubint` 用 `gapshiftAt(locate 给的帧序号)` 取"时间轴位置**早于本 subint** 的缺口帧数"，跨界那部分不计入。这一条修的是**读哪**（seek 位置）。
+   - 判据 `fxcorr/test/gaps/run_boundary.sh` 场景 A：缺口 [130,160) 跨 131.072 边界，修复前 subint 2 的 `firstfno` 读成 98（对照 128），修复后回到 128。
+2. **`dst` 由帧号算出**——`shiftFrameGaps` 的起始槽 = `(buffer 第一个数据帧的帧号 − locate 给的时间轴帧号) mod fps`（locate 侧新存 `lastframens`），不为 0 时把 `[0, dst)` 记入 `gapinvalid`。这一条修的是**标哪**（valid flags），覆盖"缺口把 subint 起点盖住、读取位置只能落到缺口之后"的情形——此时 buffer 内帧号**连续**，`reorder` 不会被置起，不按偏移判断就根本不会调用 `shiftFrameGaps`。
+   - 判据 `run_boundary.sh` 场景 B：缺口 [120,150) 盖住读取位置 128，修复后 subint 2 的前 86 块权重为 0（= 22 帧 × `blocks_per_send` ÷ 子带帧数）。
 
-**注意**：`gapchecksubints` 从 1 起计，而 `fileoffset < 0` 早退的 subint 不调用 `checkFrameContinuity`（t25362 前 19 个），因此 **.sp 索引 = buffer 编号 + 18**。起点的子数据若恰在 batch 起点则无此偏移。
+与 7.2 的关系：`gapshiftAt(t)` 把修正量写成以**时间**为自变量的函数，B5 因此不再是"要打补丁的地方"，而是这个定义的自然结果。
+
+**上面 t25362 的数字已由重跑定案（2026-09-18）**：「多减 51 帧」与「`firstfno` 4026 → 4098（差 72）」并不矛盾——前者是**文件字节位置**之差（536601856 − 536192224 = 409632 字节 = 51 帧），后者是**时间轴帧号**之差，中间隔着缺口 1、2 的 21 帧（51 + 21 = 72）。重跑实测：`gapshift` 由 578304 字节（72 帧，全量）降到 168672 字节（21 帧），`firstfno` 回到 4098。
+
+**注意**：`gapchecksubints` 从 1 起计，而 `fileoffset < 0` 早退的 subint 不调用 `checkFrameContinuity`（t25362 前 19 个），因此 **.sp 索引 = buffer 编号 + 19**（2026-09-18 实测订正：buffer 816 的 `gapinvalid` 块区间 `[593,765) ∪ [953,1109)` 正是 .sp 835 记录的 `valid_flags`，buffer 817 的 `[218,673) ∪ [687,1032)` 正是 .sp 836 的）。起点的子数据若恰在 batch 起点则无此偏移。
+
+### 4.6 未决：filler 时间槽的判定与 mpifxcorr 不同（对拍未归零的原因）
+
+B5 修好后 t25362 仍是 576 条差异。逐 ds 拆开看，积分 4/10 的差异**几乎全部来自 ds_2**（filler 那个 datastream）：
+
+| ds | 积分 4 的无效帧 | 积分 10 的无效帧 |
+|---|---|---|
+| ds_0/1/3/4/5/6/7 | 73–75 | 75 |
+| **ds_2** | **459** | **1135** |
+
+fxcorr 把 filler 帧**占用的时间槽**判为无效（那里确实没有真实数据），基准不判、weight 因此偏高。这是 C 类 filler 的语义差异，不是 B5。副作用：2.3 表里那条「filler 顺读时与普通帧一同流过（上游**无专门识别**；实际影响**未实测**）」——现在实测了，影响就是 weight。
+
+未决的两条出路：
+
+1. 认可「filler 时间槽无真实数据、应判无效」，改用 L1/L2 判据（`READPOS` 的 `firstfno` + `.sp` 的无效块落位）验收 t25362，不再要求 `cmp_swin.py` 全等；
+2. 或查 `mpifxcorr` 的 `VDIFDataStream` 为什么不做帧号连续性判定——2.1 节说"缺口的处理在流里（`vdifmux`）"，但那是 **muxed VDIF** 的路径；单线程 VDIF 文件走的是哪条、有没有等价的补 invalid 动作，**尚未核实**。
 
 ---
 
@@ -242,7 +264,8 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 |---|---|
 | A 类修复后 | 积分 0 的 w = 0.903898 对基准 0.903949（差 5e-5，边界取整残差；未修复时会差 0.4 量级） |
 | C 类修复后 | 积分 4、10 仍偏 → 归因 B5 |
-| **当前（B5 未修）** | **576 条差异**，全部在 BA 站：积分 0、4、10（各 192 条），即 bl 257 自相关、bl 258 BA-S6；其余 8 个积分与基准一致在 7e-7 浮动内，S6 站完全正常 |
+| **B5 未修时** | **576 条差异**，全部在 BA 站：积分 0、4、10（各 192 条），即 bl 257 自相关、bl 258 BA-S6；其余 8 个积分与基准一致在 7e-7 浮动内，S6 站完全正常 |
+| **B5 修复后（2026-09-18，重跑实测）** | 合成判据全绿、无缺口路径逐字节不变（见 7.4）；真实数据上 `firstfno` 与无效块落位都正确。**但对拍仍是 576 条**——条数不变而根因换了：积分 0 的 192 条是 5e-5 的边界取整残差，积分 4/10 的差异几乎全部来自 **ds_2**（459 / 1135 帧无效，其余 ds 只有 73–75 帧），即 fxcorr 把 filler 时间槽判无效、基准不判（见 4.6） |
 
 ### 5.2 测试资产覆盖
 
@@ -250,7 +273,7 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 |---|---|---|
 | 缺口（直接缺帧） | `fxcorr/test/gaps/` T2 形式（`FXSIM_GAPS` 无 `:f`） | 已覆盖，判据 = `missing frames` |
 | filler 占位 | `fxcorr/test/gaps/` T1 形式（`:f`） | 已覆盖，判据 = filler 计数 + 帧号范围 |
-| **缺口跨越 subint 边界** | 无 | **未覆盖**（见 7.5） |
+| **缺口跨越 subint 边界** | `fxcorr/test/gaps/run_boundary.sh` | 已覆盖（两个场景：跨边界不盖起点、盖住起点，判据见 7.5） |
 | 起点偏移（文件 ≠ batch 起点） | 无专门资产 | **未覆盖**（A1–A3 只在 t25362 上验证过） |
 | delay ≠ 0 | `fxcorr/test/p11/` | 已覆盖 |
 | 多格式 | `fxcorr/test/p10/` | 已覆盖 |
@@ -266,8 +289,9 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 | 层 | 看什么 | 能发现 |
 |---|---|---|
 | 计数 | `GAPCHECK summary`（`missing frames` / `filler frames`） | C1–C4、C6 类（计数错） |
-| 定位 | `READPOS` 的 `firstfno` 序列 | A、B5 类（位置错） |
-| 产物 | `cmp_swin.py` 的差异覆盖面 | 全部，但**不指向具体病因** |
+| 定位 | `READPOS` 的 `firstfno` 序列 | A、B5 类（读取位置错） |
+| 无效块 | `.sp` 每 subint 权重数组的零块区间（布局见 `data-spec.md` 5.3） | 缺口的**落点**错（B5 第 2 条：读取位置对了但洞标在别处） |
+| 产物 | `cmp_swin.py` 的差异覆盖面 | 全部，但**不指向具体病因**；有缺口的数据**不能**用它做判据（两边的 subint 窗口差一个 delay 修正，见 `fxcorr/test/gaps/README.md`） |
 
 **核心提醒：summary 全对不等于定位对。** B5 的 `missing`/`filler`/去重计数全部正常，只有 `firstfno` 能看出来。
 
@@ -294,7 +318,8 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 
 - `GAPCHECK summary`（**info** 级，默认可见）：`buffers / frames / discontinuities / missing frames / filler frames / boundaries`——缺口多的数据这一行就是体检结论。
 - `GAPCHECK buffer ... frameno A -> B (step, missing)`（verbose）：每个缺口一条；补扫区段里发现的为 `GAPCHECK skipped ...`，格式相同。另有 `GAPCHECK boundary ...`（读取位置异常漂移，上限 40 条）。
-- `READPOS subint N: readoff O firstfno F lastfno L nframes N missing M filler K gapshift G fillershift H`（verbose）：逐 subint 读取位置诊断，**对照两个 ds 即可判定定位是否正确**。
+- `GAPCHECK holes buf N: [a,b) [c,d)`（verbose）：每个被重建过的 buffer 一条，列出 `shiftFrameGaps` 留下的洞（**post-shift 帧槽区间**，转成块时 × `payloadbytes/blockbytes`）。这是 `.sp` 里 `valid_flags` 的直接来源，B5 修好后用它核对落位（t25362：buf 816 → `[38,49) [61,71)`，正是 .sp 835 的无效区）。
+- `READPOS subint N: readoff O firstfno F lastfno L nframes N missing M filler K gapshift G fillershift H gapframes X dst D framens S`（verbose）：逐 subint 读取位置诊断，**对照两个 ds 即可判定定位是否正确**。`gapframes` 是本次实际生效的缺口帧数、`dst` 是 `shiftFrameGaps` 的起始槽、`framens` 是 locate 给的时间轴帧号——B5 就表现为「跨界的那个 subint `firstfno` 早于对照」。
 - 级别由 `FXCORR_LOGLEVEL`（`error`/`warn`/`info`/`verbose`/`debug`，默认 `info`）控制。
 
 ### 6.5 外部交叉验证
@@ -341,24 +366,25 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 
 **L1 是关键补位**：它不需要基准、不需要 mpifxcorr、可以在合成数据上跑，且恰好覆盖 B5 这类"计数正常但位置错"的缺陷。
 
-### 7.4 未修缺陷（B5）的实施方案
+### 7.4 B5 的实施记录（2026-09-18）
 
-见 4.5「修复方向」。落地顺序建议：
+按"先合成、后改码"的顺序做的，每一步都留下了判据：
 
-1. **先补 L1 判据与合成资产**（7.5 第 1 项）——在修之前先确认判据能抓住这个缺陷（红）；
-2. **再改代码两条**（`gapshiftbytes` 按位置过滤 + `dst` 由帧号时间位置算出）；
-3. 验证：合成资产转绿 + `fxcorr/test/gaps/` 已有 T1/T2 判据不回归（缺口/filler 计数不变）；
-4. 真实数据：在 `ssh difx` 重跑 t25362 的 f/x 两侧，576 条差异应归零、积分 0/4/10 的 weight 落回 7e-7 浮动内。
+1. **先补合成资产与判据**（7.5 第 1 项，`fxcorr/test/gaps/run_boundary.sh`）——改码前先确认它对这个缺陷报红（场景 A `firstfno` 98 对 128、场景 B 零权重块 0 个）。
+2. **改 `gapshiftAt` + `gapspan`**（读哪）——缺口按"时间轴位置早于本 subint"过滤，跨界那部分延后到下一个 subint 生效。
+3. **改 `shiftFrameGaps` 的起始槽**（标哪）——由缓冲区第一个数据帧的帧号与 locate 的时间轴帧号之差决定；差值不为 0 时**即使帧号连续也要重建**（第 3 步的必要性是这样发现的：只改第 2 步时场景 B 的洞仍被当数据，因为 `reorder` 不置起、`shiftFrameGaps` 根本没被调用）。
+4. 验证：`run_boundary.sh` 两个场景转绿；`fxcorr/test/gaps/` 的 T1/T2 计数判据不变（73/73 与 73/0）；cmp5 无缺口数据的 `band_00.sp` 与改前 md5 相同（**逐字节不变**）；边界用例 `fxcorr/test/gaps/README.md` 的验证记录。
+5. **真实数据**（`ssh difx` 的 `/data/scalebox/t25362work`，2026-09-18 重跑 f/x 两侧）：BA ds_0 的 `firstfno` 4026 → **4098** ✓；无效块落位经外部帧号扫描核对 ✓；4.5 末尾那处待核的数字定案（两者坐标系不同，都对）✓。**对拍未归零**——576 条仍在，条数不变而根因换成了 ds_2 的 filler 语义差异，见 4.6（未决）。
 
-改动集中在 `datareader.cpp` 的 `checkFrameContinuity` / `shiftFrameGaps` / `locate` 三处。
+改动落在 `datareader.cpp` 的 `checkFrameContinuity` / `gapshiftAt` / `shiftFrameGaps` / `locate` / `readSubint` 五处（`gapshiftbytes` 成员已删，缺口账改为 `gapspan`）。
 
-**注意保持的安全边界**：无缺口、无 filler 的数据路径**必须逐字节不变**（S6 的全部产物、以及所有合成数据对拍）。现有实现以"两条路径都不动作"保证这一点，重构时不能破坏——建议每次改动后回归 `fxcorr/test/gaps/` 与 cmp5 目录。
+**安全边界**：无缺口、无 filler 的数据路径**逐字节不变**（S6 的全部产物、以及所有合成数据对拍）。实现上以"`gapspan` 空则一切照旧"保证——`gapshiftAt` 不被调用、`shiftFrameGaps` 的起始槽检查不触发。每次改动后回归 `fxcorr/test/gaps/` 与 cmp5 目录。
 
 ### 7.5 待补的测试覆盖
 
 按优先级：
 
-1. **缺口跨 subint 边界**（对应 B5）——`FXSIM_GAPS` 的中断位置要选在缺口能跨越 subint 边界的地方，且缺口总长**大于**跨界那个 subint 的剩余部分（t25362 是 subint 5.12 ms、第一组缺口 72 帧 = 4.5 ms，落在 subint 834 的末尾并伸进 835）。判据必须用 `READPOS firstfno`，summary 看不出来；同时回归已有 T1/T2 计数判据。
+1. ~~**缺口跨 subint 边界**（对应 B5）~~ —— **已补，2026-09-18**：`fxcorr/test/gaps/run_boundary.sh`。两个场景——缺口跨边界但不盖住读取位置（判据 `READPOS firstfno` 不得早于对照；summary 看不出来）、缺口盖住读取位置（判据 `.sp` 从第 0 块起权重为 0）。`FXSIM_GAPS` 的中断位置按帧号选：subint 131.072 帧，取 `0.52:30`／`0.48:30`。
 2. **起点偏移**（对应 A1–A3）——造"文件起点晚于 batch 起点"的数据。现有 `FXSIM_GAPS` 无此能力，需要生成器侧支持（写起始帧号偏移）。A1–A3 目前只在 t25362 上验证过，改坏了无回归可依。
 3. **缺口 + filler 同段并存**——t25362 的 ds_2 是现实样本，`FXSIM_GAPS` 的 `:f` 形式可以造，但现有资产里缺口与 filler 是**分别**测的，没有一组同时含"filler 段两端夹真实缺口"。
 
@@ -391,6 +417,7 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 ### 8.3 测试资产
 
 - `fxcorr/test/gaps/README.md`：`FXSIM_GAPS` 用法（缺口与 filler 两种形式在**同一位置**、**帧号范围相同**）、T1/T2 验收判据表、坑记录（filler 必须推进帧号、workdir 必须已存在、判据依赖 fps）。
+- `fxcorr/test/gaps/run_boundary.sh`：缺口跨越 subint 边界的两个场景（跨边界不盖起点 / 盖住起点），判据分别是 `READPOS firstfno` 与 `.sp` 的零权重块区间；一次跑三段数据（无缺口 + 两个缺口位置）。
 - `fxcorr/test/p10/`、`fxcorr/test/p11/`：格式覆盖与 delay 语义的检验资产。
 - `fxcorr/test/cmp_swin.py`：SWIN 逐记录比较（第 4 参数可限制最大记录数）。
 

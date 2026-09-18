@@ -59,8 +59,10 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 	gapcheckmissing(0), gapcheckfillers(0), gapchecklastfr(0),
 	gapcheckcrossmin(0), gapcheckcrossmax(0), gapcheckcrosscount(0),
 	gapcheckcrossprinted(0), gapchecklastoff(0), gapchecklastvalid(false),
-	gapshiftbytes(0), gapcountedthrough(0), gapcountedvalid(false),
+	gapcountedthrough(0), gapcountedvalid(false),
 	fillershiftbytes(0), fillercountedthrough(0), fillercountedvalid(false),
+	lastframesin(0), lastframens(0),
+	lastgapframes(0), lastshiftdst(0),
 	gapbuffer(0)
 {
 	batchstartabsns = batchstartsec*1000000000LL + (long long)batchstartns;
@@ -395,8 +397,9 @@ DataReader::~DataReader()
 // frame-number chain, and what they say about the read position has the
 // opposite sign to a gap.
 //
-// P12 step 2a turns both observations into corrections -- gapshiftbytes and
-// fillershiftbytes, applied in readSubint -- and step 2b (shiftFrameGaps)
+// P12 step 2a turns both observations into corrections -- the gaps recorded in
+// gapspan (read back through gapshiftAt) and fillershiftbytes, applied in
+// readSubint -- and step 2b (shiftFrameGaps)
 // rebuilds this buffer's frame grid.  A file with neither follows exactly the
 // old code path.
 void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffset)
@@ -446,7 +449,7 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 		long long chainlast = -1;
 		fillernew += countFillerRange(fillercountedthrough, readoffset,
 		                              gapchecklastvalid ? gapchecklastfr : -1, &gapnew, &chainlast);
-		missing += gapnew;	// reaches gapshiftbytes with the main loop's tally
+		missing += gapnew;	// reaches gapspan with the main loop's tally
 		if(chainlast >= 0)
 		{
 			pfr = chainlast;	// continue the chain into this buffer: the seam
@@ -512,6 +515,7 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 						gapcountedthrough = gapend;
 						gapcountedvalid = true;
 						gapcheckgaps++;
+						gapspan.push_back(make_pair(gapend, m));
 						FXLOG(FXLOG_VERBOSE) << "GAPCHECK buffer " << gapchecksubints << " frame " << i
 						     << ": frameno " << pfr << " -> " << fr
 						     << " (step " << step << ", missing " << m << ")" << endl;
@@ -526,11 +530,10 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 	// bytes.  A gap makes the file shorter than the time axis (later reads are
 	// too far along, so subtract); filler makes it longer (later reads are too
 	// early, so add).  Both are whole frames, so frame alignment is preserved.
+	// The gaps themselves went into gapspan as they were found; how much of
+	// each one applies to a given subint is decided by gapshiftAt at read time.
 	if(missing > 0)
-	{
 		gapcheckmissing += missing;
-		gapshiftbytes += missing*(long long)framebytes;
-	}
 	if(fillernew > 0)
 	{
 		gapcheckfillers += fillernew;
@@ -550,9 +553,23 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 		}
 	}
 
+	// A buffer can need rebuilding even with unbroken frame numbers: when a
+	// gap covers the subint's own start, the read position lands on the first
+	// frame after the gap, so the whole buffer sits that much further into the
+	// subint and the slots ahead of it are the hole.  Frame numbers say by how
+	// much -- the buffer's first frame is that far from the start's own
+	// in-second number (lastframens, from locate), and shiftFrameGaps places
+	// it there.  Without this the buffer would be handed over starting at slot
+	// 0 and the hole would be integrated as data.
+	if(!reorder && !gapspan.empty() && firstany >= 0 &&
+	   (int)((firstany - (long long)lastframens + fps) % fps) > 0)
+		reorder = true;
+
 	// P12 step 2b: put the frames where the time axis says they belong
 	if(reorder)
 		shiftFrameGaps(buffer, nframes);
+	else
+		lastshiftdst = 0;
 
 	// Boundary to the next buffer.  The step across buffers is not a gap by
 	// itself -- one subint spans 81.92 frames here, so consecutive buffers
@@ -603,12 +620,59 @@ void DataReader::checkFrameContinuity(u8 *buffer, int bytes, long long readoffse
 	// is what tells a position error from a data error.
 	//
 	// Verbose level: 2200 lines per datastream per batch.
+	// gapshift here is what this subint's read position was actually shortened
+	// by (the part of the gaps lying before its start), not the running total
+	// of everything noticed so far -- the two differ exactly at the subint a
+	// gap straddles, which is what this line exists to show.
 	FXLOG(FXLOG_VERBOSE) << "READPOS subint " << gapchecksubints
 	     << ": readoff " << readoffset
 	     << " firstfno " << firstany << " lastfno " << lastany
 	     << " nframes " << nframes << " missing " << missing << " filler " << fillernew
-	     << " gapshift " << gapshiftbytes << " fillershift " << fillershiftbytes
+	     << " gapshift " << lastgapframes*(long long)framebytes
+	     << " fillershift " << fillershiftbytes
+	     << " gapframes " << lastgapframes << " dst " << lastshiftdst
+	     << " framens " << lastframens
 	     << endl;
+}
+
+// Frames of the file missing *before* frame index t on the time axis.
+//
+// A gap is recorded by the file offset of the frame that follows it, so the
+// slots it leaves empty sit at [start, end) with start = that offset (in
+// frames) plus everything lost ahead of it.  Only the part lying before the
+// query point counts: a gap whose frames are still ahead of this subint must
+// not shorten its read, or the subint is read from an earlier time than its
+// own and that data is integrated as if it belonged there.  t25362's boundary
+// subint came out 51 frames early exactly that way (its gap was noticed inside
+// the previous subint's buffer but sits after that subint's end, at the start
+// of this one's); fxcorr/test/gaps/run_boundary.sh reproduces it on synthetic
+// data where the expected values are known.
+long long DataReader::gapshiftAt(long long &t) const
+{
+	long long lost = 0;	// frames lost ahead of the gap being measured
+	long long total = 0;
+	for(size_t i=0;i<gapspan.size();i++)
+	{
+		// gapspan holds absolute file offsets while t is a frame index counted
+		// from the batch start; anchorbytes is the distance between the two
+		// origins (negative when the file starts after the batch does, as
+		// t25362's BA does).  Comparing them without it gets every gap wrong,
+		// and on a file with no start offset the two coincide -- which is why
+		// the synthetic tests cannot see it.
+		long long start = (gapspan[i].first - anchorbytes)/(long long)framebytes + lost;
+		long long end = start + gapspan[i].second;
+		if(t < start)
+			break;		// this gap and every later one start at or after t
+		// A gap the query point falls inside swallows the whole of itself: the
+		// frames before the query sit in it too, and the read has to land
+		// after the hole rather than inside data belonging to a later slot.
+		// Abutting gaps are handled by the next iterations of this loop.
+		if(t < end)
+			t = end;
+		total += gapspan[i].second;
+		lost += gapspan[i].second;
+	}
+	return total;
 }
 
 // P12 step 2b: rebuild the subint's frame grid inside the buffer.
@@ -641,6 +705,32 @@ void DataReader::shiftFrameGaps(u8 *buffer, int nframes)
 	long long fps = (long long)framespersecond;
 	int dst = 0;
 	long long prevfr = -1;
+
+	// The buffer's first data frame belongs where its own frame number says,
+	// which is not the subint's start when a gap covers that start: the read
+	// position then lands on the first frame after the gap, and the slots the
+	// gap ate belong before it.  Placing that frame at 0 instead slides the
+	// whole buffer back and marks the wrong slots invalid, so the hole is
+	// integrated as if it were data.  The frame number carries the distance
+	// needed -- lastframens (locate) is the start's own in-second number.
+	for(int src=0; src<nframes; src++)
+	{
+		if(vdifIsFiller(buffer, src, framebytes))
+			continue;
+		dst = (int)((vdifFrameNumber(buffer, src, framebytes) - (long long)lastframens
+		             + fps) % fps);
+		break;
+	}
+	lastshiftdst = dst;
+	if(dst >= nframes)
+	{
+		// the gap reaches past this whole buffer: none of it is this subint's data
+		gapinvalid.push_back(make_pair(0, nframes));
+		memset(buffer, 0, (size_t)nframes*framebytes);
+		return;
+	}
+	if(dst > 0)
+		gapinvalid.push_back(make_pair(0, dst));
 
 	for(int src=0; src<nframes && dst<nframes; src++)
 	{
@@ -675,6 +765,15 @@ void DataReader::shiftFrameGaps(u8 *buffer, int nframes)
 		gapinvalid.push_back(make_pair(dst, nframes));
 
 	memcpy(buffer, gapbuffer, (size_t)nframes*framebytes);
+
+	// Where the holes landed, as post-shift frame ranges: the counterpart of
+	// READPOS's dst for this subint's valid flags.  One line per rebuilt buffer,
+	// so t25362's filler datastream (1162 frames) prints a few hundred at
+	// verbose -- that is the level for exactly this kind of question.
+	FXLOG(FXLOG_VERBOSE) << "GAPCHECK holes buf " << gapchecksubints << ":";
+	for(size_t g=0;g<gapinvalid.size();g++)
+		FXLOG(FXLOG_VERBOSE) << " [" << gapinvalid[g].first << "," << gapinvalid[g].second << ")";
+	FXLOG(FXLOG_VERBOSE) << endl;
 }
 
 // Count the filler frames in a file range the read position skipped over, and
@@ -701,7 +800,7 @@ void DataReader::shiftFrameGaps(u8 *buffer, int nframes)
 // chainfr is the last data frame number seen before this stretch (-1 if none),
 // so a gap straddling the boundary into the stretch is caught as well.
 // *gapsp receives the missing frames found here; the caller adds them to its
-// own tally so they reach gapshiftbytes with the same treatment.  *lastfrp
+// own tally so they reach gapspan with the same treatment.  *lastfrp
 // gets the last data frame number in the stretch so the caller can continue
 // the chain into its own buffer -- a gap lying exactly on that seam is
 // otherwise checked by neither side (t25362 ds_2 lost 50 more frames there).
@@ -754,6 +853,7 @@ long long DataReader::countFillerRange(long long start, long long end, long long
 							gapcountedthrough = gapend;
 							gapcountedvalid = true;
 							gapcheckgaps++;
+							gapspan.push_back(make_pair(gapend, m));
 							FXLOG(FXLOG_VERBOSE) << "GAPCHECK skipped " << gapchecksubints
 							     << ": frameno " << pfr << " -> " << fr
 							     << " (step " << step << ", missing " << m << ")" << endl;
@@ -894,6 +994,9 @@ bool DataReader::locate(int scan, int offsetsec, int offsetns, int *sec, int *ns
 	// frame-aligned start (vdiffile.cpp:429-444; V1 frame granularity is 1):
 	// framesin from the payload-equivalent byte offset (upstream vlbaoffset)
 	long long framesin = bufbytes/payloadbytes;
+	// the frame index this subint maps onto: the read position is corrected by
+	// the gaps that lie before it on the time axis (see gapshiftAt)
+	lastframesin = framesin;
 
 	if(kind == KIND_MUXEDVDIF)
 	{
@@ -913,6 +1016,10 @@ bool DataReader::locate(int scan, int offsetsec, int offsetns, int *sec, int *ns
 	long long abssec = (long long)floor(abstime);
 	*sec = (int)abssec;
 	*ns = (int)((abstime - (double)abssec)*1.0e9 + 0.5);
+	// the in-second frame number this block starts on: a buffer whose first
+	// frame carries a later number than this has started past a gap, and the
+	// frames between belong to the hole (shiftFrameGaps)
+	lastframens = (int)((abstime - (double)abssec)*framespersecond + 0.5);
 
 	return true;
 }
@@ -953,11 +1060,27 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 	//
 	// Both shifts are whole frames, so frame alignment is preserved.
 	//
+	// The gap correction is computed for *this* subint's place on the time
+	// axis: a gap that this subint's data starts after shortens the read, one
+	// that still lies ahead of it does not (gapshiftAt).  Everything the scan
+	// has noticed so far would be too much for the subint the gap straddles.
+	//
 	// A negative result is NOT clamped: it means the subint asks for data
 	// before the file's first frame (the file can start after the batch does
 	// -- see anchorbytes), and letting the seek fail makes the subint come
 	// back invalid, which is the honest answer.
-	fileoffset += fillershiftbytes - gapshiftbytes;
+	fileoffset += fillershiftbytes;
+	lastgapframes = 0;
+	if(!gapspan.empty())
+	{
+		// gapshiftAt moves the query point out of any hole it fell inside, so
+		// the read lands on the first frame this subint's time range actually
+		// has; the move itself is a shift of the position, not of the count.
+		long long t = lastframesin;
+		lastgapframes = gapshiftAt(t);
+		fileoffset += (t - lastframesin)*(long long)framebytes;
+		fileoffset -= lastgapframes*(long long)framebytes;
+	}
 	if(fileoffset < 0)
 	{
 		// The subint starts before the file's first frame.  That does NOT mean

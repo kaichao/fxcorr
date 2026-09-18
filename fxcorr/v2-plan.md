@@ -51,7 +51,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 
 ## 5. 算法改进清单（2026-09-13 调整：V2 = 串行算法迁移，并行/流式挪 V3）
 
-每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。定位修正：V2 只做 mpifxcorr **串行算法**的迁移与完善——原 P2/P3（并行化）与 P5（流式新能力）挪 V3（README 的 V3 = 模块级 OpenMP / 按需 GPU；V3 定案 2026-09-15：P2 取消、P3 实施为唯一实现项、P5 不做，见 algo-plan 各节与 v3-plan.md），P4 符合串行迁移标准保留；2026-09-13 完整审查 mpifxcorr 后新增 P6-P11，2026-09-16 起由真实观测 t25362 暴露 **P12**（读取路径的病态数据，非审查发现项）。排序依据：先补齐数据链路完整性（P0/P1），再科学功能（P4、P6-P8 按改动量），再监控消息（P9）、输入格式（P10）、reader 细节（P11）。
+每项的动机分类、要解决的问题、预期效果、设计要点详见 **`algo-plan.md`**。定位修正：V2 只做 mpifxcorr **串行算法**的迁移与完善——原 P2/P3（并行化）与 P5（流式新能力）挪 V3（README 的 V3 = 模块级 OpenMP / 按需 GPU；V3 定案 2026-09-15：P2 取消、P3 实施为唯一实现项、P5 不做，见 algo-plan 各节与 v3-plan.md），P4 符合串行迁移标准保留；2026-09-13 完整审查 mpifxcorr 后新增 P6-P11。排序依据：先补齐数据链路完整性（P0/P1），再科学功能（P4、P6-P8 按改动量），再监控消息（P9）、输入格式（P10）、reader 细节（P11）。
 
 | 优先级 | 改进项 | 动机分类 | 一句话说明 |
 |---|---|---|---|
@@ -67,7 +67,7 @@ V1 已完成（验收 4/4）。本文定义 V2 的范围、镜像体系与任务
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | ✅ 2026-09-13（f 侧 FXCORR_KURTOSIS=1 触发（Mode 的 s1/s2 累积与 calculateAndAverageKurtosis 已随 fxcorrcommon 就位，只补接线）+ datastreamsaveraged 平均分支（minpostavfreqchannels>=stadumpchannels 时 STA 前平均、写盘跳过重复平均）；CHANS TO AVG 1/4 两轮对拍 318 条逐位全等、无开关回归 6/6；顺手修 P1 遗留的 cf32 stride bug） |
 | P10 | 输入格式补齐 | 功能未迁移 | ✅ 2026-09-14（f 侧 reader 五路径：Mark5B（mark5bfix 修复）→ LBA 家族（ASCII 头+raw）→ MKIV/VLBA/VLBN/KVN5B/CODIF（mark5access 通用流）；多线程 VDIF corner-turn（VDIFMuxer）；K5VSSP/K5VSSP32 上游不可用（mark5access Not Yet Implemented）不迁移；硬件访问（StreamStor/Mark6）不迁移。Mark5B/多线程 VDIF 对拍 6/6、LBA 降级自洽验证（mpifxcorr 基类路径死循环）、五格式代码审查、VDIF 回归 6/6，详见 algo-plan P10 实施记录） |
 | P11 | f 侧 reader 语义补全 | 语义等价 | ✅ 2026-09-14（datareader locate 补 delay 重对齐：修正起点早于数据起点时跳 FFT 块 + tosubtract 补偿（含上游 quirk 照抄）+ 整数 ns 对齐 + fillValidFlags 前 count 块 invalid；−nsinc 整 subint 丢弃早退；跨段续接子句在单文件连续读下自动等价不显式实现。delay≠0（T2 对跖点 11.2ms）对拍 6/6 全等、首 subint T1 记录 weight 0.989 证实跳块触发、cmp5 回归 6/6，详见 algo-plan P11 实施记录） |
-| P12 | 真实观测的病态数据（文件起点偏移 / 记录中断 / filler 帧） | 串行环境新变化 | ⚠ 2026-09-16~18 部分完成：A 起点 / B 缺口 / C filler 三类共 13 条已修并验证（t25362 的 A、C 类已闭环、无缺口数据逐字节不变），**B5「缺口跨 subint 边界」未修**（t25362 剩余 576 条差异的根因）；分析与诊断判据见 `reader-model.md`，动机与实施记录见 algo-plan P12 节。**非上游审查发现项**——由首个真实观测暴露（P0-P11 的对拍全用 fxcorr-sim 理想数据） |
+**P12（真实观测的病态数据）不在本清单**：它 2026-09-16 起由首个真实观测 t25362 暴露（非上游审查发现项），2026-09-18 在 V3 期间修完，见 `v3-plan.md` 的 P12 节；分析与诊断判据见 `fxcorr/reader-model.md`，实施记录见 `algo-plan.md` P12 节。
 
 上游死代码不迁移：FILTERBANK USED/PROCESSING METHOD（configuration.cpp:1558-1574）、dumplta/ltachannels、checkData（datastream.cpp:1953 `#if 0`）、相位阵 TIMESERIES 输出（paoutputformat/padomain 无消费者）、MPI 分段缓冲回填。
 
