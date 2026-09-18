@@ -9,8 +9,8 @@
 而真实数据没有"正确值"可对照，改坏了只能靠对拍差异反推。本目录用 fxcorr-sim 造出
 等价的病态数据，让"缺口/filler 没被改坏"能在合成数据上一键复现。
 
-背景与实现见 `fxcorr/data-spec.md` 5.2（filler 帧的两种形态）与
-`applications/fxcorr-f/CLAUDE.md`（真实观测数据第 ③④ 条）。
+背景与实现见 `fxcorr/reader-model.md`（读模型对照与 C 类 filler 缺陷）与
+`applications/fxcorr-f/CLAUDE.md`（datareader 实现要点）。
 
 ## 生成
 
@@ -77,12 +77,32 @@ T1 报 `filler frames 33`——**后者是测试数据设计问题，不是代�
 subint 下 batch 只覆盖约 533 帧位置，而 2.0s 处的中断落在 510 帧之后，其二段尾部
 40 帧出了 batch 窗口，本就不该被统计。造数据时把中断放在窗口内（如 0.5s / 1.5s）。
 
+## 未覆盖场景：缺口跨越 subint 边界（2026-09-18 诊断）
+
+上表的判据只覆盖"缺口**被计数**"，不覆盖"缺口的**时间位置被放对**"——t25362 暴露的缺陷正好
+落在两者之间：计数全正常，只有含缺口的那个积分的 weight 偏（实测差 1.6e-3）。**根因、症状
+指纹与修复方向见 `fxcorr/reader-model.md` 4.5 与 7.5。**
+
+复现要点：`FXSIM_GAPS` 的中断位置要选在**缺口能跨越 subint 边界**的地方，且缺口总长
+**大于**跨界那个 subint 的剩余部分（t25362 是 subint 5.12 ms、第一组缺口 72 帧 = 4.5 ms，
+落在 subint 834 的末尾并伸进 835）。
+
+验收判据必须用 `READPOS`，summary 看不出来：
+
+| | 判据 |
+|---|---|
+| 计数 | 与上表一致（`missing frames` = 缺口总帧数） |
+| **定位** | 每个 subint 的 `firstfno` = 该 subint 起点的时间轴帧号（`batchrel × fps` 的秒内余数，相邻 subint 差 81.92 帧取整）；跨界后那个 subint 偏早"尚未到达的缺口字节数"即为本条缺陷 |
+| 产物 | 含缺口的积分 weight 与 mpifxcorr 基准一致（当前**未达标**，即为待修目标） |
+
+**注意 `GAPCHECK`/`READPOS` 的编号与 .sp 的 subint 索引可能不同**（t25362 实测差 18，成因见 `fxcorr/reader-model.md` 4.5 末段）——对号入座前先确认。
+
 ## 坑
 
 - **filler 必须推进帧号**：中断是"真实过去了的时间"，帧号要跳过丢失的帧数；filler
   只是额外留下占位**字节**。首版实现让 filler 不推进帧号，结果 filler 形式的数据
   帧号范围只有 525 而缺口形式是 598——同一段观测被描述成了两个长度，f 侧据此算出的
-  `firstfno` 序列整体错位。data-spec 5.2 的「帧号跳跃只反映真实丢失，与 filler 帧数
+  `firstfno` 序列整体错位。`reader-model.md` 的 filler 判定「帧号跳跃只反映真实丢失，与 filler 帧数
   无关」说的就是这件事。
 - **`make_testdata.sh` 要求 workdir 已存在**：它用 `[ -d "$1" ]` 区分 workdir 与
   tone 位置参数，目录不存在时会静默退化到 cwd，把数据写进当前目录。

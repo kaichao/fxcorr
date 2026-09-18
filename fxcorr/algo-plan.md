@@ -25,8 +25,9 @@ V1 按最小科学闭环切分（f：解包/模型/通道化落盘，x：XMAC/�
 | P9 | Kurtosis STA + STA 频域平均分支 | 功能未迁移 | ✅ 2026-09-13（f 侧 FXCORR_KURTOSIS=1 触发 + STA 平均分支；CHANS TO AVG 1/4 两轮 STA+kurtosis 对拍 318 条逐位全等、无开关回归 6/6；顺手修 P1 遗留 stride bug） |
 | P10 | 输入格式补齐（Mark5B/LBA/其余 + 多线程 VDIF corner-turn） | 功能未迁移 | ✅ 2026-09-14（五路径 reader；Mark5B/多线程 VDIF 对拍 6/6、LBA 自洽验证 PASS、五格式审查、VDIF 回归 6/6；详见 P10 节实施记录） |
 | P11 | f 侧 reader 语义补全（valid flag 跨段续接、延迟中途重对齐） | 语义等价 | ✅ 2026-09-14（locate 加 delay 重对齐（跳块/tosubtract 含上游 quirk/整数 ns 对齐）+ fillValidFlags count 语义；delay≠0 对拍 6/6 全等、cmp5 回归 6/6；详见 P11 节实施记录） |
+| P12 | 真实观测的病态数据（文件起点偏移、记录中断、filler 帧） | 串行环境新变化 | ⚠ 2026-09-16~18 部分完成（A 起点 / B 缺口 / C filler 三类共 13 条已修并验证；**B5「缺口跨 subint 边界」未修**，见 reader-model.md 4.5；详见 P12 节） |
 
-P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，均已补节细化并实施（P6-P10 2026-09-13，P11 2026-09-14）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
+P6-P11 为 2026-09-13 mpifxcorr 完整审查新发现项，均已补节细化并实施（P6-P10 2026-09-13，P11 2026-09-14）。**P12 的来源不同——它是 2026-09-16 起由首个真实观测 t25362 暴露的读取路径缺陷，不是上游代码审查的发现项**（P0-P11 的全部对拍都用 fxcorr-sim 的理想数据，病态形态从未被覆盖）。已确认上游死代码、不迁移：FILTERBANK USED/PROCESSING METHOD、dumplta/ltachannels、checkData（`#if 0`）、相位阵 TIMESERIES 输出；硬件访问（StreamStor/Mark6）不迁移。
 
 对拍原则：每项尽量与 mpifxcorr 基准对拍（run_bench.sh 产出），P0 文本 diff、P4 各功能 SWIN 对拍、P6/P8 SWIN 对拍、P3（V3 实现时）与单线程全量结果全等。
 
@@ -873,7 +874,69 @@ fxcorr 现状差距：locate 对修正起点 < batch 起点只做 `framesin=0` �
 
 ---
 
+## P12：真实观测的病态数据（文件起点偏移、记录中断、filler 帧）
+
+### 与 P10/P11 的关系
+
+P10/P11/P12 是同一组件（fxcorr-f 的 `datareader`）上先后三层的改造，差别在**暴露条件**：
+
+| 项 | 补什么 | 暴露条件 | 完成 |
+|---|---|---|---|
+| P10 | 读**什么**（格式覆盖：Mk5B/LBA/多线程 VDIF/mark5access 通用流） | 换一种输入格式 | 2026-09-14 |
+| P11 | **怎么读**（延迟中途重对齐、valid flag 判界） | 几何 delay ≠ 0 | 2026-09-14 |
+| **P12** | 数据**不听话**时怎么办（起点偏移 / 缺口 / filler） | **真实观测数据** | 部分完成（见下） |
+
+P10/P11 及此前的全部对拍都用 fxcorr-sim 生成的**理想数据**（帧连续、起点恰在 batch 起点、无 filler），这些前提在真实观测下一条都不成立——P12 是首个由**真实数据驱动**的 reader 改造。
+
+### 动机分类
+
+串行环境新变化。mpifxcorr 的**顺序读**模型把起点偏移、中间缺帧、filler 的后果全部**隐式吸收**（每段的起始时间取自数据内的帧时间戳；缺帧由 `vdifmux` 成流时标 invalid 位），因此这些量既没写进上游代码注释、也没写进任何规范，拆分时无从识别。fxcorr-f 的**定位读**模型（`字节位置 = (时间 − batch 起点) × 速率`）下，它们全部变成必须**显式求解**的量。
+
+### 要解决的问题
+
+首个真实 VGOS 观测 t25362（BA/S6 两站、11.264 s、BA 有 8 个 datastream）同时暴露三类病态形态，且方向相反：
+
+| 类 | 现象 | 对应的显式量 |
+|---|---|---|
+| **A 起点偏移** | 文件起点晚于 batch 起点（BA 晚 79.312 ms） | `anchorbytes` |
+| **B 中间缺帧** | 字节流**短**于时间轴（BA 每个 ds 有 7–8 处、合计 144–148 帧／12 秒） | `gapshiftbytes` + `gapinvalid` |
+| **C filler 帧** | 帧头全零的占位帧，字节流**长**于时间轴（BA ds_2 有 1162 帧／8 段） | `fillershiftbytes` |
+
+每种形态又派生出多个实现陷阱（去重键、补扫漏计、跨 subint 边界等），合计 13 条缺陷 + 1 条未修。
+
+### 设计
+
+**分析与设计见 `fxcorr/reader-model.md`**（fxcorr-f 读取路径的单一权威分析文档）：
+
+- 两类读模型对照与三条被破坏的上游假设：第 2–3 节
+- 缺陷根因总表（A 起点 / B 缺口 / C filler / D 有效性）与症状指纹：第 4 节
+- 诊断判据（`GAPCHECK` / `READPOS`）与分层验收（L1 帧时间轴 / L2 有效区间 / L3 产物）：第 6–7 节
+- 后续改造建议（reader 拆分为帧时间轴层 / 修正量层 / I/O 层）：第 7.2 节
+
+**代码落点**：`applications/fxcorr-f/src/datareader.{h,cpp}` 的 `checkFrameContinuity` / `shiftFrameGaps` / `countFillerRange` / `locate` / `readSubint` / `fillValidFlags`——源码注释即按 P12 step 1 / 2a / 2b 分节。
+
+### 实施记录（2026-09-16 ~ 2026-09-18，部分完成）
+
+| 组 | 缺陷 | 状态 | 关键点 |
+|---|---|---|---|
+| A | A1 `anchorbytes` 缺失、A2 取整用 C++ 截断、A3 起点所在 subint 整块判无效 | ✅ 已修 | A2 改 `floor(x+0.5)`（四条格式路径统一）；A3 按 `skippedblocks` 折进 `lastcount` 后从**文件头**读起 |
+| B | B1 线性换算错位、B2 跨 buffer 假缺口、B3 去重键错误、B4 `gapinvalid` 未按 subint 重建 | ✅ 已修 | B2 缺口只在 buffer **内部**找；B3 去重键用**修正后**的读取位置 |
+| C | C1 filler 帧号当缺口、C2 filler 未识别、C3 按距离推断超调、C4 补扫漏计、C5 段边界/接缝漏检、C6 链尾未回存 | ✅ 已修 | C3 必须**实扫**该区段（`countFillerRange`）；C5/C6 的修复四处缺一不可 |
+| B | **B5 `gapshiftbytes` 按"已检测到"而非"读取位置之前"累计** | ⚠ **未修** | 缺口跨 subint 边界时修正超前、`shiftFrameGaps` 的 dst 坐标系整体错位；方案与落地顺序见 reader-model.md 4.5 与 7.4 |
+
+**当前对拍状态**：t25362 剩 **576 条差异**（积分 0、4、10 各 192 条，全在 BA 站），根因即 B5；其余 8 个积分与基准一致在 7e-7 浮动内，S6 站完全正常。
+
+### 验证方法与验收判据
+
+- **合成数据**（`fxcorr/test/gaps/`，`FXSIM_GAPS` 造记录中断）：T1（filler 形式）与 T2（缺口形式）在**同一位置**、**帧号范围相同**；判据 = `GAPCHECK summary` 的 `missing frames` / `filler frames` 与外部帧号扫描逐一致。
+- **真实数据**（t25362）：`filler frames` 逐 ds 对齐（BA 8 个 ds 为 0/0/1162/0/0/0/0/0）、`missing frames` = 143；`READPOS` 的 `firstfno` 序列符合时间轴期望；最终以 `cmp_swin.py` 对拍为准。
+- **回归**：无缺口、无 filler 的数据路径**必须逐字节不变**（S6 全部产物、cmp5 目录、全部合成数据对拍）。
+- **已知盲区**：现有 gaps 判据只覆盖"缺口**被计数**"，不覆盖"缺口的**时间位置被放对**"——B5 正落在两者之间，需按 reader-model.md 7.3 补 L1 判据（`READPOS firstfno` 序列，合成数据即可，无需 mpifxcorr 基准）。
+
+---
+
 ## 相关
 
 - 优先级与验收总览：v2-plan.md 第 5/6 节
+- **读取路径的完整分析**（读模型对照、缺陷根因总表、症状指纹、诊断判据、改造建议）：`reader-model.md`——P10/P11/P12 是同一组件（fxcorr-f datareader）上先后三层的改造，分析集中于此，本文只记动机与实施记录。
 - 数据接口变更（涉及 data-spec.md 的项）：P0（补 PCAL 文本格式说明，不改二进制格式）、P2（已取消，无变更）、**P7（autocorr.bin 增 crosspol 段与 header 字段，5.3 节）**、**P8（新增 beam.bin 数据类型 D14 与 5.5 节，上游无对照格式自定）**

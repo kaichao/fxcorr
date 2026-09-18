@@ -6,6 +6,7 @@
 
 - **README.md**：需求（R1-R7）、总体架构（含 mpifxcorr 改造基准三层分类与核心算法链，3.1-3.3 节）、实现阶段（V1/V2/V3）、设计要点。改架构/需求时改它。
 - **data-spec.md**：数据规范（版本 1.1）—— 目录布局、D1-D13 数据类型、模块 I/O、band_XX.sp / pcal.bin / autocorr.bin / SWIN 二进制格式、时间轴与通道/偏振映射、切批约束。**改数据接口/文件格式时必须先同步它**。
+- **reader-model.md**：fxcorr-f 读取模型与读取缺陷分析——读模型对照（顺序读 vs 定位读）、缺陷根因总表（A 起点 / B 缺口 / C filler / D 有效性）、症状指纹与 `GAPCHECK`/`READPOS` 判据、改造建议。**改 datareader 前先读它**；读取相关的**分析**内容集中在此（data-spec 5.2 只留数据规格约束，`applications/fxcorr-f/CLAUDE.md` 只留目录级实现要点）。
 - **v1-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。改实施步骤时改它。
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。改 V2 范围或镜像设计时改它。
 - **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。改 V3 范围时改它。
@@ -73,7 +74,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `sta/sta_ctrl.c` / `sta/gen_test_sta.py` / `sta/cmp_sta.py` / `sta/README.md` | P9 STA/kurtosis 检验资产（sta_ctrl：difxmessage 控制消息发送 + BINARY_STA 组播抓包；CHANS TO AVG 4 变体覆盖 STA 频域平均分支；原始 record 流逐位对拍）+ 检验步骤/验收判据/验证记录（含 P1 cf32 stride bug 修复与基准控制消息时序坑） |
 | `p10/gen_test_mk5b.py` / `gen_test_lba.py` / `gen_test_ivdif.py` / `gen_test_p10.py` / `verify_lba.py` / `p10/README.md` | P10 输入格式检验资产（Mk5B 10016 帧生成器、LBA 16 字节 ASCII 头+2bit 低位先生成器、fanout 多线程 VDIF 生成器、.input 变体、LBA 自洽验证脚本）+ 检验步骤/验收判据/验证记录（含 LBA 位序、VDIF word3 布局、EDV4 三坑等 bug 记录） |
 | `p11/gen_test_p11.py` / `p11/README.md` | P11 reader 语义检验资产（TEST2 对跖点 → 几何 delay 11.2ms 的 test-delay.vex/v2d 生成器，触发 delay 重对齐跳块语义）+ 检验步骤/验收判据/验证记录（含 vex2difx 从 cwd 找 vex 的坑） |
-| `gaps/README.md` | 缺口/filler 处理检验资产（fxcorr-sim 的 `FXSIM_GAPS` 造记录中断：缺口与 filler 两种形式在**同一位置**、**帧号范围相同**，与 t25362 的真实中断同构）+ 检验步骤/验收判据/验证记录（含 **filler 必须推进帧号**的语义坑、make_testdata.sh 要求 workdir 已存在的坑） |
+| `gaps/README.md` | 缺口/filler 处理检验资产（fxcorr-sim 的 `FXSIM_GAPS` 造记录中断：缺口与 filler 两种形式在**同一位置**、**帧号范围相同**，与 t25362 的真实中断同构）+ 检验步骤/验收判据/验证记录（含 **filler 必须推进帧号**的语义坑、make_testdata.sh 要求 workdir 已存在的坑、**尚未覆盖的"缺口跨 subint 边界"场景与 `READPOS firstfno` 判据**） |
 | `gen_vex_v2d.sh` | vex/v2d 生成脚本（datasim scripts/genv2dvex.sh 的 fxcorr 版；test.vex/test.v2d 模板参数化：站坐标/源/时间/频率/帧长/EOP 环境变量或 obs_info 文件覆盖，`CALC=1` 续跑 vex2difx→difxcalc 链；已全链验证：生成→.input/.calc/.im→sim→f→x→SWIN，详见 applications/fxcorr-sim/CLAUDE.md） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
