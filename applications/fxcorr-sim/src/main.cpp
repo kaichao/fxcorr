@@ -78,7 +78,13 @@ static void usage()
 	     << "      replacing FXSIM_NOISE; SEFD is one value or a per-station\n"
 	     << "      comma list, default 1000), FXSIM_DELAY (0 = disable the full\n"
 	     << "      delay chain: model delay + fractional sample correction +\n"
-	     << "      fringe rotation, on by default), FXCORR_WORKDIR\n"
+	     << "      fringe rotation, on by default), FXSIM_GAPS (recording\n"
+	     << "      interruptions, for the t25362 regression: comma-separated\n"
+	     << "      <sec>:<frames>[:f] loses that many frame numbers at that\n"
+	     << "      second into the batch; the optional 'f' writes all-zero-header\n"
+	     << "      filler frames in their place instead of leaving the file\n"
+	     << "      short - a real interruption shows both forms across\n"
+	     << "      datastreams), FXCORR_WORKDIR\n"
 	     << "  env (legacy path): FXSIM_DELAY (1 = inject .calc geometric delay\n"
 	     << "      into the tone phase), FXSIM_FLUX/FXSIM_SEFD (Jy; both set =\n"
 	     << "      SNR scaling), plus the new-path variables above\n";
@@ -357,6 +363,64 @@ static int parseLine(CommonSignal::LineSpec *line)
 	return 0;
 }
 
+// FXSIM_GAPS: recording interruptions, for the t25362 regression (data-spec
+// 5.2).  Comma-separated "<sec>:<frames>[:f]" where sec is seconds into the
+// batch, frames is how many frame numbers are lost there, and a trailing "f"
+// makes the recorder write all-zero-header filler frames in their place
+// instead of leaving the file short.  A real observation carries BOTH forms at
+// the same interruption -- one datastream filled, the rest simply short -- so
+// covering fxcorr-f's gap and filler corrections means running a station twice
+// with the two forms.
+//   FXSIM_GAPS="2.5:10:f,4.1:63:f"   two interruptions, filler form
+//   FXSIM_GAPS="2.5:10,4.1:63"       same two, plain missing-frame form
+static int applyGaps(VDIFWriter &writer)
+{
+	const char *ge = getenv("FXSIM_GAPS");
+	if(!ge || !*ge)
+		return 0;
+	string spec(ge);
+	size_t pos = 0;
+	while(pos <= spec.size())
+	{
+		size_t comma = spec.find(',', pos);
+		string item = spec.substr(pos, comma == string::npos ? string::npos : comma - pos);
+		pos = (comma == string::npos) ? spec.size() + 1 : comma + 1;
+		if(item.empty())
+			continue;
+		size_t c1 = item.find(':');
+		size_t c2 = (c1 == string::npos) ? string::npos : item.find(':', c1 + 1);
+		if(c1 == string::npos)
+		{
+			cerr << "fxcorr-sim: FXSIM_GAPS item '" << item
+			     << "' must be <sec>:<frames>[:f]" << endl;
+			return -1;
+		}
+		double atsec = atof(item.substr(0, c1).c_str());
+		string framestr = item.substr(c1 + 1, (c2 == string::npos) ? string::npos : c2 - c1 - 1);
+		long long missing = atoll(framestr.c_str());
+		bool filler = false;
+		if(c2 != string::npos)
+		{
+			string form = item.substr(c2 + 1);
+			if(form != "f" && form != "F")
+			{
+				cerr << "fxcorr-sim: FXSIM_GAPS item '" << item << "' has unknown form '"
+				     << form << "' (only 'f' for filler is defined)" << endl;
+				return -1;
+			}
+			filler = true;
+		}
+		if(atsec < 0.0 || missing <= 0)
+		{
+			cerr << "fxcorr-sim: FXSIM_GAPS item '" << item
+			     << "' needs seconds >= 0 and frames > 0" << endl;
+			return -1;
+		}
+		writer.addGap(atsec, missing, filler);
+	}
+	return 0;
+}
+
 static int doCommon(Configuration &config, const BatchInfo &bi)
 {
 	int specres = parseSpecres();
@@ -539,6 +603,8 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	                  st.bytesperbandframe);
 	if(!writer.isOpen())
 		return EXIT_FAILURE;
+	if(applyGaps(writer) != 0)
+		return EXIT_FAILURE;
 
 	// block buffer sized for one full common-signal block; the reader
 	// delivers the last block truncated to the batch length
@@ -649,6 +715,8 @@ static int doStationLegacy(Configuration &config, Model *model, const BatchInfo 
 	VDIFWriter writer(outpath, st.startsec, st.framestart, st.ratehz, st.nbands,
 	                  st.bytesperbandframe);
 	if(!writer.isOpen())
+		return EXIT_FAILURE;
+	if(applyGaps(writer) != 0)
 		return EXIT_FAILURE;
 
 	int payloadbytes = st.bytesperbandframe * st.nbands;

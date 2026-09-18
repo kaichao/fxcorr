@@ -91,7 +91,7 @@ private:
 	// corner-turner and the other kinds have no such field.
 	void checkFrameContinuity(u8 *buffer, int bytes, long long readoffset);
 	void shiftFrameGaps(u8 *buffer, int nframes);
-	long long countFillerRange(long long start, long long end);
+	long long countFillerRange(long long start, long long end, long long chainfr, long long *gapsp, long long *lastfrp);
 
 	Configuration *config;
 	Model *model;

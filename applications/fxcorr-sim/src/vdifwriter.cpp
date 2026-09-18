@@ -7,7 +7,7 @@ using namespace std;
 
 VDIFWriter::VDIFWriter(const string &outpath, long long startsec_, long long framestart_,
                        long long ratehz_, int nbands, int bytesperbandframe)
-	: f(0), startsec(startsec_), framestart(framestart_), ratehz(ratehz_),
+	: gapnext(0), f(0), startsec(startsec_), framestart(framestart_), ratehz(ratehz_),
 	  nsampframe(bytesperbandframe * 4), log2nchan(0), framelength8(0), nframes(0)
 {
 	// VDIF word3 nchan field is log2 of the channel (band) count
@@ -39,6 +39,19 @@ VDIFWriter::~VDIFWriter()
 		fclose(f);
 }
 
+void VDIFWriter::addGap(double atsec, long long missingframes, bool filler)
+{
+	Gap g;
+	g.atframe = (long long)(atsec * framespersecond + 0.5);
+	g.missing = missingframes;
+	g.filler = filler;
+	// keep the list ordered: writeFrame walks it once, front to back
+	size_t at = gaps.size();
+	while(at > 0 && gaps[at-1].atframe > g.atframe)
+		at--;
+	gaps.insert(gaps.begin() + at, g);
+}
+
 bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 {
 	if(!f)
@@ -47,6 +60,44 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 	{
 		cerr << "fxcorr-sim: payload size mismatch" << endl;
 		return false;
+	}
+
+	// Recording interruptions, applied before the frame whose number they
+	// precede.  A plain gap skips frame numbers without writing anything, so
+	// the file ends up shorter than the time axis -- the form fxcorr-f's
+	// gapshiftbytes undoes.  A filler run instead writes all-zero-header frames
+	// in their place: bytes in the file but no slot on the time axis, the form
+	// fillershiftbytes undoes (data-spec 5.2).  Either way the frame number
+	// advances by what was really lost, which is what keeps a filled datastream
+	// and a merely short one describing the same stretch of time.
+	while(gapnext < gaps.size() && nframes >= gaps[gapnext].atframe)
+	{
+		const Gap &g = gaps[gapnext];
+		if(g.filler)
+		{
+			int pbytes = framelength8*8 - 32;
+			unsigned int zh[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+			unsigned char *zbuf = new unsigned char[(size_t)(pbytes > 0 ? pbytes : 1)];
+			memset(zbuf, 0, (size_t)(pbytes > 0 ? pbytes : 1));
+			bool ok = true;
+			for(long long k=0; k<g.missing && ok; k++)
+				ok = fwrite(zh, sizeof(zh), 1, f) == 1 &&
+				     (pbytes <= 0 || fwrite(zbuf, 1, (size_t)pbytes, f) == (size_t)pbytes);
+			delete [] zbuf;
+			if(!ok)
+				return false;
+		}
+		// Both forms lose these frame numbers: the interruption is real time
+		// that no data covers, so the frame number either side of it must jump
+		// by exactly what was lost (data-spec 5.2: "the frame-number jump
+		// reflects only what was really lost, regardless of how many filler
+		// frames the run holds").  The filler form additionally leaves that
+		// many frames' worth of BYTES in the file -- bytes but no time slot,
+		// which is what fillershiftbytes undoes.  Advancing the frame number
+		// for filler too is what keeps a filled datastream and a merely short
+		// one describing the same stretch of time.
+		nframes += g.missing;
+		gapnext++;
 	}
 
 	// same header words as gen_test_vdif.py; frame number wraps at the

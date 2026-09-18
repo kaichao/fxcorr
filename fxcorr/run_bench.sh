@@ -2,11 +2,11 @@
 # run_bench.sh —— mpifxcorr 基准（对拍基准生成器，规格见 fxcorr/v1-plan.md 2.4）
 #
 # 步骤：① 定位 batch（DATA TABLE 软链 target 里的 batch_id，fallback batches/ 最新 json）
-# → ② 从 batch.json + .input 推导 EXECUTE TIME 截断（mpifxcorr 停写判定以积分起点
-# >= EXECUTE TIME 为准，整秒字段取 floor(initsec + (N-1)*intTime) + 1，恰好写出与
-# fxcorr-x 相同的 N 个积分；与 6/6 对拍实测 EXECUTE TIME=2 的推导一致）
+# → ② 从 batch.json + .input 推导 EXECUTE TIME（整秒字段，取 floor(initsec + N*intTime)
+# + 1——多留一个整秒，mpifxcorr 才把 N 个积分都写完整，见下方 ② 的注释）
 # → ③ 复制 config .input → bench/，sed EXECUTE TIME / OUTPUT FILENAME → bench/<exp>.difx
-# → ④ mpirun mpifxcorr 出基准 SWIN → ⑤ 打印 cmp_swin.py 对拍提示。
+# → ④ mpirun mpifxcorr 出基准 SWIN → ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分
+# → ⑤ 打印 cmp_swin.py 对拍提示。
 #
 # 用法：./run_bench.sh [workdir]
 #   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
@@ -112,11 +112,19 @@ exp = os.path.basename(one('OUTPUT FILENAME').rstrip('/'))
 if exp.endswith('.difx'):
     exp = exp[:-len('.difx')]
 
-# ② EXECUTE TIME 截断：mpifxcorr 的 writedata 在积分满 intTime 时按积分起点
+# ② EXECUTE TIME：mpifxcorr 的 writedata 在积分满 intTime 时按积分起点
 # currentstartseconds + scanstartsec >= executeseconds 判定停写（mpifxcorr EXECUTE
-# TIME 语义，fxcorr-x CLAUDE.md 已实证），EXECUTE TIME 又是整秒字段——取
-# floor(initsec + (N-1)*intTime) + 1：积分 1..N 全写（起点 < 截断值），
-# 积分 N+1 停（起点 >= 截断值）
+# TIME 语义，fxcorr-x CLAUDE.md 已实证），EXECUTE TIME 又是整秒字段。
+#
+# 不能取 floor(initsec + (N-1)*intTime) + 1（曾经如此，按"积分 N+1 起点 >= 截断值即停"
+# 推导）：mpifxcorr 不只在积分起点处判停，它把数据读到 EXECUTE TIME 就停，末积分因此
+# 只累积到 EXECUTE TIME 为止。t25362 真实数据实测（2026-09-18）：EXECUTE TIME=11 时
+# 末积分 [24621.752, 24622.776) 的 weight 只有 0.7356，而基准应为 0.9956——差值恒为
+# 0.26，与"mpifxcorr 读到 24622.5 前后停止累积"吻合。合成测试未暴露此问题，因为
+# batch 起点即 START SECONDS、末积分恰好压在整秒上（6/6 对拍时 ET=2 与 ET=3 结果相同）。
+#
+# 取 floor(initsec + N*intTime) + 1：N 个积分全部落在 EXECUTE TIME 之前，mpifxcorr 会
+# 把它们写完整；代价是多写第 N+1 个积分（起终点都在 batch 窗口之外），跑完由 ④½ 截掉。
 nsub = int(bj['n_subints'])
 subint = int(bj['subint_ns'])
 inttime = float(bj['integration_sec'])
@@ -126,7 +134,7 @@ nint = round(batchdur / inttime)
 if abs(nint * inttime - batchdur) > 1e-6:
     sys.exit('run_bench.sh: batch duration %g is not an integer multiple of INT TIME %g '
              '(integrals would not line up for comparison)' % (batchdur, inttime))
-exec_ = int(math.floor(initsec + (nint - 1) * inttime)) + 1
+exec_ = int(math.floor(initsec + nint * inttime)) + 1
 
 print('BID=%s' % bid)
 print('CFGIN=%s' % cfgrel)
@@ -175,10 +183,44 @@ if [ "$(id -u)" = 0 ]; then
 fi
 mpirun "${MPIARGS[@]}" -np "${NP:-4}" mpifxcorr "bench/$(basename "$CFGIN")"
 
+# ---- ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分 ----
+# ② 多留一个整秒的代价：mpifxcorr 会多写一个积分（起终点都在 batch 窗口之外，fxcorr
+# 侧不产出）。按 sec 分组保留前 NINT 组、把尾部多余记录从基准文件里截掉，使两侧记录数
+# 一致，cmp_swin.py 无需 maxrecords 参数。无多写时不动文件。
+python3 - "$OUTDIR" "$NINT" "$NCHAN" <<'PYEOF'
+import glob, os, struct, sys
+
+outdir, nint, nchan = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+rec = 74 + nchan * 8          # SWIN 记录长度（74 字节头 + nchan 复数）
+SECOFF = 16                   # 头内 sec 字段偏移（2I sync/ver + 2i bl/mjd 之后）
+for path in sorted(glob.glob(os.path.join(outdir, 'DIFX_*'))):
+    size = os.path.getsize(path)
+    nrec = size // rec
+    if nrec * rec != size:
+        sys.exit('run_bench.sh: %s size %d not a multiple of record size %d'
+                 % (path, size, rec))
+    with open(path, 'rb') as f:
+        data = f.read()
+    keep, seen, prev = nrec, 0, None
+    for i in range(nrec):
+        sec = struct.unpack_from('<d', data, i * rec + SECOFF)[0]
+        if prev is None or abs(sec - prev) > 1e-9:
+            seen += 1
+            if seen > nint:
+                keep = i
+                break
+            prev = sec
+    if keep < nrec:
+        with open(path, 'r+b') as f:
+            f.truncate(keep * rec)
+        print('run_bench.sh: %s: %d -> %d records (dropped %d integration(s) outside '
+              'the batch window)' % (os.path.basename(path), nrec, keep, seen - nint))
+PYEOF
+
 # ---- ⑤ 对拍提示 ----
 # 两侧 SWIN 逐基线文件对拍：fxcorr 侧由 run_batch.sh 产出（.input OUTPUT FILENAME
 # 目录），基准侧在本脚本的 bench/<exp>.difx/。2 站 1 基线为单文件
 # DIFX_<mjd>_<6 位秒>.s0000.b0000。
-echo "run_bench.sh: batch $BID, mpifxcorr wrote $NINT integration(s) to bench/$EXP.difx (EXECUTE TIME $EXEC)"
+echo "run_bench.sh: batch $BID, bench/$EXP.difx holds $NINT integration(s) (EXECUTE TIME $EXEC)"
 echo "对拍（run_batch.sh 产出 fxcorr 侧 SWIN 后，逐基线文件）："
 echo "  python3 $SCRIPTDIR/test/cmp_swin.py <fxcorr SWIN>/DIFX_*.s0000.b0000 bench/$EXP.difx/DIFX_*.s0000.b0000 $NCHAN"
