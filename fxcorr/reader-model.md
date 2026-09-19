@@ -281,7 +281,7 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 - **E4**（独立于 E3）：**80 帧**数据落在 batch 内、文件里有数据，却从未进入任何读取窗口——`[66830,+24) [67055,+18) [165800,+38)`；
 - **ds_0 对照**（同一观测、无 filler）：2181 个 subint **零 finding**，E4 = 0，判据不误报。
 
-**根因**：定位读按字节数读**一段连续**区域（`sendbytes`）。当读取窗口跨进一个 filler 段、而本 subint 还有数据帧排在 filler **之后**（t25362 的 ds_2 是"短数据段夹在 filler 之间"的形态），那些帧落在窗口之外：读不到，也不报错，`shiftFrameGaps` 只是诚实地把没填满的尾部槽标成无效。上游 `vdifmux` 的顺序读会滑过 filler 继续填满输出缓冲，所以 mpifxcorr 没有这个形态——**这是定位读相对顺序读多出来的一个语义缺口**，与 A/B/C 三类同源（"读窗口"的假设被 filler 破坏），但前三次修复都只处理了位置，没处理**窗口长度**。
+**根因**：定位读按字节数读**一段连续**区域（`sendbytes`）。当读取窗口跨进一个 filler 段、而本 subint 还有数据帧排在 filler **之后**（t25362 的 ds_2 是"短数据段夹在 filler 之间"的形态），那些帧落在窗口之外：读不到，也不报错，`shiftFrameGaps` 只是诚实地把没填满的尾部槽标成无效。上游 `vdifmux` 的顺序读会滑过 filler 继续填满输出缓冲，所以 mpifxcorr 没有这个形态——**这是定位读相对顺序读多出来的一个语义缺口**，与 A/B/C 三类同源（"读窗口"的假设被 filler 破坏），但前三次修复都只处理了位置，没处理**窗口长度**。**已修（2026-09-19，B2）**：定案见 4.8，实施与实测见 4.9。
 
 量级：80 / 180224 ≈ 0.044%，集中在 2–3 个积分里，与上面记的"~40 帧/积分"吻合。
 
@@ -290,6 +290,113 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 **真值对账工具已补（2026-09-19）**：`fxcorr/test/reader/`（`file_truth.py` 从 VDIF 本身算"哪些时间槽有数据"——缺口与 filler 在真值里统一为"槽未被占用"；`check_reader.py` 用它断言 fxcorr 的 `READPOS`/`GAPCHECK holes`，分 **E1 定位 / E2 数据 / E3 落点**三条，并把差异分成**多标**与**漏标**）。判据是绝对的，不再依赖"与另一种形式比"或对拍。合成四场景（无中断 / 缺口 / filler / filler 紧随缺口）E3 全绿；工具自检（篡改日志）能报出 20 槽漏标、10 槽多标。
 
 **复现与判据**（`test/gaps/`）：`run_filler.sh <workdir>`（长 filler 合成复现，判据 = filler 形式与缺口形式的逐 subint 无效块一致，修前红 1071 对 169、修后绿 169 对 169）；`scan_filler.py <vdif> <fps>`（帧头扫描）、`sp_valid.py <band_XX.sp> [--int N|--machine]`（无效块与权重）、`dump_weight.py <swin> <nchan> [--diff <other>]`（SWIN 权重对比）。
+
+### 4.8 B1 语义定案：读取窗口的长度（2026-09-19）
+
+E4 暴露的是**"读取窗口应该多长"这个量从未被定义**：A/B/C 三类与 B5/D-a/D-b 修的都是窗口的**位置**，长度一直默认等于 `sendbytes`（一个 subint 的字节数），而那个默认只在"字节流与时间轴等长"时成立。本节只读上游代码下结论，不改代码（`v4-plan.md` 阶段 B1）。
+
+**上游把窗口的长度定义在输出侧**，五条代码证据：
+
+1. **输出槽就是时间轴帧号**：`destIndex = frameNumber - startFrameNumber`（`vdifmux.c:682`），槽数固定为 `destSize/outputFrameSize`（`:567`）。
+2. **输出定长、输入不设限**：`vdifmux(destination, readbytes, readbuffer+muxindex, bytesvisible, …)`（`vdiffile.cpp:742`）——`destSize = readbytes` 是一个 subint 的输出量，而 `srcSize = bytesvisible` 是环形缓冲里**已读进来的全部字节**，可以远大于它。
+3. **消费输入直到输出填满**：主循环 `for(i=0; i<=N;)` 扫到输入耗尽或触发关停为止（`vdifmux.c:588-773`），循环里没有任何"读够多少输入就停"的判据。
+4. **filler 消耗输入、不占槽**：FILL_PATTERN（帧尾或帧头 4 字节）与 invalid 位都在 `i += …; continue`（`:598-613`、`:624-631`）里被跳过，**从不写 dest**——字节被消费，槽位不前进。
+5. **空槽照样输出**：源没耗尽而 dest 快满时把 `highestDestIndex` 推到末尾 "for continuity"（`:865-868`）；mask 为空的槽 `setVDIFFrameInvalid(frame, 1)`（`:944-951`），且 `nOutputFrame = nGoodOutput + nBadOutput + nPartialOutput`（`:1004`）把无效帧也计入。
+
+**上游由此是闭环的**：`startOutputFrameNumber = vstats.startFrameNumber + vstats.nOutputFrame`（`vdiffile.cpp:788`）——下一次从这一次**实际输出的末尾**续上；`calculateControlParams` 算出的字节位置只决定"从哪儿开始扫"，算偏了不过是这次多扫一点、少扫一点，下一个 subint 自动接回来。**窗口长度不是一个要计算的量，它就是输出的定义。**
+
+**fxcorr-f 是开环的**：长度 = `input.read(buffer, sendbytes)`（`datareader.cpp:1326`）的字节数，而 `sendbytes = (净荷需求/payloadbytes + 2) × framebytes`（`configuration.cpp:719`）隐含假设**每一帧都提供 payloadbytes 的净荷**。filler 一出现这个假设就破了：
+
+| | 上游（顺序读） | fxcorr-f（定位读） |
+|---|---|---|
+| 窗口长度 | **输出 N 个时间槽**，输入按需消费到填满 | **读 sendbytes 字节**，槽数 = 读到的数据帧数 |
+| filler | 跳字节、不占槽，后续数据补上 | 跳字节、不占槽，**不补** → 尾部留洞 |
+| 缺口 | 槽空着，输出 invalid 占位帧 | `shiftFrameGaps` 留洞（同样占槽）✓ 一致 |
+| 窗口终点 | 下一个窗口的起点（连续推进） | 起点 + sendbytes（**与下一个窗口不衔接**） |
+
+`shiftFrameGaps` 的注释写着 "Slots past the last placed frame … their data is not in this buffer (it belongs to a later subint, which reads it from the file itself)"（`datareader.cpp:707-709`）——**那个 later subint 也读不到**：它的起点加上了 `fillershiftbytes`（跳过 filler 段），落在 filler 之后那些数据帧的**后面**。于是这一段数据落在两个窗口之间，谁都不覆盖，这就是 E4。
+
+#### 唯一解
+
+**窗口按"填满 N 个时间槽"定义，读入的字节数因此是可变的。**
+
+- **N** 沿用现在的 `nframes`（`validlength/payloadbytes + 2`，即净荷需求 + guard），不改；
+- **填充规则**沿用 `shiftFrameGaps` 现有的规则：数据帧占一槽，缺口按帧号差占若干槽（洞，标无效），filler 跳过**不占槽**；
+- **唯一的改动**：槽没填满就**继续从文件读**，直到填满或文件结束——而不是读满 `sendbytes` 字节就停。
+
+用上游的话说，输入侧从"读固定字节"变成"消费到输出槽填满"。三个修正量（`anchorbytes` / `gapspan` / `fillershiftbytes`）管**位置**，本节点定的是**长度**，两者正交，互不替代。
+
+**给 B2 的约束（此处只记，不定实现）**：`shiftFrameGaps` 现在是"读一段定长字节 → 一次性重建 buffer"，改成填槽语义后必须**增量**（读一块 → 填槽 → 不够再读）。缓冲区也不能再按 `sendbytes` 固定（t25362 最长的 filler 段 508 帧 ≈ 4.1 MB，是 `sendbytes` 的六倍），要么分块、要么动态扩。上游的 `muxindex += vstats.srcUsed`（`vdiffile.cpp:796`）是同一件事的环形缓冲版。
+
+#### 它如何覆盖 A1 的红
+
+`run_window.sh` 的形态（`0.6:40:f400`：subint 131.072 帧、缺口 40 帧、filler 400 帧）：现状的窗口读固定字节数，跨进 filler 段后余下的宽度全被 filler 吃掉，窗口停在 filler **内部**（实测未覆盖区间自文件帧 **261** 起，`run_window.sh` 的 E4 输出 `[261,+69)`）；而下一个 subint 的起点因 `fillershiftbytes` 跳过了整个 filler 段，落在 filler 之后那些数据帧的后面。区间 `[261, 619)` 里 filler 之后的那 **69** 帧数据，两个窗口都不覆盖——正是 E4 报的 69。
+
+修复后：本 subint 要填满 131 个槽，已有 19 帧数据 + 40 个缺口洞，**还差约 72 帧**（`span − (A − t_k) − G`，实测 69，差 3 帧是取整与 guard 重叠），继续读就能读到 filler 段之后——窗口终点与下一个窗口的起点**恰好衔接**，净损失 0。
+
+由此得到一个可用于 B2 自检的等价判据：**净损失 ⟺ 本 subint 读到的末尾早于下一个 subint 的起点**。
+
+**不破坏现有行为的两条**（B2 的验收线，`v4-plan.md`）：
+- `1.0:40:f400`（现有 filler 场景，E4 已是 0）：filler 落在窗口后部，缺口与 filler 之前已有约 119 帧数据，槽在窗口前部就填满了 → 不再继续读，行为与现状逐字节相同，E4 仍为 0；
+- 无缺口、无 filler：填满 N 个槽正好读完 `sendbytes` 字节 → 逐字节不变（`applications/fxcorr-f/CLAUDE.md` 的操作边界①）。
+
+#### filler 形态清单（`v4-plan.md` 末节要的挑数据依据）
+
+上游 `vdifmux` 有五条"非数据"判据，各自跳过的长度不同（`vdifmux.c:588-648`）。**注意 mpifxcorr 的 flag 只有 `RESPECTGRANULARITY | PROPAGATEVALIDITY`（`vdiffile.cpp:525`），没有 `ENABLEVALIDITY`**，所以"输入帧的 invalid 位"在它那里不是跳过条件：
+
+| 形态 | 上游（mpifxcorr 的 flag 配置下） | 跳过的长度 | fxcorr / 真值工具 |
+|---|---|---|---|
+| 全零头帧（t25362 的 BA 即此：帧长字段 = 0） | 帧长/通道数/位宽与配置不符 → 逐字节滑过 | 4 字节 | ✓ `vdifIsFiller` 的全零判据 |
+| FILL_PATTERN（`0x11223344`）在帧尾 | 4 字节比较 | 整帧 | ✗ 不识别 |
+| FILL_PATTERN 在帧头 | 同前 | **8 字节**（不是整帧） | ✗ 不识别 |
+| **invalid 位 = 1** | **不跳过**（无 `ENABLEVALIDITY`）→ 当数据帧收进输出，是否判无效取决于输出头的 validitymask 与下游 `blank_vdif_EDV4`，**未实测** | 0 | ✓ 识别为 filler（`vdifIsFiller` 另有这条）|
+| 线程号不在 map | `chanIndex[threadId] == MAGIC_BAD_THREAD` | 整帧 | ✗（多线程 mux 场景） |
+
+两种 filler 的**时间语义不同**，但 `shiftFrameGaps` 用帧号差统一处理了：全零头帧的帧号不前进，跳过它不留洞；invalid 帧的帧号仍是 `prev+1`，跳过它由下一帧的帧号差算出 1 个洞——与上游"槽照占、样本判无效"表达同一件事。
+
+后三种 fxcorr 不识别，而合成资产只造过"全零头"一种（`FXSIM_GAPS` 的 `:f` 形式）。**FILL_PATTERN 那两行连真值工具也认不出**（`file_truth.py` 与 `vdifIsFiller` 是同一判据），要扩形态时两边一起扩，否则对账会静默漏算。第四行是唯一一处**可能与上游分歧**的地方（fxcorr 判无效、上游未必），取数据时优先找它。B3 之后若要验证修法对其它形态的泛化，按这张表去挑数据。
+
+### 4.9 B2 实施记录（2026-09-19）：窗口按"填满 N 个时间槽"读
+
+4.8 的唯一解落地，三处改动（`datareader.{h,cpp}`）：
+
+1. **填槽与"够不够"是同一份算法**：`shiftFrameGaps` 的源帧数与目标槽数拆成两个参数
+   （`srcframes` / `slots`），并加 `dryrun`——它现在既能把源帧放到目标槽上（实跑），也能
+   只走一遍算法报出"要填满 `slots` 个槽得消费多少个源帧"。定长度与填槽若各写一份，分叉
+   即静默错位，所以只有一个实现。
+2. **读入侧"读够为止"**（`readSubint` 的 VDIF 分支）：第一趟仍直接读进输出缓冲——无中断
+   路径**逐字节未变**；只有这一段的槽填不满时才改用可增长的 `inbuf`，翻倍读到够或文件
+   结束，上界 `sendbytes*16`。
+3. **扫描范围随之截断**：多读之后只把"填满 `slots` 所需的帧"交给 `checkFrameContinuity`
+   （`scanbytes = used × framebytes`）。越过该点的字节属于下一个 subint，不进本 subint 的
+   缺口/filler 账——`gapshiftAt` 与 `fillershiftbytes` 正是由这些账决定下一个读取位置。
+
+槽语义本身（数据帧占一槽、缺口按帧号差占若干槽、filler 不占槽）没有变，变的只是源从哪来。
+`main.cpp` 的 SwitchedPower 喂入加了一条保护：`lastReadContiguous()` 为假（本次跨过中断）
+时跳过该 subint——缓冲已是时间轴上的帧栅格，不再是文件字节的一段，字节级的重叠扣除与
+"连续流"假设都不再成立。
+
+**判据工具的坐标系修正（同一提交）**：`READPOS` 增 `slots` 字段（缓冲区的槽数），
+`check_reader.py` 的 **E3 与 E4 的 batch 上界改用它**。B2 之前 `nframes`（读入的文件帧数）
+恒等于槽数，两个量混用不出错；B2 之后 `nframes` 是"为填满这些槽扫过的文件帧数"，filler
+占字节不占槽，拿它当时间轴窗口宽度会把 filler 之后的数据区也圈进来，报出并不存在的漏标
+（实测 subint 2 报 `missing [437,493)`，而 `[0,133)` 内真值与 fxcorr 逐项相同）。E4 的
+**窗口位置**仍用 `nframes`——它问的是"哪些文件帧被读过"，那正是扫过的帧数。缺 `slots`
+的旧日志回退到 `nframes`，即 B2 之前的写法。
+
+**实测（测试机，2026-09-19）**：
+
+| 资产 | 结果 |
+|---|---|
+| `run_window.sh`（A1） | **E4 69 → 0**，4 subints 零 finding ✓；无中断对照同 ✓ |
+| `run_filler.sh` | 判据不退（缺口 169 == filler 169）、E3/E4 全 0、自检仍报红 ✓ |
+| `run_boundary.sh` | 两个场景零 finding、两条相对判据全绿、两条自检仍报红 ✓ |
+| `run_startoffset.sh` | E5 3 帧（容差 8）零 finding、自检 21 帧报红 ✓ |
+| **无中断 A/B**（64 subint，含 delay） | HEAD 版与 B2 版的 `band_00.sp` / `autocorr.bin` **md5 逐字节相同**；64 个 subint 全部 `nframes == slots`（未触发多读）✓ |
+| **真机 t25362**（`ssh difx`，B3） | ds_2：**E4 80 → 0**、E3 extra 63 → 0、2181 subints 零 finding ✓；ds_0 对照仍零 finding ✓；`GAPCHECK summary` 的 `missing 143` / `filler 1162` 与修复前逐项相同；**4 个 subint 触发多读**（最长 540 帧 vs 83 槽，全在 filler 段上，即 4.6 记的过渡区），ds_0 一次都没有 ✓ |
+
+A/B 的做法：`git show HEAD:` 导出改动前的三个源文件到测试机临时目录、编译、跑同一份数据
+（`BATCH_NSUBINTS=64` 的无中断合成数据），比对产物 md5 后恢复。
 
 ---
 
@@ -315,11 +422,13 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 | 缺口（直接缺帧） | `fxcorr/test/gaps/` T2 形式（`FXSIM_GAPS` 无 `:f`） | 已覆盖，判据 = `missing frames` |
 | filler 占位 | `fxcorr/test/gaps/` T1 形式（`:f`） | 已覆盖，判据 = filler 计数 + 帧号范围 |
 | **缺口跨越 subint 边界** | `fxcorr/test/gaps/run_boundary.sh` | 已覆盖（两个场景：跨边界不盖起点、盖住起点，判据见 7.5） |
-| 起点偏移（文件 ≠ batch 起点） | 无专门资产 | **未覆盖**（A1–A3 只在 t25362 上验证过） |
+| 起点偏移（文件 ≠ batch 起点） | `fxcorr/test/gaps/run_startoffset.sh` | 已覆盖（A2，判据 = E5 绝对时间锚 + 自检） |
+| **窗口长度**（filler 段之后还有数据） | `fxcorr/test/gaps/run_window.sh` | 已覆盖（A1，判据 = E4 = 0；B3 在真机 t25362 上复验） |
 | delay ≠ 0 | `fxcorr/test/p11/` | 已覆盖 |
 | 多格式 | `fxcorr/test/p10/` | 已覆盖 |
+| 其它 filler 形态（FILL_PATTERN / invalid 位） | 无 | **未覆盖**（合成资产只造过"全零头"，见 7.5 第 4 项） |
 
-**验收的盲区**：现有 gaps 判据只覆盖"缺口**被计数**"，不覆盖"缺口的**时间位置被放对**"。B5 恰好落在两者之间。
+**验收的盲区（2026-09-19 更新）**：四个 `run_*.sh` 的判据已全部收敛到 `test/reader/check_reader.py` 的绝对判据（A3），"缺口**被计数**"与"缺口的**时间位置被放对**"不再有缝——E3 直接拿文件真值断言洞的落点，B5 那种落在两者之间的缺陷现在当场现形。
 
 ---
 
@@ -360,7 +469,7 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 - `GAPCHECK summary`（**info** 级，默认可见）：`buffers / frames / discontinuities / missing frames / filler frames / boundaries`——缺口多的数据这一行就是体检结论。
 - `GAPCHECK buffer ... frameno A -> B (step, missing)`（verbose）：每个缺口一条；补扫区段里发现的为 `GAPCHECK skipped ...`，格式相同。另有 `GAPCHECK boundary ...`（读取位置异常漂移，上限 40 条）。
 - `GAPCHECK holes buf N: [a,b) [c,d)`（verbose）：每个被重建过的 buffer 一条，列出 `shiftFrameGaps` 留下的洞（**post-shift 帧槽区间**，转成块时 × `payloadbytes/blockbytes`）。这是 `.sp` 里 `valid_flags` 的直接来源，B5 修好后用它核对落位（t25362：buf 816 → `[38,49) [61,71)`，正是 .sp 835 的无效区）。
-- `READPOS subint N: readoff O firstfno F lastfno L nframes N missing M filler K gapshift G fillershift H gapframes X dst D framens S uncorr U passes P`（verbose）：逐 subint 读取位置诊断，**对照两个 ds 即可判定定位是否正确**。`gapframes` 是本次实际生效的缺口帧数、`dst` 是 `shiftFrameGaps` 的起始槽、`framens` 是 locate 给的时间轴帧号——B5 就表现为「跨界的那个 subint `firstfno` 早于对照」；`uncorr` 是未修正的位置（locate 的原始输出）、`passes` 是读取前 `scanSkippedStretch` 的收敛趟数（>1 说明读位置是在补扫过跳过区段之后才定的，t25362 最长一次 9 趟）。
+- `READPOS subint N: readoff O firstfno F lastfno L nframes N slots Sl missing M filler K gapshift G fillershift H gapframes X dst D framens S uncorr U passes P`（verbose）：逐 subint 读取位置诊断，**对照两个 ds 即可判定定位是否正确**。`slots`（2026-09-19 加，B2）是缓冲区的槽数，`nframes` 是为填满这些槽扫过的文件帧数——只有无中断时两者相等，判据的窗口宽度要按问题选：读过了哪些**文件帧**用 `nframes`（E4），时间轴上这一段有多长用 `slots`（E3）。`gapframes` 是本次实际生效的缺口帧数、`dst` 是 `shiftFrameGaps` 的起始槽、`framens` 是 locate 给的时间轴帧号——B5 就表现为「跨界的那个 subint `firstfno` 早于对照」；`uncorr` 是未修正的位置（locate 的原始输出）、`passes` 是读取前 `scanSkippedStretch` 的收敛趟数（>1 说明读位置是在补扫过跳过区段之后才定的，t25362 最长一次 9 趟）。
 - 级别由 `FXCORR_LOGLEVEL`（`error`/`warn`/`info`/`verbose`/`debug`，默认 `info`）控制。
 
 ### 6.5 外部交叉验证
@@ -425,13 +534,15 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 
 ### 7.5 待补的测试覆盖
 
-**本节各项的落地顺序与验收线见 `v4-plan.md` 阶段 A**（每节点一个 commit：A1 复现 E4 形态 / A2 起点偏移资产 / A3 判据入口收敛）。
+**本节各项的落地顺序与验收线见 `v4-plan.md`**（阶段 A 与 B 已收尾：A1 复现 E4 形态 /
+A2 起点偏移资产 / A3 判据入口收敛 / B1–B3 窗口长度定案、实现、真机复跑）。
 
 按优先级：
 
 1. ~~**缺口跨 subint 边界**（对应 B5）~~ —— **已补，2026-09-18**：`fxcorr/test/gaps/run_boundary.sh`。两个场景——缺口跨边界但不盖住读取位置（判据 `READPOS firstfno` 不得早于对照；summary 看不出来）、缺口盖住读取位置（判据 `.sp` 从第 0 块起权重为 0）。`FXSIM_GAPS` 的中断位置按帧号选：subint 131.072 帧，取 `0.52:30`／`0.48:30`。
-2. **起点偏移**（对应 A1–A3）——造"文件起点晚于 batch 起点"的数据。现有 `FXSIM_GAPS` 无此能力，需要生成器侧支持（写起始帧号偏移）。A1–A3 目前只在 t25362 上验证过，改坏了无回归可依。
+2. ~~**起点偏移**（对应 A 类）~~ —— **已补，2026-09-19**：生成器加 `FXSIM_STARTOFFSET=<帧数>`（文件起点晚于 batch 起点、`anchorbytes` 为负），资产 `fxcorr/test/gaps/run_startoffset.sh`（判据 = E5 绝对时间锚 + 一条自检）。
 3. **缺口 + filler 同段并存**——t25362 的 ds_2 是现实样本，`FXSIM_GAPS` 的 `:f` 形式可以造，但现有资产里缺口与 filler 是**分别**测的，没有一组同时含"filler 段两端夹真实缺口"。
+4. **其它 filler 形态**（见 4.8 的清单，B1 顺带产出）——合成资产只造过"全零头"一种。FILL_PATTERN 的两行 fxcorr 完全不识别；**invalid 位那一行两边行为可能不同**（mpifxcorr 的 mux flags 里没有 `ENABLEVALIDITY`，它不当 invalid 帧是 filler）。要验证 B2 的窗口修法对这些形态的泛化，得先把它们造出来。
 
 ### 7.6 其他建议
 
@@ -447,8 +558,8 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 | 文件 | 作用 |
 |---|---|
 | `mpifxcorr/src/datastream.cpp` | 基类 `DataStream::calculateControlParams`（:381-394 延迟/首 offsetns、:516-573 采样→字节偏移与延迟重对齐、:463-470 −nsinc 早退、:538-568 跳块/tosubtract、:757-761 `bytesbetweenintegerns` 累加、:600-604 valid flags 判界） |
-| `mpifxcorr/src/vdiffile.cpp` | `VDIFDataStream`（:396-401 muxed 帧参数、:417-444 帧对齐、:945-964 switched power 喂入） |
-| `libraries/vdifio/src/vdifmux.c` | 顺序读模型的缺口承担者（`:948` 缺帧输出标 invalid 位） |
+| `mpifxcorr/src/vdiffile.cpp` | `VDIFDataStream`（:396-401 muxed 帧参数、:417-444 帧对齐、:945-964 switched power 喂入）。**窗口长度定案（4.8）的证据链**：`:348-473` 定位、`:668-859` `dataRead`（`:742` 调用 vdifmux、`:788` 输出起点连续推进、`:796` 按 `srcUsed` 推进输入指针）、`:293-335` 顺序读线程 |
+| `libraries/vdifio/src/vdifmux.c` | 顺序读模型的缺口承担者（`:948` 缺帧输出标 invalid 位）。**4.8 的证据链**：`:567` 输出槽数、`:588-773` 主循环（`:598-631` filler/invalid 跳字节不写 dest）、`:682` 槽号 = 帧号 − 起点、`:865-868` 收尾补齐、`:1004` `nOutputFrame` 含无效帧 |
 | `libraries/fxcorrcommon/src/mk5mode.cpp` | `unpack`（`mark5_unpack_with_offset` + `blank_vdif_EDV4`） |
 | `applications/fxcorr-f/src/datareader.{h,cpp}` | 本文件分析的对象；头文件注释含 P10/P11/P12 的分层说明 |
 

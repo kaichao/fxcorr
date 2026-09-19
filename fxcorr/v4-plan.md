@@ -31,9 +31,9 @@ A1 若现有 `FXSIM_GAPS` 语法造不出目标形态，则先给生成器加参
 
 | 节点 | 做什么 | 验收 |
 |---|---|---|
-| B1 | **语义定案**（不动代码）：读 `mpifxcorr/src/vdiffile.cpp:417-444` 与 `libraries/vdifio/src/vdifmux.c`，写清上游的读取窗口由什么决定（字节数 / 帧数 / 时间），以及它遇到缺口与 filler 时窗口如何变化——mpifxcorr 在**顺序读**下"滑过 filler 继续填满输出缓冲"的机制，与本实现"窗口 = 时间窗 × 速率"的差异逐条对照 | 文档给出**唯一解**，并说明它如何覆盖 A1 报出的红 |
-| B2 | 按 B1 的结论实现 | A1 转绿；`run_filler.sh` 判据不退（169 == 169）；无缺口、无 filler 的数据路径 **md5 逐字节不变** |
-| B3 | 真机复跑 t25362（`ssh difx`） | ds_2 的 E4 由 **80 → 0**；ds_0 对照仍零 finding；`READPOS`/`GAPCHECK` 无新异常 |
+| ✅ B1 | **语义定案**（2026-09-19，不动代码）：读上游读取路径——定位（`vdiffile.cpp:348-473`）、`dataRead`（`:668-859`）、读线程（`:293-335`）、`vdifmux` 主循环（`libraries/vdifio/src/vdifmux.c:496-1033`）。结论：上游的窗口长度定义**在输出侧**——输出槽数固定（`destSize/outputFrameSize`）、槽号就是时间轴帧号，输入侧按需消费到填满（filler 跳字节不占槽、空槽输出 invalid 占位帧），`startOutputFrameNumber` 逐次连续推进使整个模型**闭环**；本实现反过来，长度固定在**输入侧**（`sendbytes` 字节），换算隐含"每帧都提供净荷"的假设 | `reader-model.md` 4.8 给出**唯一解**：窗口按"填满 N 个时间槽"定义、读入字节数可变，重算 A1 的 69 帧（继续读约 72 帧即与下一个窗口衔接）、并说明 `1.0:40:f400` 与无中断路径为何逐字节不变 ✓；另附 filler 形态清单（上游认五种，fxcorr 只覆盖两种）|
+| ✅ B2 | 按 B1 的结论实现（2026-09-19）：`shiftFrameGaps` 的源帧数与目标槽数拆开并加 `dryrun`（填槽与"够不够"共用一份算法）、`readSubint` 第一趟照旧直读进输出缓冲、填不满才改用可增长的 `inbuf` 翻倍多读、扫描范围截断到"填满所需"；`READPOS` 增 `slots` 字段，`check_reader.py` 的 E3 与 E4 的 batch 上界随之改用槽数（E4 的窗口位置仍用 `nframes`）；SwitchedPower 喂入加 `lastReadContiguous()` 保护 | A1 转绿（**E4 69 → 0**）✓；`run_filler.sh` 判据不退（169 == 169）、`run_boundary.sh` / `run_startoffset.sh` 全绿、三条自检仍报红 ✓；无缺口、无 filler 的 64-subint 数据 **md5 逐字节不变**（HEAD 版 A/B 实测）✓。实施与实测见 `reader-model.md` 4.9 |
+| ✅ B3 | 真机复跑 t25362（`ssh difx`，2026-09-19）：BA 站 ds_2（有 filler）与 ds_0（对照）各重跑一遍（verbose），`test/reader/check_reader.py` 对账 | ds_2 的 E4 由 **80 → 0** ✓、E3 extra 63 → 0 ✓、2181 subints 零 finding ✓；ds_0 对照仍零 finding ✓；`GAPCHECK summary` 的 `missing 143` / `filler 1162`（ds_2）与修复前逐项相同 ✓；**多读路径确实被走到**——ds_2 有 4 个 subint 的 `nframes > slots`（最长 540 帧 vs 83 槽，全在 filler 段上），ds_0 一次都没有 ✓ |
 
 ## 阶段 C：分层重构（只定目标与验收线）
 
@@ -41,7 +41,7 @@ A1 若现有 `FXSIM_GAPS` 语法造不出目标形态，则先给生成器加参
 
 三次提交对应三层（`refactor(fxcorr-f): ...`），每步的验收 = **阶段 A 全部资产绿 + 无缺口数据逐字节不变**。
 
-**本阶段现在只能定到验收线，不能定到 commit**：接口取决于 B1 的结论（窗口长度是否也要成为时间轴的函数）。待 B3 完成后回填。
+**本阶段的 commit 级规划现在可以定**（B2/B3 已完成）：三层的接口由 B2 的实现形态确定下来了——帧时间轴层 = `shiftFrameGaps` 的槽算法、修正量层 = `gapshiftAt` / `fillershiftbytes`、I/O 层 = `readSubint` 的读够为止（`reader-model.md` 4.9）。
 
 ## 阶段 D：判据固化
 
@@ -53,15 +53,19 @@ A1 若现有 `FXSIM_GAPS` 语法造不出目标形态，则先给生成器加参
 
 **具备 commit 级规划条件的是阶段 A、B**：工具齐（`fxcorr/test/reader/` 已在真机上验证过一轮）、判据是绝对的（不依赖基准）、真机可复跑。
 
-**不具备的是阶段 C 的 commit 级规划**，三个条件：
+**阶段 C 的 commit 级规划**曾列三个条件，现已全部具备：
 
-1. **B1 的语义定案未完成**——"读取窗口应该多长"尚无定义。这是唯一剩下的条件;
+1. ✅ B1 的语义定案（2026-09-19 完成）——上游的窗口长度定义在输出侧（输出槽数固定、槽号即
+   时间轴帧号、输入按需消费到填满），唯一解是"按时间槽填满"（`reader-model.md` 4.8）;
 2. ✅ A2 的起点偏移资产（2026-09-19 完成）;
 3. ✅ A3 的判据入口收敛（2026-09-19 完成：`gaps/` 四个脚本的验收判据全部走 `check_reader.py`）。
 
-**阶段 A 就此收尾**（2026-09-19）：A1–A3 全绿，四个 gaps 资产都是绝对判据（`run_window` /
-`run_startoffset` 从一开始就是，`run_filler` / `run_boundary` 在 A3 补上，旧相对判据保留作
-交叉核对）。阶段 C 的 commit 级规划待 B1 完成后回填。
+**阶段 A 与阶段 B 就此收尾**（2026-09-19）：A1–A3 全绿，四个 gaps 资产都是绝对判据
+（`run_window` / `run_startoffset` 从一开始就是，`run_filler` / `run_boundary` 在 A3 补上，
+旧相对判据保留作交叉核对）；B1 的结论见 `reader-model.md` 4.8、B2 的实施与实测见 4.9、
+B3 的真机复跑见 4.9 的实测表末行。**阶段 C（分层重构）的 commit 级规划现在可以回填**——
+B2 已把三层的边界划出来（帧时间轴层 = `shiftFrameGaps` 的槽算法、修正量层 = `gapshiftAt` /
+`fillershiftbytes`、I/O 层 = `readSubint` 的读够为止），重构按此切。
 
 **已知风险**：E4 的修法空间被探过一次并否决（4.7 末段），所以 B2 之前不允许动代码；只有一份真实数据（t25362），且它在 E4 形态下的基准不可用（mpifxcorr 的 `vdifmux` 丢字节 + 纯字节数判据，4.6），阶段 C 的真实侧验收只有这一条线。
 

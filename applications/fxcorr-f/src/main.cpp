@@ -515,7 +515,14 @@ int main(int argc, char **argv)
 		// so skip the bytes already covered by the previous subint to keep the
 		// block frame-continuous -- upstream feeds the continuous vdifmux
 		// stream, which has no overlap.
-		if(switchedpower && bytes > 0)
+		// B2 (reader-model.md 4.8): once a subint has bridged a recording
+		// interruption its buffer is a frame grid on the time axis -- filler
+		// dropped, gap slots left empty -- and no longer a run of file bytes, so
+		// the overlap bookkeeping below (and the feed's assumption of a
+		// continuous stream) does not describe it.  Those subints are skipped
+		// rather than fed bytes whose place in the stream is not known; the
+		// next contiguous subint starts the block afresh.
+		if(switchedpower && bytes > 0 && reader.lastReadContiguous())
 		{
 			long long curstart = reader.getLastFileOffset();
 			long long skip = prevfileoffset - curstart;
@@ -542,6 +549,14 @@ int main(int argc, char **argv)
 					spblockfill = 0;
 				}
 			}
+		}
+		else if(switchedpower && bytes > 0)
+		{
+			FXLOG(FXLOG_VERBOSE) << "SWITCHEDPOWER subint " << s
+			     << ": skipped (buffer is a time-slot grid, not a byte run)" << endl;
+			// restart the block after the interruption: the next contiguous
+			// subint sees a negative overlap and feeds from its own start
+			prevfileoffset = reader.getLastFileOffset();
 		}
 
 		// P1: input datarate diagnostics, upstream datastream.cpp:631-634

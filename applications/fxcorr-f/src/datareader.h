@@ -64,6 +64,13 @@ public:
 	 * (the frame-aligned, delay-corrected position). */
 	long long getLastFileOffset() const { return lastfileoffset; }
 
+	/** Whether the last readSubint handed over a contiguous run of file bytes.
+	 * False once the window had to bridge a recording interruption: the buffer
+	 * is then a frame grid on the time axis -- filler dropped, gap slots left
+	 * empty -- and not something a byte-wise consumer can walk (B2,
+	 * reader-model.md 4.8). */
+	inline bool lastReadContiguous() const { return lastcontiguous; }
+
 private:
 	// reader kind, decided by the datastream format (algo-plan.md P10)
 	enum readerkind { KIND_VDIF, KIND_MUXEDVDIF, KIND_MARK5B, KIND_MK5STREAM, KIND_LBA };
@@ -90,8 +97,26 @@ private:
 	// VDIF only: the frame number lives in word 1 of the VDIF header in
 	// vdifio's word layout; muxed VDIF output frames are synthesised by the
 	// corner-turner and the other kinds have no such field.
-	void checkFrameContinuity(u8 *buffer, int bytes, long long readoffset);
-	void shiftFrameGaps(u8 *buffer, int nframes);
+	//
+	// B2 (reader-model.md 4.8): the window is filled by time slots, not by input
+	// bytes, so the bytes being *scanned* and the slots being *filled* are two
+	// different numbers.  src/srcbytes is the stretch of file actually needed
+	// for this subint -- the caller trims it to what fills `slots` slots, so a
+	// filler run's tail does not count into this subint's books -- and dst is
+	// the subint's frame grid, `slots` frames long.  Returns the number of slots
+	// placed (the frame ranges that end up without data are in gapinvalid).
+	int checkFrameContinuity(const u8 *src, int srcbytes, long long readoffset, u8 *dst, int slots);
+
+	// Places each source frame where its frame number says it belongs: filler is
+	// dropped (it has no time slot) and a jump in the frame number advances the
+	// destination by the jump, leaving the slots in between as holes.  Returns
+	// the number of slots placed.  With dryrun the walk happens without writing
+	// dst or recording holes -- that is how the caller finds out how many input
+	// frames this subint actually needs -- and *usedframesp receives the frames
+	// consumed getting that far.  src and dst may be the same buffer (the
+	// ordinary case), which is why the rebuild goes through gapbuffer.
+	int shiftFrameGaps(const u8 *src, int srcframes, u8 *dst, int slots,
+	                   int *usedframesp = 0, bool dryrun = false);
 	long long countFillerRange(long long start, long long end, long long chainfr, long long *gapsp, long long *lastfrp);
 
 	// Reads the stretch between the last scan's watermark and `upto`, counting
@@ -256,6 +281,20 @@ private:
 	// post-shift frame ranges for fillValidFlags
 	std::vector<std::pair<int,int> > gapinvalid;
 	u8 *gapbuffer;			// scratch for the shifted buffer (sendbytes)
+
+	// B2 (reader-model.md 4.8): input buffer for reads that have to bridge a
+	// filler run.  The first attempt reads straight into the output buffer --
+	// the no-interruption case, byte for byte what it always was -- and only
+	// when that stretch cannot fill the subint's slots does the read move here
+	// and grow, since how many bytes are needed is not known until the run has
+	// been walked.
+	u8 *inbuf;
+	int inbufsize;
+	// whether the last read was the whole of what the file holds there.  False
+	// once filler bytes were dropped or gap slots left without data: the buffer
+	// is then a frame grid on the time axis, not a run of file bytes, which is
+	// what the switched-power feed assumes (P6).
+	bool lastcontiguous;
 };
 
 #endif

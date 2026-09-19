@@ -34,9 +34,13 @@ import file_truth
 
 READPOS_RE = re.compile(
     r'READPOS subint (\d+): readoff (-?\d+) firstfno (-?\d+) lastfno (-?\d+) '
-    r'nframes (\d+) missing (\d+) filler (\d+) gapshift (-?\d+) fillershift (-?\d+) '
+    r'nframes (\d+)(?: slots (\d+))? missing (\d+) filler (\d+) gapshift (-?\d+) fillershift (-?\d+) '
     r'gapframes (-?\d+) dst (-?\d+) framens (-?\d+)'
-    r'(?: uncorr (-?\d+) passes (\d+))?')	# uncorr/passes 是 2026-09-18 加的
+    r'(?: uncorr (-?\d+) passes (\d+))?')
+    # slots 是 2026-09-19 加的（B2）：窗口按时间槽填满之后，nframes（为填满这些槽
+    # 扫过的文件帧数）与 slots（缓冲区的槽数）不再相等，E3 要比的是后者、E4 是前者。
+    # 缺省的 slots（旧日志）回退到 nframes，那是 B2 之前两者相等的写法。
+    # uncorr/passes 是 2026-09-18 加的
 HOLES_RE = re.compile(r'GAPCHECK holes buf (\d+):(.*)')
 HOLE_RANGE_RE = re.compile(r'\[(-?\d+),(-?\d+)\)')
 
@@ -57,9 +61,9 @@ def parse_log(path):
                 v = [int(x) if x is not None else None for x in m.groups()]
                 subints.append({
                     'n': v[0], 'readoff': v[1], 'firstfno': v[2], 'lastfno': v[3],
-                    'nframes': v[4], 'missing': v[5], 'filler': v[6], 'gapshift': v[7],
-                    'fillershift': v[8], 'gapframes': v[9], 'dst': v[10], 'framens': v[11],
-                    'uncorr': v[12], 'passes': v[13],
+                    'nframes': v[4], 'slots': v[5], 'missing': v[6], 'filler': v[7],
+                    'gapshift': v[8], 'fillershift': v[9], 'gapframes': v[10], 'dst': v[11],
+                    'framens': v[12], 'uncorr': v[13], 'passes': v[14],
                 })
                 continue
             m = HOLES_RE.search(line)
@@ -250,8 +254,12 @@ def main():
     for k, row in enumerate(rows):
         if 'f_lo' not in row:
             continue
+        # E3 的窗口是缓冲区的槽：B2 之后 nframes 是"为填满这些槽扫过的文件帧数"，
+        # 可能远大于槽数（filler 占字节不占槽），拿它当窗口宽度会把 filler 之后、
+        # 槽已经填满的区域也算进来，报出并不存在的漏标
+        slotsw = row['slots'] if row.get('slots') is not None else row['nframes']
         row['truth_holes'] = norm(file_truth.holes_in_window(
-            truth, row['f_lo'], row['f_lo'] + row['nframes'], fps))
+            truth, row['f_lo'], row['f_lo'] + slotsw, fps))
         got = list(holes.get(row['n'], []))
         # A 类起点偏移（文件起点晚于 batch 起点）不走 gapinvalid：locate 算出负位置后由
         # settleReadPosition 钳到文件首帧、把跳过的块记进 lastcount，fillValidFlags 再把
@@ -302,7 +310,8 @@ def main():
     # 尾部那截数据本就不该被读，报出来会淹掉真正的损失。
     flo = [row['f_lo'] for row in rows if 'f_lo' in row]
     lo_f = flo[0] if flo else None
-    hi_f = flo[-1] + rows[-1]['nframes'] if flo else None
+    # 时间轴上的上界，所以是槽数不是扫过的文件帧数（同 E3，B2 之后两者不等）
+    hi_f = flo[-1] + slotsw if flo else None
 
     lost = 0
     lost_spans = []

@@ -117,7 +117,7 @@ BA 站 ds_2（有 filler，1.5 GB / 192076 帧）与 ds_0（无 filler 的对照
 **台账与人工扫描逐项吻合**：ds_2 的 8 段 filler 为 81/82/229/180/17/49/16/508 = 1162 帧、
 8 处缺口共 143 帧——正是 `reader-model.md` 4.6 记下的数字（当时靠手写脚本数出来）。
 
-ds_2 的对账结论（当前代码，D-a/D-b 修复后重跑）：
+ds_2 的对账结论（**B2 之前**，D-a/D-b 修复后重跑）：
 
 ```
   sub   readoff     f_lo         framens first  E1  truth holes             fxcorr holes  verdict
@@ -135,6 +135,20 @@ E4 coverage : 80 data frames inside the batch never fell inside any read window
 部分既读不到、也不会出现在任何 `.sp` 里（`shiftFrameGaps` 只是诚实地把没填满的槽标成
 无效，就是那 63 槽 extra）。上游 `vdifmux` 的顺序读会滑过 filler 继续填满输出缓冲，所以
 mpifxcorr 没有这个形态。
+
+**B2 之后（2026-09-19 重跑，同一条命令）**：
+
+```
+summary     : 2181 subints, 0 with a finding; E3 extra 0 slots, missing 0 slots
+E4 coverage : 0 data frames inside the batch never fell inside any read window
+              (12406 further frames outside the batch window, expected ...)
+```
+
+**80 帧的净损失归零，E3 那 63 槽 extra 同时消失**（同一根因的标记面症状：洞的尾巴一直
+延伸到缓冲区末尾），2181 个 subint 零 finding。`GAPCHECK summary` 的 `missing 143` /
+`filler 1162` 与修复前逐项相同——修的是窗口长度，账没有变。ds_2 有 **4 个 subint 的
+`nframes > slots`**（最长 540 帧 vs 83 槽），全落在 filler 段上（正是 4.6 记的过渡区
+816/817/2019），这是多读路径确实被走到的证据；ds_0 一次都没有。
 
 **ds_0 对照（同一观测、无 filler、缺口更多）零 finding**：`2181 subints, 0 with a finding;
 E3 extra 0 slots, missing 0 slots; E4 coverage: 0 data frames ... never fell inside any read
