@@ -1,5 +1,8 @@
 # P11 reader 语义检验（valid flag 跨段续接、延迟中途重对齐）
 
+> **验证记录（冻结）**——本目录记录 P11 的检验资产与验证过程，**截止 2026-09-14，此后未再更新**。
+> 脚本与其判据仍是当前的；本文记的是当时的验证结论。读取路径的后续改进见 `reader-model.md` 与 `v4-plan.md`。
+
 algo-plan.md P11。验证目标：datareader 的 delay 重对齐语义（修正起点早于数据起点时的跳块 + count 块 invalid + 时间重算）与 mpifxcorr 逐位对拍；delay=0 回归（cmp5 6/6）保持全等。
 
 ## 资产

@@ -1,5 +1,8 @@
 # P10 输入格式检验（Mark5B / LBA / 多线程 VDIF corner-turn / mark5access 通用集）
 
+> **验证记录（冻结）**——本目录记录 P10 的检验资产与验证过程，**截止 2026-09-14，此后未再更新**。
+> 脚本与其判据仍是当前的；本文记的是当时的验证结论。
+
 algo-plan.md P10。验证策略（2026-09-13 用户定）：**Mark5B、多线程 VDIF、LBA 逐位对拍**；MKIV/VLBA/VLBN/KVN5B/CODIF 通性验证（无基准数据，代码对照审查兜底）；K5VSSP/K5VSSP32 上游不可用不迁移（mark5access K5 "Not Yet Implemented"、genMk5FormatName 无 K5 分支）。
 
 ## 资产

@@ -1,5 +1,8 @@
 # mpifxcorr 目录说明
 
+> **上游原版（冻结）**——本目录是 DiFX 2.9.1 的 mpifxcorr，**保留不删、不做改造**（R7），
+> 本文描述的内容因此**不随 fxcorr 改造更新**；改造后的实现见 `applications/fxcorr-{f,x}`。
+
 DiFX 原 MPI 一体化相关器，是 fxcorr-f / fxcorr-x 拆分的源。本目录保留不删（R7），拆分以拷贝 + 改造方式进行。
 
 ## 构建

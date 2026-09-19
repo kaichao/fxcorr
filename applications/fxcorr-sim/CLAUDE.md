@@ -1,5 +1,7 @@
 # fxcorr-sim 目录说明
 
+**最后更新**：2026-09-19
+
 仿真 VDIF 数据生成器：无 MPI 串行程序，单二进制三入口（`common` 生成共享公共信号 / `station` 生成单站 VDIF / 无子命令本机串行）。datasim 的替身（上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建）。新架构 P0-P4 全部完成并验证（2026-09-14）。
 
 本文是该目录的操作说明（源文件地图、关键实现要点、构建注册）。命令行与环境变量见 `fxcorr/usage.md`（fxcorr-sim 段），架构设计（分布式形态、公共信号模型、datasim 特性差距、阶段 P0-P4）见 `fxcorr/fxcorr-sim-arch.md`，验证记录见本目录 `VERIFICATION.md`，测试资产与对拍流程见 `fxcorr/CLAUDE.md` 与 `fxcorr/test/`。

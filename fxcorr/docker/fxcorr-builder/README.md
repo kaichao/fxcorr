@@ -1,5 +1,7 @@
 # fxcorr-builder
 
+**最后更新**：2026-09-12（V2 镜像体系建成，此后未再变）
+
 fxcorr 构建环境镜像：debian 13 + DiFX 构建工具链与依赖库，构建时全量编译安装到 `/usr/local/difx`（`install-difx --noipp --nodoc --skip=mpifxcorr`）。
 
 - 构建上下文 = 仓库根（Makefile 中 `../../..`），COPY 仓库后在镜像内完成编译；产物由下层镜像 COPY，不在运行时使用。

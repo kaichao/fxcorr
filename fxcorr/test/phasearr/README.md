@@ -1,5 +1,8 @@
 # 相位阵频率域波束形成（P8）检验
 
+> **验证记录（冻结）**——本目录记录 P8 的检验资产与验证过程，**截止 2026-09-13，此后未再更新**。
+> 脚本与其判据仍是当前的；本文记的是当时的验证结论。
+
 本目录是相位阵（PHASED ARRAY）特性的检验资产与验证记录（algo-plan P8）。设计见 `algo-plan.md` P8 节；实现见 `applications/fxcorr-x/src/beamengine.{h,cpp}` 与 `main.cpp` 的 beam 分支。
 
 ## 背景：上游是死代码，无对拍

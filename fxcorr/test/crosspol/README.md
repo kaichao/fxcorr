@@ -1,5 +1,8 @@
 # 交叉极化自相关（P7）检验
 
+> **验证记录（冻结）**——本目录记录 P7 的检验资产与验证过程，**截止 2026-09-13，此后未再更新**。
+> 脚本与其判据仍是当前的；本文记的是当时的验证结论。
+
 本目录是交叉极化自相关（WRITE AUTOCORRS / maxproducts>2）特性的检验资产与验证记录（algo-plan P7）。设计见 `algo-plan.md` P7 节；实现易错点见 `applications/fxcorr-f/CLAUDE.md` 与 `applications/fxcorr-x/CLAUDE.md` 关键实现要点。
 
 ## 资产

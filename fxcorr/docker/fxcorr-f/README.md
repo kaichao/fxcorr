@@ -1,5 +1,7 @@
 # fxcorr-f
 
+**最后更新**：2026-09-12（V2 镜像体系建成，此后未再变）
+
 station-based 相关器前端（解包、模型、通道化）生产镜像：`fxcorr-base` + `bin/fxcorr-f`。
 
 ## 构建

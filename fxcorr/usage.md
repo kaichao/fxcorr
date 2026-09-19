@@ -1,5 +1,7 @@
 # fxcorr 工具命令行手册
 
+**最后更新**：2026-09-19
+
 覆盖三个改造应用的命令行接口：`fxcorr-sim`（仿真数据生成器）、`fxcorr-f`（Station-based）、`fxcorr-x`（Baseline-based）。目录布局与 batch.json 格式见 `data-spec.md`。
 
 ## 通用约定

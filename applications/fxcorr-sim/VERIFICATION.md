@@ -1,5 +1,7 @@
 # fxcorr-sim 验证记录
 
+**最后更新**：2026-09-14（最新一节 P4；新架构 P0–P4 全部完成，此后未再追加）
+
 本文是 fxcorr-sim 的验证档案（测试机 /root/fxcortest/），按阶段与路径归档；最新条目在前的小节内按时间追加。源文件地图/实现要点见本目录 `CLAUDE.md`，架构与阶段见 `fxcorr/fxcorr-sim-arch.md`，命令行手册见 `fxcorr/usage.md`，测试资产与对拍流程见 `fxcorr/CLAUDE.md` 与 `fxcorr/test/`（各特性子目录 README.md）。
 
 ## legacy 路径（旧时域合成，字节对拍回归）

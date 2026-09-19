@@ -1,5 +1,8 @@
 # SwitchedPower（P6）检验
 
+> **验证记录（冻结）**——本目录记录 P6 的检验资产与验证过程，**截止 2026-09-13，此后未再更新**。
+> 脚本与其判据仍是当前的；本文记的是当时的验证结论。
+
 本目录是 SwitchedPower（TCAL 噪声功率）特性的检验资产与验证记录（algo-plan P6）。设计见 `algo-plan.md` P6 节；实现易错点见 `applications/fxcorr-f/CLAUDE.md` 关键实现要点。
 
 ## 资产

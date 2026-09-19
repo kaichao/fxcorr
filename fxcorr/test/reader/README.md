@@ -1,5 +1,7 @@
 # reader 对账：文件真值（`file_truth.py` / `check_reader.py`）
 
+**最后更新**：2026-09-19（V4 阶段 D：`run_t25362.sh` 真实数据回归固化；诊断契约见 `fxcorr/reader-model.md` 6.6）
+
 ## 用途
 
 给 fxcorr-f 的读取路径一个**绝对**判据。`fxcorr/test/gaps/` 的判据都是相对的（缺口形式对

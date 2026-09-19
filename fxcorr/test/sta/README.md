@@ -1,5 +1,8 @@
 # P9 检验资产：Kurtosis STA + STA 频域平均分支
 
+> **验证记录（冻结）**——本目录记录 P9 的检验资产与验证过程，**截止 2026-09-13，此后未再更新**。
+> 脚本与其判据仍是当前的；本文记的是当时的验证结论。
+
 ## 背景
 
 上游 mpifxcorr 的 STA 监控（`averageAndSendAutocorrs`，core.cpp:1166-1265）与 Kurtosis

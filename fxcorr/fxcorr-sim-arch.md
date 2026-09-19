@@ -1,6 +1,8 @@
 # fxcorr-sim 分布式架构（单二进制 `fxcorr-sim`）
 
-2026-09-14 定稿。本文定 fxcorr-sim 的分布式形态与公共信号模型；命令行手册（参数/环境变量/示例）见 `usage.md`，源文件地图/实现要点见 `applications/fxcorr-sim/CLAUDE.md`，验证记录见 `applications/fxcorr-sim/VERIFICATION.md`，common/ 产物格式见 `data-spec.md`。
+**最后更新**：2026-09-15（2026-09-14 定稿）
+
+本文定 fxcorr-sim 的分布式形态与公共信号模型；命令行手册（参数/环境变量/示例）见 `usage.md`，源文件地图/实现要点见 `applications/fxcorr-sim/CLAUDE.md`，验证记录见 `applications/fxcorr-sim/VERIFICATION.md`，common/ 产物格式见 `data-spec.md`。
 
 ## 1. 定位与目标
 

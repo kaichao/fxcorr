@@ -1,5 +1,7 @@
 # fxcorr-f 目录说明
 
+**最后更新**：2026-09-19（V4：reader 拆成三层、真值判据固化；见 `fxcorr/v4-plan.md`）
+
 station-based 相关器前端（F-Engine）：无 MPI 串行程序，逐站处理一个 batch 的本地原始数据，产出 band_XX.sp / pcal.bin / autocorr.bin（格式见 `fxcorr/data-spec.md` 5.3）。对拍目标为 mpifxcorr 的 station-based 段，核心算法（解包/条纹旋转/分数采样/FFT/自相关）零改动复用 fxcorrcommon 的 Mode。
 
 ## 调用方式

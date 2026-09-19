@@ -1,5 +1,7 @@
 # libraries 目录说明
 
+**最后更新**：2026-09-15
+
 14 个共享库，每个都是独立 autotools + libtool 包，通过 pkg-config 相互发现（无统一根构建）。fxcorrcommon 已建成。
 
 ## 库一览

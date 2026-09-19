@@ -1,5 +1,7 @@
 # 缺口与 filler 处理检验（FXSIM_GAPS）
 
+**最后更新**：2026-09-19（四个 `run_*.sh` 的判据已全部收敛到 `reader/check_reader.py`）
+
 ## 用途
 
 回归 fxcorr-f 的**记录中断**处理：文件中间缺帧（`gapshiftbytes`）与 filler 帧占位

@@ -1,6 +1,8 @@
 # fxcorr 仓库说明
 
-DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆分相关器"改造。改造需求与架构见 `fxcorr/README.md`，数据规范见 `fxcorr/data-spec.md`，工具命令行见 `fxcorr/usage.md`，构建见 `fxcorr/build.md`。改造代码前先读对应子目录的 CLAUDE.md。
+**最后更新**：2026-09-15
+
+DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆分相关器"改造——**主线 V1–V4 已完成**（拆分与目录接口、容器化、模块级 OpenMP、读取路径改进），版本路线与最新结论见 `fxcorr/v4-plan.md`。改造需求与架构见 `fxcorr/README.md`，数据规范见 `fxcorr/data-spec.md`，工具命令行见 `fxcorr/usage.md`，构建见 `fxcorr/build.md`。改造代码前先读对应子目录的 CLAUDE.md。
 
 ## 目录地图
 

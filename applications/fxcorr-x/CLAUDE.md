@@ -1,5 +1,7 @@
 # fxcorr-x 目录说明
 
+**最后更新**：2026-09-17
+
 baseline-based 相关器后端（X-Engine）：无 MPI 串行程序，读 fxcorr-f 的 .sp / autocorr.bin 产物，做 XMAC 与长期积分，可见度直出 SWIN（`vis/<experiment>.difx/`）。算法照 mpifxcorr 的 `Core::processdata()` 切分移植，写盘复用 fxcorrcommon 的 Visibility（零改造）。
 
 ## 调用方式

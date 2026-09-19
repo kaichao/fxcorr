@@ -1,5 +1,7 @@
 # difx-tools
 
+**最后更新**：2026-09-12（V2 镜像体系建成，此后未再变）
+
 前/后处理单节点工具合集生产镜像：`fxcorr-base` + `vex2difx`、`difxcalc`（difxcalc11 的安装名）、`difx2fits`。
 
 ## 构建

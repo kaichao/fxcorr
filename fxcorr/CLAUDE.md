@@ -1,20 +1,54 @@
 # fxcorr 改造工作区
 
+**最后更新**：2026-09-19（V4 完成）
+
 本目录是 fxcorr 改造的工作区：文档 + bash 编排脚本（**脚本直接放本目录，与 README / data-spec 平级，不再设 scripts/ 子目录**）+ test/ 测试资产。算法实现见 `applications/fxcorr-f`（已建成，见其 CLAUDE.md）、`applications/fxcorr-x`（已建成，见其 CLAUDE.md），仿真数据生成器见 `applications/fxcorr-sim`（已建成，见其 CLAUDE.md；验证档案见其 VERIFICATION.md），共享代码见 `libraries/fxcorrcommon`（已建成）。
 
 ## 文档分工
 
-- **README.md**：需求（R1-R7）、总体架构（含 mpifxcorr 改造基准三层分类与核心算法链，3.1-3.3 节）、实现阶段（V1/V2/V3）、设计要点。改架构/需求时改它。
+- **README.md**：需求（R1-R7）、总体架构（含 mpifxcorr 改造基准三层分类与核心算法链，3.1-3.3 节）、实现阶段（V1–V4，四阶段均已完成的记录）、设计要点。改架构/需求时改它。
 - **data-spec.md**：数据规范（版本 1.1）—— 目录布局、D1-D13 数据类型、模块 I/O、band_XX.sp / pcal.bin / autocorr.bin / SWIN 二进制格式、时间轴与通道/偏振映射、切批约束。**改数据接口/文件格式时必须先同步它**。
 - **reader-model.md**：fxcorr-f 读取模型与读取缺陷分析——读模型对照（顺序读 vs 定位读）、缺陷根因总表（A 起点 / B 缺口 / C filler / D 有效性）、症状指纹与 `GAPCHECK`/`READPOS` 判据、改造建议。**改 datareader 前先读它**；读取相关的**分析**内容集中在此（data-spec 5.2 只留数据规格约束，`applications/fxcorr-f/CLAUDE.md` 只留目录级实现要点）。
-- **v1-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。改实施步骤时改它。
-- **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。改 V2 范围或镜像设计时改它。
-- **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。改 V3 范围时改它。
-- **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）——接手 reader 工作时先读它。**改 reader 的计划与顺序时改它**（分析与判据仍在 reader-model.md，本文件不重复）。
+- **v1-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。**已冻结**（2026-09-15）。
+- **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。**已冻结**（2026-09-18）。
+- **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。**已冻结**（2026-09-19）。
+- **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）——**接手 reader 工作时先读它**。**已冻结**（2026-09-19，最新一份）；分析与判据仍在 reader-model.md，本文件不重复。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、datasim 特性差距、P0-P4 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
 - **build.md**：构建手册——集成构建（install-difx）与独立构建（单包 autotools）两条路径、依赖、测试机工作流。改构建体系时改它。
+
+### 文档状态（防误读）
+
+每个文档的**头部**都写着自己的「最后更新」与性质，本表是索引。性质只有两类：
+
+- **活文档**——描述当前系统，代码/接口变了**必须**同步；
+- **冻结文档**——记录某一阶段的定案与实施，写完不再改，只在头部声明截止日期。**冻结不等于过时**：
+  它是理解当前代码"为什么这么写"的依据。
+
+| 文档 | 性质 | 最后更新 | 一句话 |
+|---|---|---|---|
+| `README.md` | 活 | 2026-09-19 | 需求与架构（R1–R7 的出处） |
+| `data-spec.md` | 活 | 2026-09-18 | 数据接口与文件格式；改接口**先**改它 |
+| `usage.md` | 活 | 2026-09-19 | 三工具命令行手册 |
+| `build.md` | 活 | 2026-09-13 | 构建手册（构建体系自 V1 定稿后未变） |
+| `reader-model.md` | 活 | 2026-09-19 | 读取路径的**单一权威分析**；改 datareader 先读它 |
+| `algo-plan.md` | 活 | 2026-09-19 | 算法改进的设计与实施记录（P0–P12） |
+| `fxcorr-sim-arch.md` | 活 | 2026-09-15 | fxcorr-sim 架构与公共信号模型 |
+| `v4-plan.md` | 冻结（最新） | 2026-09-19 | **当前版本的路线与结论**（V4 已完成，结论在开头） |
+| `v3-plan.md` | 冻结 | 2026-09-19 | V3 定案与实施（P3 OpenMP、P12 病态数据） |
+| `v2-plan.md` | 冻结 | 2026-09-18 | V2 定案与实施（镜像体系、P0–P11） |
+| `v1-plan.md` | 冻结 | 2026-09-15 | V1 定案与实施 |
+
+**接手 reader 工作**：先读 `v4-plan.md` 开头的「V4 结论」→ 再读 `reader-model.md` 的缺陷总表（4.1–4.4）与诊断契约（6.6）。
+**更新文档时**：只同步活文档；冻结文档仅在更正**事实性错误**时动，且同时更新其头部日期。
+
+**本目录之外的文档**（同样在头部声明性质与日期）：
+
+- `test/` 下 13 份 `README.md`——`reader/`、`gaps/` 是**活文档**；其余 11 份（`zoom/ pcal/ mpc/ pulsar/ tcal/ crosspol/ phasearr/ sta/ p10/ p11/ p3/`）是**验证记录**，各对应一个 P 节点、写完不再更新，**重跑回归时以脚本与 `reader/check_reader.py` 为准**（不要把 README 里的旧命令当当前用法）；
+- `docker/<镜像>/README.md`（6 份，V2 镜像体系）——**活文档**，描述各镜像的内容与用法，随镜像变化更新；
+- `applications/{fxcorr-f,fxcorr-x,fxcorr-sim}/CLAUDE.md`、`applications/fxcorr-sim/VERIFICATION.md`、`libraries/CLAUDE.md`、仓库根 `CLAUDE.md`——**活文档**，随各自代码/验证更新；
+- `mpifxcorr/CLAUDE.md`——描述**冻结的上游代码**，不随改造更新，无需日期。
 
 ## 核心约定（源自 data-spec.md）
 

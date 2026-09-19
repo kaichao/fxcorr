@@ -1,7 +1,8 @@
 # fxcorr-f 读取模型与读取缺陷分析
 
-**版本**：1.0（2026-09-18）
-**适用**：fxcorr-f 的数据读取层（`applications/fxcorr-f/src/datareader.{h,cpp}`）
+**版本**：1.1（2026-09-19）
+**最后更新**：2026-09-19（V4 完成：三层重构落地、判据三层固化、6.6 诊断契约冻结）
+**适用**：fxcorr-f 的数据读取层（`applications/fxcorr-f/src/datareader.{h,cpp}`、`frametimeline.h`、`corrections.h`）
 **定位**：读取路径的**单一权威分析文档**——读模型、缺陷根因、症状指纹、验收判据、改造建议。
 
 **与其他文档的关系**（本节是分工，不是重复）：
@@ -202,7 +203,21 @@ C 类的核心语义：**filler 帧占文件字节、不占时间轴**。判据�
 |---|---|---|---|
 | **D1** | "读到即有效"——缺口/filler 覆盖的块必须显式记入 `gapinvalid` 并逐块清掉 | 缺口位置的数据被当作有效数据参与积分 | 已修（机制见 B4） |
 
-D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapinvalid` 解决"信不信"。两者坐标系必须一致——`fillValidFlags` 的块映射 `f*payloadbytes/blockbytes + lastcount` 与判界式 `(i-lastcount)*blockbytes < validbytes` 用的是同一个 `lastcount`（块↔帧换算系数 = `payloadbytes/blockbytes`，t25362 为 8000/512 = **15.625**）。
+**它是"第四类"，不是前三类的子集**。A/B/C 解决"读哪"（读取位置对不对），D 解决"信不信"（读到的块算不算数）：即使位置完全正确、缺口也检测到了，只要没把那段块的有效位清掉，数据照样以"有效"的身份进入积分——**内容错了，而元数据说它是对的**（3.3 假设三）。这类缺陷因此**不表现在位置类判据上**（E1/E2/E5 全绿），只在 weight 与可见度上现形。
+
+**症状的三种表现**（根因分属 B/C 类，症状都落在 D 类）：
+
+| 症状 | 病根 | 出处 |
+|---|---|---|
+| 缺口位置的数据被当作有效数据参与积分 | `gapinvalid` 未记录 | D1 |
+| weight **全局塌陷**（缺口之后的所有 subint） | `gapinvalid` 未按 subint 重建 | B4 |
+| weight 完全相同（都 1.0）而可见度**符号相反、数值无关** | 缺口漏检 → 错位数据全标有效 | C5 |
+
+**机制**：检测（A/B/C）→ 标记（`gapinvalid`，按时间槽记）→ 生效（`fillValidFlags` 逐块清）→ 消费（x 侧按 weight 加权）。D 类是 A/B/C 三类共同的**落点**，两者坐标系必须一致——`fillValidFlags` 的块映射 `f*payloadbytes/blockbytes + lastcount` 与判界式 `(i-lastcount)*blockbytes < validbytes` 用的是同一个 `lastcount`（块↔帧换算系数 = `payloadbytes/blockbytes`，t25362 为 8000/512 = **15.625**）。
+
+**B2 之后新增的一条约束**：缓冲区不再是"文件里的一段字节"，而是**时间轴上的帧栅格**（filler 被丢弃、缺口占空槽），字节级的"与上次读取重叠"扣除随之失效——`main.cpp` 喂 SwitchedPower 前要看 `lastReadContiguous()`，跨过中断的 subint 整个跳过（4.9）。
+
+**判据**：`GAPCHECK summary` 的 `filler` / `missing` 只回答"检测到多少"，回答不了"信不信"——D 类要靠 `check_reader.py` 的 E3（洞的落点，直接对文件真值）与 weight 面对账（`fxcorr/test/gaps/` 的 `sp_valid.py` / `dump_weight.py`）。
 
 ### 4.5 B5——缺口跨 subint 边界时修正超前（2026-09-18 已修）
 
@@ -246,7 +261,7 @@ B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 1
 | 异常形态 | 8 处帧号跳跃，**无补零** | 8 段全零头帧（81/82/229/180/17/49/16/508 = **1162 帧**）+ 同样 8 处帧号跳跃 |
 | 真正缺失的时间 | 175 帧 | **143 帧** |
 
-即 filler **占文件字节、不占时间轴**（段后帧号只跳过真实丢失的帧数），与 4.3 的表述一致；上游 `vdifmux` 也是这个模型（`i += 4` 滑过非 VDIF 字节并丢弃，输出时间轴按 `frameNumber - startFrameNumber`）。mpifxcorr 对单线程 VDIF 文件同样走 `vdifmux`（`VDIFDataStream::dataRead`，`vDiffile.cpp:742`），2.1 节说的"那是 muxed VDIF 的路径"**不准确**。
+即 filler **占文件字节、不占时间轴**（段后帧号只跳过真实丢失的帧数），与 4.3 的表述一致；上游 `vdifmux` 也是这个模型（`i += 4` 滑过非 VDIF 字节并丢弃，输出时间轴按 `frameNumber - startFrameNumber`）。mpifxcorr 对单线程 VDIF 文件同样走 `vdifmux`（`VDIFDataStream::dataRead`，`vdiffile.cpp:742`），2.1 节说的"那是 muxed VDIF 的路径"**不准确**。
 
 **② fxcorr 的稳态账是对的**：`READPOS` 全程 `fillershift 9333184`（= 1162 帧）、`gapframes 143`，与文件扫描逐项吻合。
 

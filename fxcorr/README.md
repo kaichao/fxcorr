@@ -1,5 +1,7 @@
 # fxcorr 脚本与改造概要
 
+**最后更新**：2026-09-19（V4 完成，版本路线见 `v4-plan.md`）
+
 本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` / `fxcorr-sim` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，仿真数据生成器见 `applications/fxcorr-sim`，共享代码见 `libraries/fxcorrcommon`。
 
 ---
@@ -149,17 +151,19 @@ raw data
 
 ---
 
-## 6. 本目录脚本（规划）
+## 6. 本目录脚本
+
+三个脚本均已实现，实现要点与完整参数见 `fxcorr/CLAUDE.md`。
 
 | 脚本 | 作用 |
 |------|------|
 | `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + batch.json） |
 | `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供对拍 |
-| `run_batch.sh` | 对单个 batch_id：写 batch.json → 依次调用各站 `fxcorr-f` → 调用 `fxcorr-x` |
+| `run_batch.sh` | fxcorr 流水线：前置校验 → DATA TABLE 软链重指本 batch → 逐站 `fxcorr-f` → `fxcorr-x` → 更新 status |
 
-`watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度 V2 由 scalebox 承担，容器化同列 V2（scalebox Module 需容器镜像）。
+`watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度由 scalebox 承担；容器化已在 V2 完成（`FXCORR_RUN_MODE=container`，见 `fxcorr/CLAUDE.md`）。
 
-示例（接口以实际实现为准）：
+示例：
 
 ```bash
 ./fxcorr/make_testdata.sh                 # 一次性：前处理 + 仿真数据 + batch.json
@@ -171,12 +175,15 @@ raw data
 
 ## 7. 实现阶段（简）
 
-| 阶段 | 内容 |
-|------|------|
-| V1 | 两程序串行 + 目录接口 + bash 跑通单 batch |
-| V2 | 容器化封装（模块镜像）+ 镜像集成测试 + V1 遗留算法改进；scalebox 编排与分片参数化放其他仓库 |
-| V3 | 模块级 OpenMP（P3）；按需 GPU |
-| 可选 | 输出与 difx2fits 更好衔接 |
+四阶段均已完成；各阶段的定案、实施与验收分别在 `v1-plan.md` … `v4-plan.md`（V1–V3 已冻结，V4 是最新一份）。
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| V1 | 两程序串行 + 目录接口 + bash 跑通单 batch | ✅ |
+| V2 | 容器化封装（模块镜像）+ 镜像集成测试 + V1 遗留算法改进（P0–P11）；scalebox 编排与分片参数化放其他仓库 | ✅ 验收 6/6 |
+| V3 | 模块级 OpenMP（P3）；按需 GPU；期间收尾 P12 真实观测病态数据 | ✅ |
+| V4 | 读取路径改进（读模型）：A/B/C/D 四类缺陷修完、窗口语义（E4 净损失）归零、reader 三层重构、三层判据与诊断契约固化 | ✅ 见 `v4-plan.md` 开头的结论 |
+| 可选 | 输出与 difx2fits 更好衔接 | 未做 |
 
 ---
 
