@@ -16,6 +16,12 @@ check_reader.py --log <f 侧 verbose 日志> --vdif <file.vdif> \
 
 判据依赖 `FXCORR_LOGLEVEL=verbose`（`READPOS` 与 `GAPCHECK holes` 两行都在 verbose）。
 
+**调用者（`gaps/` 的四个脚本，2026-09-19 起全部接入）**：`run_window.sh` 判 E4 = 0；
+`run_startoffset.sh` 判 E5 启用且无超差（并自检"报红"）；`run_filler.sh` / `run_boundary.sh`
+判退出码（E1–E3 无 finding）与 E4 = 0，各带一条自检把旧相对判据抓的缺陷形态造进日志
+（`fxcorr/v4-plan.md` 的 A3）。**跳过也是退出码 0**——靠 E5 判定的脚本必须另行确认那一行
+不是 `skipped`（`run_startoffset.sh` 的 `require_e5_active`）。
+
 ## 真值是什么
 
 | 文件里的形态 | 时间槽 | 台账 |

@@ -19,6 +19,12 @@
 # 环境变量。子带帧率 fps=250、payloadbytes/blockbytes = blocks_per_send/subint帧数
 # 都由 test.vex 的配置决定，换配置时要跟着改（判据依赖 fps，见本目录 README 的坑）。
 #
+# **绝对判据（判据二，`check_reader.py`）**：上面两条都是相对判据（与无缺口对照比），
+# 对照本身错掉就抓不到；判据二拿 VDIF 文件当真值，判 E1 定位 / E2 数据 / E3 落点无
+# finding、E4 无净损失，两者必须同时绿（`fxcorr/v4-plan.md` 的 A3）。E5 锚点在含
+# 缺口的数据上按设计跳过，只打印不判定。末尾两条自检各对应上面一条相对判据——把
+# 该判据抓的缺陷形态造进日志，绝对判据必须同样报红。
+#
 # 用法：./run_boundary.sh [workdir]        （默认 /tmp/gapsb）
 # 需要 fxcorr-sim / fxcorr-f 在 PATH、LD_LIBRARY_PATH 含 DIFXROOT/lib。
 set -euo pipefail
@@ -29,9 +35,12 @@ GAPSPEC=${GAPSPEC:-"0.52:30"}		# 场景 A：跨界但不覆盖读取位置
 OVERSPEC=${OVERSPEC:-"0.48:30"}		# 场景 B：覆盖读取位置
 FPS=${FPS:-250}				# test.vex：8 Ms/s ÷ 每帧 32000 采样
 SUBINT_SEC=${SUBINT_SEC:-0.524288}	# test.input 的 subintNS
+TAMPER_SUBINT=${TAMPER_SUBINT:-2}	# 自检改动的 subint：A 的跨界者、B 的被盖住者
+TAMPER_DELTA=${TAMPER_DELTA:-30}	# 自检 1 少报的帧数（= 场景 A 的缺口帧数）
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FXCORR_SRC=${FXCORR_SRC:-$(cd "$SCRIPTDIR/../../.." && pwd)}
+CHECKER="$SCRIPTDIR/../reader/check_reader.py"
 
 export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/usr/local/difx/lib}
 PATH=$PATH:/usr/local/difx/bin
@@ -87,6 +96,28 @@ generate_and_run()
 	(cd "$WORKDIR" && FXCORR_LOGLEVEL=verbose fxcorr-f "$BATCHID" "$STATION" .) > "$readposout" 2>&1 ||
 		fail "fxcorr-f 退出码非零（见 $readposout）"
 	zero_weight_runs "$WORKDIR/fengine/$BATCHID/$STATION/ds_0/band_00.sp" > "$zeroout"
+
+	# 判据二：check_reader 有 finding 时退出码为 1，另存供 require_absolute 判定
+	VDIF="$WORKDIR/raw/$STATION/${STATION}_${BATCHID}.vdif"
+	BATCHJSON="$WORKDIR/batches/$BATCHID.json"
+	ABS_RC=0
+	python3 "$CHECKER" --log "$readposout" --vdif "$VDIF" --batch-json "$BATCHJSON" \
+		--fps "$FPS" > "$readposout.check" 2>&1 || ABS_RC=$?
+}
+
+# 判据二（绝对）：$1 那次运行的 check_reader 结果。E1–E3 有 finding 时退出码非零；
+# E4 的净损失不参与 nbad 计数（不看退出码），所以两条分开查。
+require_absolute()
+{
+	local log=$1 lost
+	if [ "$ABS_RC" != 0 ]; then
+		grep -E "^(  sub |summary)" "$log.check" | sed 's/^/  /' >&2
+		fail "$log: check_reader 报了 finding（rc=$ABS_RC，见 $log.check）"
+	fi
+	lost=$(awk '/^E4 coverage/{print $4}' "$log.check")
+	[ "$lost" = 0 ] ||
+		fail "$log: E4 报 $lost 帧净损失（两个场景都是缺口形式，没有占字节的 filler）"
+	grep -E "^(E5 anchor|summary|E4 coverage)" "$log.check" | sed 's/^/  /'
 }
 
 check_firstfno()
@@ -135,11 +166,13 @@ check_overstart()
 }
 
 [ -d "$WORKDIR" ] || fail "workdir $WORKDIR 不存在（make_testdata.sh 要求它先建好，见本目录 README 的坑）"
+[ -f "$CHECKER" ] || fail "找不到 $CHECKER"
 
 echo "--- 无缺口（对照）---"
 generate_and_run "" "$WORKDIR/nogap.log" "$WORKDIR/nogap.zero"
 NOGAPSERIES=$(readpos_series "$WORKDIR/nogap.log")
 echo "$NOGAPSERIES"
+require_absolute "$WORKDIR/nogap.log"
 
 echo "--- 场景 A：FXSIM_GAPS=$GAPSPEC ---"
 generate_and_run "$GAPSPEC" "$WORKDIR/gap.log" "$WORKDIR/gap.zero"
@@ -148,7 +181,29 @@ echo "$GAPSERIES"
 grep -q "missing frames 30 filler frames 0" "$WORKDIR/gap.log" ||
 	{ grep "GAPCHECK summary" "$WORKDIR/gap.log" >&2; fail "场景 A 的 missing frames 应为 30、filler 应为 0"; }
 grep "GAPCHECK summary" "$WORKDIR/gap.log"
+require_absolute "$WORKDIR/gap.log"
 check_firstfno
+
+echo
+echo "--- 判据二自检 1（对应判据 1）：把 subint $TAMPER_SUBINT 的 firstfno 减 $TAMPER_DELTA（模拟 B5 未修的多减）---"
+python3 - "$WORKDIR/gap.log" "$WORKDIR/tamper_a.log" "$TAMPER_SUBINT" "$TAMPER_DELTA" <<'PY'
+import re, sys
+log, out, sub, delta = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+def fix(m):
+    if int(m.group(1)) != sub:
+        return m.group(0)
+    return re.sub(r'firstfno (-?\d+)', lambda x: 'firstfno %d' % (int(x.group(1)) - delta),
+                  m.group(0), count=1)
+open(out, 'w').write(re.sub(r'READPOS subint (\d+):.*', fix, open(log).read()))
+PY
+if python3 "$CHECKER" --log "$WORKDIR/tamper_a.log" --vdif "$VDIF" \
+	--batch-json "$BATCHJSON" --fps "$FPS" > "$WORKDIR/tamper_a.log.check" 2>&1; then
+	sed 's/^/  /' "$WORKDIR/tamper_a.log.check" | tail -4
+	fail "自检 1 失败：firstfno 少报 $TAMPER_DELTA 帧之后判据竟然没报红（判据是恒绿的吗？）"
+fi
+grep -q "firstfno .* vs file" "$WORKDIR/tamper_a.log.check" ||
+	fail "自检 1 报红了，但不是 E2（报的 firstfno 与文件里的帧号不符）——见 $WORKDIR/tamper_a.log.check"
+grep -E "^(summary)" "$WORKDIR/tamper_a.log.check" | sed 's/^/  /'
 
 echo "--- 场景 B：FXSIM_GAPS=$OVERSPEC ---"
 generate_and_run "$OVERSPEC" "$WORKDIR/over.log" "$WORKDIR/over.zero"
@@ -157,7 +212,27 @@ echo "$OVERSERIES"
 grep -q "missing frames 30 filler frames 0" "$WORKDIR/over.log" ||
 	{ grep "GAPCHECK summary" "$WORKDIR/over.log" >&2; fail "场景 B 的 missing frames 应为 30、filler 应为 0"; }
 grep "GAPCHECK summary" "$WORKDIR/over.log"
+require_absolute "$WORKDIR/over.log"
 OVERZERO=$(cat "$WORKDIR/over.zero")
 check_overstart
 
-echo "PASS: 缺口跨 subint 边界时读取位置与无效块都落在正确的位置"
+echo
+echo "--- 判据二自检 2（对应判据 2）：清空 subint $TAMPER_SUBINT 的 GAPCHECK holes（模拟洞被当数据积分）---"
+python3 - "$WORKDIR/over.log" "$WORKDIR/tamper_b.log" "$TAMPER_SUBINT" <<'PY'
+import re, sys
+log, out, buf = sys.argv[1], sys.argv[2], int(sys.argv[3])
+def clear(m):
+    return m.group(0) if int(m.group(1)) != buf else 'GAPCHECK holes buf %s:' % m.group(1)
+open(out, 'w').write(re.sub(r'GAPCHECK holes buf (\d+):.*', clear, open(log).read()))
+PY
+if python3 "$CHECKER" --log "$WORKDIR/tamper_b.log" --vdif "$VDIF" \
+	--batch-json "$BATCHJSON" --fps "$FPS" > "$WORKDIR/tamper_b.log.check" 2>&1; then
+	sed 's/^/  /' "$WORKDIR/tamper_b.log.check" | tail -4
+	fail "自检 2 失败：把洞清掉之后判据竟然没报红（判据是恒绿的吗？）"
+fi
+grep -q "missing [1-9]" "$WORKDIR/tamper_b.log.check" ||
+	fail "自检 2 报红了，但不是漏标（missing slots）——见 $WORKDIR/tamper_b.log.check"
+grep -E "^(summary)" "$WORKDIR/tamper_b.log.check" | sed 's/^/  /'
+
+echo
+echo "PASS: 缺口跨 subint 边界时读取位置与无效块都落在正确的位置（相对判据），文件真值对账也干净（绝对判据）"
