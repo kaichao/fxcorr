@@ -57,6 +57,16 @@ public:
 	// order (they are sorted on insertion).
 	void addGap(double atsec, long long missingframes, long long fillerframes);
 
+	// The recorder started `frames` frames after the batch start, so the file
+	// begins that far into the batch: its first frame carries the batch start's
+	// time plus `frames`, and the file is that much shorter than the batch.  It
+	// is the third form real observations show (t25362's BA starts 79.3 ms, or
+	// 1269 frames, late) and the one fxcorr-f's anchorbytes -- "bytes from the
+	// file's first frame back to the batch start", negative here -- undoes.
+	// Without it the A-class defects (reader-model.md 4.1) have no synthetic
+	// asset to regress against.  Call before the first writeFrame.
+	void setFileStartOffset(long long frames) { filestartoffset = frames; }
+
 private:
 	struct Gap
 	{
@@ -76,6 +86,7 @@ private:
 	int log2nchan;
 	int framelength8;
 	long long nframes;
+	long long filestartoffset;	// frames the file starts after the batch start
 };
 
 #endif

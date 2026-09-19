@@ -86,7 +86,11 @@ static void usage()
 	     << "      of leaving the file short, one per lost frame unless a count\n"
 	     << "      follows it ('f300') - a real interruption shows both forms\n"
 	     << "      across datastreams, and t25362's have far more filler frames\n"
-	     << "      than lost ones), FXCORR_WORKDIR\n"
+	     << "      than lost ones), FXSIM_STARTOFFSET (frames; the recorder\n"
+		     << "      began that many frames after the batch start, so the file\n"
+		     << "      begins late and its first frame carries the later\n"
+		     << "      timestamp - t25362's BA starts 1269 frames in),\n"
+		     << "      FXCORR_WORKDIR\n"
 	     << "  env (legacy path): FXSIM_DELAY (1 = inject .calc geometric delay\n"
 	     << "      into the tone phase), FXSIM_FLUX/FXSIM_SEFD (Jy; both set =\n"
 	     << "      SNR scaling), plus the new-path variables above\n";
@@ -438,6 +442,31 @@ static int applyGaps(VDIFWriter &writer)
 	return 0;
 }
 
+// FXSIM_STARTOFFSET: the recorder began this many frames after the batch start,
+// so the file begins late -- the third form real recordings show, alongside a
+// short file (frame numbers missing) and a long one (filler frames).  t25362's
+// BA starts 79.3 ms / 1269 frames into its batch, and its effect is the A class
+// in reader-model.md 4.1: every time the reader maps time onto bytes it lands
+// that far off, and the arithmetic that turns the first frame's timestamp into
+// anchorbytes is where a whole-frame error (A2: truncation instead of floor)
+// flips the odd pcal tones.  Until now those three defects were only ever
+// verified on the real observation, so nothing caught a regression (v4-plan.md
+// A2).  Unset = the file starts exactly at the batch start, as before.
+static int applyFrameOffset(VDIFWriter &writer)
+{
+	const char *oe = getenv("FXSIM_STARTOFFSET");
+	if(!oe || !*oe)
+		return 0;
+	long long frames = atoll(oe);
+	if(frames < 0)
+	{
+		cerr << "fxcorr-sim: FXSIM_STARTOFFSET must be >= 0 (got " << frames << ")" << endl;
+		return -1;
+	}
+	writer.setFileStartOffset(frames);
+	return 0;
+}
+
 static int doCommon(Configuration &config, const BatchInfo &bi)
 {
 	int specres = parseSpecres();
@@ -622,6 +651,8 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 		return EXIT_FAILURE;
 	if(applyGaps(writer) != 0)
 		return EXIT_FAILURE;
+	if(applyFrameOffset(writer) != 0)
+		return EXIT_FAILURE;
 
 	// block buffer sized for one full common-signal block; the reader
 	// delivers the last block truncated to the batch length
@@ -734,6 +765,8 @@ static int doStationLegacy(Configuration &config, Model *model, const BatchInfo 
 	if(!writer.isOpen())
 		return EXIT_FAILURE;
 	if(applyGaps(writer) != 0)
+		return EXIT_FAILURE;
+	if(applyFrameOffset(writer) != 0)
 		return EXIT_FAILURE;
 
 	int payloadbytes = st.bytesperbandframe * st.nbands;

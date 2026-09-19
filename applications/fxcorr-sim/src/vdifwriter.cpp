@@ -8,7 +8,8 @@ using namespace std;
 VDIFWriter::VDIFWriter(const string &outpath, long long startsec_, long long framestart_,
                        long long ratehz_, int nbands, int bytesperbandframe)
 	: gapnext(0), f(0), startsec(startsec_), framestart(framestart_), ratehz(ratehz_),
-	  nsampframe(bytesperbandframe * 4), log2nchan(0), framelength8(0), nframes(0)
+	  nsampframe(bytesperbandframe * 4), log2nchan(0), framelength8(0), nframes(0),
+	  filestartoffset(0)
 {
 	// VDIF word3 nchan field is log2 of the channel (band) count
 	if(nbands <= 0 || (nbands & (nbands - 1)) != 0 || nbands > 32)
@@ -60,6 +61,20 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 	{
 		cerr << "fxcorr-sim: payload size mismatch" << endl;
 		return false;
+	}
+
+	// Before the recorder started (setFileStartOffset): these frame numbers own
+	// neither bytes nor a time slot in the file -- the batch is simply older
+	// than the recording.  The frame number still advances, so the first frame
+	// actually written carries its true position on the time axis, and fxcorr-f
+	// reads the distance back out of that timestamp (anchorbytes, negative when
+	// the file starts late).  Skipping here rather than at the caller keeps one
+	// counter for the time axis, so FXSIM_GAPS positions mean the same thing
+	// with and without an offset.
+	if(nframes < filestartoffset)
+	{
+		nframes++;
+		return true;
 	}
 
 	// Recording interruptions, applied before the frame whose number they
