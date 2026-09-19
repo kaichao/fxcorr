@@ -26,12 +26,14 @@ import sys
 
 HDRBYTES = 32
 CHUNK_FRAMES = 4096		# 顺序读的批大小，避免逐帧 seek（1.5 GB 的文件也要扫得动）
+FILL_PATTERN = 0x11223344	# vdifio/vdifmux.c:30-32，记录系统写不出数据时留下的模式
 
 
 def parse_header(b, off=0):
     """按 vdifio 的字布局解析 32 字节头（同 datareader.cpp 的 vdifFrameNumber/vdifIsFiller）."""
     w = struct.unpack_from('<8I', b, off)
     return {
+        'w0': w[0],
         'seconds': w[0] & 0x3FFFFFFF,
         'invalid': (w[0] >> 31) & 1,
         'frame': w[1] & 0xFFFFFF,
@@ -39,9 +41,31 @@ def parse_header(b, off=0):
     }
 
 
-def is_filler(d):
-    """与 datareader.cpp 的 vdifIsFiller 同一判据：invalid 位置起，或全零头."""
-    return d['invalid'] == 1 or (d['seconds'] == 0 and d['frame'] == 0)
+def is_filler(d, blob=None, off=0, framebytes=0):
+    """与 frametimeline.h 的 vdifIsFiller 同一判据（改一处必须改另一处）.
+
+    全零头，或 vdifio 的 FILL_PATTERN（0x11223344）落在帧尾（vdifmux.c:598）或帧首
+    （:606）—— 上游对这两种位置都当占位帧跳过，2026-09-19 实测三种形态的 mpifxcorr
+    产物逐字节相同（fxcorr/test/gaps/run_pattern.sh）。**invalid 位不在这里**：那个
+    帧占着时间槽，只是数据不可用，见 is_invalid 与 reader-model.md 4.12。
+    不给 blob 时只看帧头（调用点都传，传了才判帧尾）。
+    """
+    if d['seconds'] == 0 and d['frame'] == 0:
+        return True
+    if d['w0'] == FILL_PATTERN:
+        return True
+    if blob is not None and framebytes >= 4:
+        return struct.unpack_from('<I', blob, off + framebytes - 4)[0] == FILL_PATTERN
+    return False
+
+
+def is_invalid(d):
+    """VDIF 的 invalid 位：记录器说"这一帧的数据不可用".
+
+    与 filler 不是一回事——帧在时间轴上**在位**（帧号照常推进、占一个槽），只有数据
+    不可用。实测依据见 reader-model.md 4.12。
+    """
+    return d['invalid'] == 1
 
 
 def fno(seg, fps):
@@ -73,8 +97,10 @@ def scan(path, fps=None):
                 d = parse_header(blob, j * framebytes)
                 i = base + j
                 # filler 先判：全零头同时也没有帧长，按帧长判会把它归到 other
-                if is_filler(d):
+                if is_filler(d, blob, j * framebytes, framebytes):
                     kind = 'filler'
+                elif is_invalid(d):
+                    kind = 'invalid'
                 elif d['framelength8'] * 8 != framebytes:
                     kind = 'other'
                 else:
@@ -82,12 +108,12 @@ def scan(path, fps=None):
 
                 cont = False
                 if cur is not None and cur['kind'] == kind:
-                    if kind != 'data':
-                        cont = True
-                    else:
+                    if kind in ('data', 'invalid'):
                         # 段内帧号连续：同一秒内 +1，或跨秒回绕到 0
                         cont = ((d['seconds'] == cur['lastsec'] and d['frame'] == cur['lastframe'] + 1) or
                                 (d['seconds'] == cur['lastsec'] + 1 and d['frame'] == 0))
+                    else:
+                        cont = True
                 if cont:
                     cur['count'] += 1
                     cur['lastsec'] = d['seconds']
@@ -96,7 +122,7 @@ def scan(path, fps=None):
                     if cur is not None:
                         segments.append(cur)
                     cur = {'kind': kind, 'start': i, 'count': 1}
-                    if kind == 'data':
+                    if kind in ('data', 'invalid'):
                         cur['sec'] = d['seconds']
                         cur['frame'] = d['frame']
                         cur['lastsec'] = d['seconds']
@@ -132,13 +158,16 @@ def scan(path, fps=None):
     }
 
     if fps:
-        data = [s for s in segments if s['kind'] == 'data']
+        # "present" 段 = 在时间轴上占了槽的段：数据帧与标了 invalid 的帧（4.12：后者
+        # 帧号照常推进，占着它自己的槽，只是数据不可用）
+        data = [s for s in segments if s['kind'] in ('data', 'invalid')]
         gaps = []
         for a, b in zip(data, data[1:]):
             lost = fno(b, fps) - (fno(a, fps) + a['count'])
             gaps.append({'after': a['start'] + a['count'], 'frames': lost})
         truth['gaps'] = gaps
-        truth['dataframes'] = sum(s['count'] for s in data)
+        truth['dataframes'] = sum(s['count'] for s in segments if s['kind'] == 'data')
+        truth['invalidframes'] = sum(s['count'] for s in segments if s['kind'] == 'invalid')
         truth['fillerframes'] = sum(s['count'] for s in segments if s['kind'] == 'filler')
         truth['otherframes'] = sum(s['count'] for s in segments if s['kind'] == 'other')
 
@@ -151,18 +180,36 @@ def load(path):
 
 
 def present_ranges(truth, fps=None):
-    """文件里**存在**的帧号区间 [(f0, f1), ...]，升序、互不相交."""
+    """文件里**占着时间槽**的帧号区间 [(f0, f1), ...]，升序、互不相交.
+
+    数据帧与标了 invalid 的帧都算——后者帧号照常推进（4.12）。
+    """
     fps = fps or truth['fps']
     out = []
     for s in truth['segments']:
-        if s['kind'] == 'data':
+        if s['kind'] in ('data', 'invalid'):
+            f0 = fno(s, fps)
+            out.append((f0, f0 + s['count']))
+    return out
+
+
+def invalid_ranges(truth, fps=None):
+    """文件里**在位但标了 invalid** 的帧号区间 [(f0, f1), ...]（数据不可用）."""
+    fps = fps or truth['fps']
+    out = []
+    for s in truth['segments']:
+        if s['kind'] == 'invalid':
             f0 = fno(s, fps)
             out.append((f0, f0 + s['count']))
     return out
 
 
 def holes_in_window(truth, f_lo, f_hi, fps=None):
-    """[f_lo, f_hi) 里文件没有数据的帧号区间，作为相对 f_lo 的槽区间返回."""
+    """[f_lo, f_hi) 里**应当无效**的帧号区间，作为相对 f_lo 的槽区间返回.
+
+    两类：文件里没有数据的帧号（缺口与 filler 段），以及文件里有、但记录器标了
+    invalid 的帧（4.12——它们占着槽，数据却不能用，块同样要被清掉）。
+    """
     out = []
     pos = f_lo
     for (a, b) in present_ranges(truth, fps):
@@ -175,17 +222,33 @@ def holes_in_window(truth, f_lo, f_hi, fps=None):
             break
     if pos < f_hi:
         out.append((pos - f_lo, f_hi - f_lo))
-    return out
+
+    for (a, b) in invalid_ranges(truth, fps):
+        lo = max(a, f_lo)
+        hi = min(b, f_hi)
+        if lo < hi:
+            out.append((lo - f_lo, hi - f_lo))
+
+    out.sort()
+    merged = []
+    for (a, b) in out:
+        if merged and a <= merged[-1][1]:
+            if b > merged[-1][1]:
+                merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+    return merged
 
 
 def summary_line(truth):
     fps = truth['fps']
     nseg = len(truth['segments'])
-    return ('framebytes %d nframes %d%s fps %s data %s filler %s gaps %s'
+    return ('framebytes %d nframes %d%s fps %s data %s invalid %s filler %s gaps %s'
             % (truth['framebytes'], truth['nframes'],
                (' (%d bytes left over)' % truth['remainder']) if truth['remainder'] else '',
                ('%d%s' % (fps, '(inferred)' if truth['fpsinferred'] else '')) if fps else '?',
-               truth.get('dataframes', '-'), truth.get('fillerframes', '-'),
+               truth.get('dataframes', '-'), truth.get('invalidframes', '-'),
+               truth.get('fillerframes', '-'),
                len(truth.get('gaps', [])) if nseg else '-'))
 
 
@@ -212,6 +275,7 @@ def main():
         print('segments    : %d' % len(truth['segments']))
         print('  %-7s %-11s %8s  %-12s %s' % ('kind', 'fileidx', 'frames', 'sec', 'frame'))
         for s in truth['segments']:
+            # data/invalid 段占着时间槽（invalid 只是数据不可用）；filler/other 不占
             print('  %-7s %5d..%-5d %8d  %-12s %s'
                   % (s['kind'], s['start'], s['start'] + s['count'] - 1, s['count'],
                      s.get('sec', '-'), s.get('frame', '-')))

@@ -84,7 +84,10 @@ static void usage()
 	     << "      numbers at that second into the batch; the optional 'f'\n"
 	     << "      writes all-zero-header filler frames in their place instead\n"
 	     << "      of leaving the file short, one per lost frame unless a count\n"
-	     << "      follows it ('f300') - a real interruption shows both forms\n"
+	     << "      follows it ('f300'); 'p'/'h' write placeholders made of\n"
+	     << "      vdifio's FILL_PATTERN (0x11223344) instead, whole frame or\n"
+	     << "      leading four bytes, the two forms vdifmux skips by different\n"
+	     << "      amounts - a real interruption shows both forms\n"
 	     << "      across datastreams, and t25362's have far more filler frames\n"
 	     << "      than lost ones), FXSIM_STARTOFFSET (frames; the recorder\n"
 		     << "      began that many frames after the batch start, so the file\n"
@@ -412,17 +415,40 @@ static int applyGaps(VDIFWriter &writer)
 		string framestr = item.substr(c1 + 1, (c2 == string::npos) ? string::npos : c2 - c1 - 1);
 		long long missing = atoll(framestr.c_str());
 		long long fillerframes = 0;
+		int fillform = VDIFWriter::FILL_ZERO;
 		if(c2 != string::npos)
 		{
 			string form = item.substr(c2 + 1);
-			if(form.empty() || (form[0] != 'f' && form[0] != 'F'))
+			if(form.empty())
 			{
-				cerr << "fxcorr-sim: FXSIM_GAPS item '" << item << "' has unknown form '"
-				     << form << "' (only 'f' for filler, optionally 'f<count>', is defined)" << endl;
+				cerr << "fxcorr-sim: FXSIM_GAPS item '" << item << "' has an empty form" << endl;
 				return -1;
 			}
-			// bare "f": one filler frame per lost frame (the original form);
-			// "fN": N filler frames regardless of how many were lost
+			// f = all-zero placeholder (t25362's form), p = whole-frame
+			// FILL_PATTERN, h = only its leading four bytes.  The two pattern
+			// forms exist because vdifmux tests those two places separately
+			// and skips different amounts for them (vdifmux.c:598/606) --
+			// fxcorr/test/gaps/run_pattern.sh drives both.
+			char fc = form[0];
+			if(fc == 'F') fc = 'f';
+			else if(fc == 'P') fc = 'p';
+			else if(fc == 'H') fc = 'h';
+			if(fc == 'f')
+				fillform = VDIFWriter::FILL_ZERO;
+			else if(fc == 'p')
+				fillform = VDIFWriter::FILL_PATTERN;
+			else if(fc == 'h')
+				fillform = VDIFWriter::FILL_PATTERN_HEAD;
+			else
+			{
+				cerr << "fxcorr-sim: FXSIM_GAPS item '" << item << "' has unknown form '"
+				     << form << "' (defined: 'f' all-zero filler, 'p' whole-frame "
+				     << "FILL_PATTERN, 'h' leading-four-bytes pattern, each optionally "
+				     << "followed by a frame count)" << endl;
+				return -1;
+			}
+			// bare letter: one filler frame per lost frame (the original form);
+			// "<letter>N": N filler frames regardless of how many were lost
 			fillerframes = (form.size() > 1) ? atoll(form.c_str() + 1) : missing;
 			if(fillerframes < 0)
 			{
@@ -437,7 +463,7 @@ static int applyGaps(VDIFWriter &writer)
 			     << "' needs seconds >= 0 and frames > 0" << endl;
 			return -1;
 		}
-		writer.addGap(atsec, missing, fillerframes);
+		writer.addGap(atsec, missing, fillerframes, fillform);
 	}
 	return 0;
 }

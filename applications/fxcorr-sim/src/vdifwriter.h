@@ -55,7 +55,28 @@ public:
 	//
 	// Call before the first writeFrame; positions are taken in increasing
 	// order (they are sorted on insertion).
-	void addGap(double atsec, long long missingframes, long long fillerframes);
+	void addGap(double atsec, long long missingframes, long long fillerframes,
+	            int fillform = FILL_ZERO);
+
+	// Filler frame forms (FXSIM_GAPS ":p<count>" / ":h<count>").  A real
+	// recorder that writes filler instead of data leaves either its own
+	// pattern or zeros; vdifio's vdifmux recognises two of them, both as
+	// "skip bytes, no time slot" but with different skip lengths:
+	//
+	//   * 0x11223344 in the frame's LAST four bytes -> skip the whole frame
+	//     (vdifmux.c:598); a whole-frame pattern hits this one;
+	//   * 0x11223344 in its FIRST four bytes -> skip 8 bytes only
+	//     (vdifmux.c:606), after which the mux walks byte by byte until it
+	//     re-syncs.  FILL_PATTERN_HEAD isolates this second path.
+	//
+	// FILL_ZERO is t25362's form and stays the default: the FXSIM_GAPS syntax
+	// that already existed (":f") is unchanged.
+	enum FillForm
+	{
+		FILL_ZERO = 0,		///< all-zero header (script 5.2's filler)
+		FILL_PATTERN,		///< the whole frame carries 0x11223344
+		FILL_PATTERN_HEAD	///< only its first four bytes do, the rest is zero
+	};
 
 	// The recorder started `frames` frames after the batch start, so the file
 	// begins that far into the batch: its first frame carries the batch start's
@@ -72,7 +93,8 @@ private:
 	{
 		long long atframe;	// first frame number lost, relative to the batch start
 		long long missing;	// how many frame numbers
-		long long fillerframes;	// all-zero-header frames occupying the file (0 = none)
+		long long fillerframes;	// frames occupying the file (0 = none)
+		int fillform;		// FillForm: what those frames are made of
 	};
 	std::vector<Gap> gaps;
 	size_t gapnext;

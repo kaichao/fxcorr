@@ -1,6 +1,8 @@
 # 缺口与 filler 处理检验（FXSIM_GAPS）
 
-**最后更新**：2026-09-19（四个 `run_*.sh` 的判据已全部收敛到 `reader/check_reader.py`）
+**最后更新**：2026-09-19（七个 `run_*.sh` 的判据都已收敛到 `reader/check_reader.py`；新增
+`run_mixed.sh`（据它修掉 B7，见 `reader-model.md` 4.10）、`run_pattern.sh`（FILL_PATTERN
+定案，见 4.11）、`run_invalid.sh`（invalid 位定案，见 4.12））
 
 ## 用途
 
@@ -273,6 +275,115 @@ E5 引入独立参照（`batch.json` 的 `start_mjd`），A 类才会现形。�
 | 自检：各 subint 的 readoff 减掉 `anchorbytes`（模拟 A1 漏算） | **21 帧** | **1** ✓ |
 
 **自检是脚本的一部分**：判据能报红这件事本身也要能复现，否则它退化成恒绿。
+
+## 缺口与 filler 同段并存、多组相邻（`run_mixed.sh`）
+
+`run_filler.sh` / `run_window.sh` 各造**一处**中断，`run_boundary.sh` 造两处**纯缺口**；
+t25362 的 BA ds_2 是第三种。用 `scan_filler.py` 扫它（2026-09-19，fps 16000）得到 8 组：
+
+| 组 | filler 帧 | 紧随缺口帧 | 与上一组之间的数据帧 |
+|---|---|---|---|
+| 1 | 81 | 10 | — |
+| 2 | 82 | 10 | 13 |
+| 3 | 229 | 28 | 25 |
+| 4 | 180 | 22 | **2** |
+| 5 | 17 | 2 | （远） |
+| 6 | 49 | 6 | **2** |
+| 7 | 16 | 2 | 5 |
+| 8 | 508 | 63 | 64 |
+
+两件事此前没有资产覆盖：**组的形态是「filler 段紧跟一个真实缺口」**（filler 远长于缺口，
+81:10、508:63），以及**组之间只隔几帧数据**——一个读取窗口里要连续吸收两次 filler 修正与
+两次缺口修正（B2 的窗口长度补偿按单个 filler 段的宽度算，两段叠加时补偿量翻倍）。
+
+```bash
+mkdir -p <workdir>
+./run_mixed.sh <workdir>      # M1 两组相邻、M2 长 filler 跨 subint，各配纯缺口等价形式
+```
+
+| 场景 | 混合 spec | 等价缺口 spec | 覆盖 |
+|---|---|---|---|
+| M1 | `0.50:28:f229,0.62:22:f180` | `0.50:28,0.62:22` | 两组相邻（组间 2 帧数据），同一窗口内两次修正叠加 |
+| M2 | `0.45:63:f508` | `0.45:63` | filler 段（508 帧）远长于一个 subint（131.072 帧），跨 subint 边界 |
+
+判据 = 相对（两形式逐 subint 无效块一致，±2 块）+ 绝对（`check_reader.py` 的 E1–E3 无
+finding、**E4 = 0**）+ 自检（把 filler 形式的读位置前移一个 filler 段长，必须报红）。
+
+实测（2026-09-19，测试机）：
+
+| 场景 | 缺口形式无效块 | filler 形式无效块 | E4（两形式） |
+|---|---|---|---|
+| M1 | 209（sub 1: 24、sub 2: 185） | 209，逐 subint 相同 | 0 |
+| M2 | 259（sub 1: 71、sub 2: 188） | 259，逐 subint 相同 | 0 |
+
+**M2 抓到过一个真实缺陷（B7，已修）**：filler 段长于一个 subint 时，`readWindow` 的
+doubling 循环要读到文件尾才填得满槽，它留下的 eofbit/failbit 被**下一个 subint** 继承，
+`seekg` 之后的 `good()` 为假、`readWindow` 返回 -1——整个 subint 被静默丢弃。修复前实测：
+`GAPCHECK summary` 只报 `buffers 3`（应为 4）、该 subint 的 `.sp` 全 512 块无效、
+E4 = 82 帧净损失。根因与修法见 `fxcorr/reader-model.md` 4.10。
+
+## 占位帧的字节形态：FILL_PATTERN（`run_pattern.sh`）
+
+`FXSIM_GAPS` 的占位帧默认写成**帧头全零**（t25362 的形态），另可写成 vdifio 的
+`FILL_PATTERN`（`0x11223344`）：`:p<N>` 整帧、`:h<N>` 只有帧首 4 字节。这两处正是
+`vdifmux` 分别判的位置——帧尾命中跳**整帧**（`vdifmux.c:598`）、帧首命中只跳 **8 字节**
+（`:606`）随后逐字节重新同步。
+
+```bash
+mkdir -p <workdir>
+./run_pattern.sh <workdir>      # 同一段时间造三次，只换占位帧的字节
+```
+
+| 形态 | `FXSIM_GAPS` | 上游 mpifxcorr 基准 SWIN | fxcorr（认之前 → 之后） |
+|---|---|---|---|
+| f 全零头 | `0.50:28:f229` | `90e54869…` | 正常 → 正常 |
+| p 整帧 pattern | `0.50:28:p229` | 同前（**逐字节相同**） | `missing 223 / filler 0`、2 buffers → 正常 |
+| h 帧首 pattern | `0.50:28:h229` | 同前（**逐字节相同**） | `missing 277 / filler 0`、3 buffers → 正常 |
+
+判据 = 三种形态的 `GAPCHECK summary` 逐字段相同（都报 `missing 28 / filler 229`——"认成
+filler 而不是缺口"正是这个缺陷的指纹）+ 逐 subint 无效块一致 + `check_reader.py` 的
+E1–E3 无 finding、E4 = 0 + 自检（把 p 形式的读位置前移 229 帧必须报红）。修复后实测：
+三种形态的无效块逐 subint 相同（24/98/0/0），summary 与真值对账全绿。定案与实测见
+`fxcorr/reader-model.md` 4.11。
+
+上游那一列要 mpifxcorr，不在脚本里跑：复现命令是 `fxcorr/run_bench.sh <workdir>` 三次，
+比对 `bench/*.difx/DIFX_*.s0000.b0000` 的 md5。
+
+## invalid 位帧：占时间槽、数据无效（`run_invalid.sh`）
+
+这一条与上面几种**不是一回事**：全零头与 `FILL_PATTERN` 是"帧里没有数据"（不占时间轴），
+而 VDIF 的 invalid 位说的是"**这一帧在时间轴上存在、但数据不可信**"——帧号照常推进、槽照占。
+2026-09-19 实测（同一份数据、只把一段的 invalid 位置 1）：
+
+| 形态 | 上游 mpifxcorr 的基准 SWIN | fxcorr（修之前） |
+|---|---|---|
+| 原样 | 6 条记录、时间戳递增 | 正常 |
+| 中段 229 帧置位 | **记录数与时间戳逐条相同**、仅 weight 打折（0.4768 / 0.6389 对 0.9893 / 1.0） | **时间轴压缩 229 帧**：subint 2/3 读同一 `readoff`，`missing`/`filler` 各报 229 |
+
+上游的处置见 `vdifmux.c:905-940`（无效线程的指针指向 `src`、输出头写 `validitymask`）。
+**定案：fxcorr 让 invalid 帧占槽、并把该帧对应的块标无效**（数据不进积分）。
+
+```bash
+mkdir -p <workdir>
+./run_invalid.sh <workdir>      # 生成无中断数据 → 后处理置 invalid 位 → 与对照比较
+```
+
+生成器还不支持这一形态（`FXSIM_GAPS` 的 `:f`/`:p`/`:h` 都是"不占时间轴"的占位帧，语义不同
+不该塞进同一个参数），所以脚本用**后处理**造：把一段帧的 word0 最高位置 1，帧号与时间轴
+一个字节都不动。
+
+判据 = **位置**（invalid 形态的 `READPOS` 序列与对照**逐行相同**，这是"帧没被吞掉"的指纹）
++ **数据**（无效块逐 subint 不少于对照、至少一个更多）+ **真值**（`check_reader.py` 零 finding，
+真值把 invalid 槽算作"应当无效的槽"）+ 自检（读位置前移 229 帧必须报红）。修复后实测：
+
+```
+读取位置：与对照逐行相同 ✓
+subint 1: 对照   11  invalid   24      subint 2: 对照    0  invalid  512
+subint 3: 对照    0  invalid  372      subint 4: 对照    0  invalid    0
+真值：data 296 invalid 229 filler 0 —— 零 finding
+```
+
+定案与实施见 `fxcorr/reader-model.md` 4.12。
 
 ## 坑（续）
 

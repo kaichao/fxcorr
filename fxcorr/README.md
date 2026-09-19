@@ -1,6 +1,6 @@
 # fxcorr 脚本与改造概要
 
-**最后更新**：2026-09-19（V4 完成，版本路线见 `v4-plan.md`）
+**最后更新**：2026-09-19（V4 完成、V5 在读模型收尾，版本路线见 `v5-plan.md`）
 
 本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` / `fxcorr-sim` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，仿真数据生成器见 `applications/fxcorr-sim`，共享代码见 `libraries/fxcorrcommon`。
 
@@ -175,7 +175,8 @@ raw data
 
 ## 7. 实现阶段（简）
 
-四阶段均已完成；各阶段的定案、实施与验收分别在 `v1-plan.md` … `v4-plan.md`（V1–V3 已冻结，V4 是最新一份）。
+V1–V4 均已完成，V5 进行中；各阶段的定案、实施与验收分别在 `v1-plan.md` … `v5-plan.md`
+（V1–V4 已冻结，V5 是最新一份）。
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
@@ -183,6 +184,7 @@ raw data
 | V2 | 容器化封装（模块镜像）+ 镜像集成测试 + V1 遗留算法改进（P0–P11）；scalebox 编排与分片参数化放其他仓库 | ✅ 验收 6/6 |
 | V3 | 模块级 OpenMP（P3）；按需 GPU；期间收尾 P12 真实观测病态数据 | ✅ |
 | V4 | 读取路径改进（读模型）：A/B/C/D 四类缺陷修完、窗口语义（E4 净损失）归零、reader 三层重构、三层判据与诊断契约固化 | ✅ 见 `v4-plan.md` 开头的结论 |
+| V5 | 读模型收尾：补两个合成盲区（多组相邻的缺口+filler、`FILL_PATTERN`）、invalid 位定案；顺带修掉补盲区时抓出的 B7 | ✅ 见 `v5-plan.md`（只差"要真实数据"那条） |
 | 可选 | 输出与 difx2fits 更好衔接 | 未做 |
 
 ---

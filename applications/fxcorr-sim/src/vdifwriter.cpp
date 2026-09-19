@@ -5,6 +5,12 @@
 
 using namespace std;
 
+// vdifio's FILL_PATTERN (vdifmux.c:30-32), the word a recorder leaves in the
+// bytes of a frame it could not fill with data.  Written through an unsigned
+// int so the byte order matches whatever vdifmux's own `*(uint32_t *)` test
+// sees on this machine.
+static const unsigned int FILLPATTERNWORD = 0x11223344u;
+
 VDIFWriter::VDIFWriter(const string &outpath, long long startsec_, long long framestart_,
                        long long ratehz_, int nbands, int bytesperbandframe)
 	: gapnext(0), f(0), startsec(startsec_), framestart(framestart_), ratehz(ratehz_),
@@ -40,12 +46,14 @@ VDIFWriter::~VDIFWriter()
 		fclose(f);
 }
 
-void VDIFWriter::addGap(double atsec, long long missingframes, long long fillerframes)
+void VDIFWriter::addGap(double atsec, long long missingframes, long long fillerframes,
+                        int fillform)
 {
 	Gap g;
 	g.atframe = (long long)(atsec * framespersecond + 0.5);
 	g.missing = missingframes;
 	g.fillerframes = fillerframes;
+	g.fillform = fillform;
 	// keep the list ordered: writeFrame walks it once, front to back
 	size_t at = gaps.size();
 	while(at > 0 && gaps[at-1].atframe > g.atframe)
@@ -94,6 +102,31 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 			unsigned int zh[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 			unsigned char *zbuf = new unsigned char[(size_t)(pbytes > 0 ? pbytes : 1)];
 			memset(zbuf, 0, (size_t)(pbytes > 0 ? pbytes : 1));
+
+			// What the placeholders are made of (FillForm).  The zero header is
+			// t25362's form; the two pattern forms feed vdifmux's two pattern
+			// tests, which look at the frame's last four bytes and at its first
+			// four (vdifmux.c:598/606) and skip different amounts -- see
+			// vdifwriter.h.  The trailing four bytes are written explicitly so
+			// a payload that is not a multiple of four still answers the
+			// last-four-bytes test.
+			if(g.fillform == FILL_PATTERN || g.fillform == FILL_PATTERN_HEAD)
+			{
+				unsigned char pat4[4];
+				unsigned int pw = FILLPATTERNWORD;
+				memcpy(pat4, &pw, sizeof(pat4));
+				zh[0] = FILLPATTERNWORD;
+				if(g.fillform == FILL_PATTERN)
+				{
+					for(int w=1; w<8; w++)
+						zh[w] = FILLPATTERNWORD;
+					for(int b=0; b+4<=pbytes; b+=4)
+						memcpy(zbuf + b, pat4, 4);
+					if(pbytes >= 4)
+						memcpy(zbuf + pbytes - 4, pat4, 4);
+				}
+			}
+
 			bool ok = true;
 			for(long long k=0; k<g.fillerframes && ok; k++)
 				ok = fwrite(zh, sizeof(zh), 1, f) == 1 &&

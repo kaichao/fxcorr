@@ -68,10 +68,45 @@ struct Stretch
 		memset(at(i), 0, framebytes);
 	}
 
-	void filler_invalid(int i)	// invalid bit set
+	void filler_invalid(int i)	// all-zero header *and* invalid bit set
 	{
 		memset(at(i), 0, framebytes);
 		at(i)[3] = 0x80;	// word 0 bit 31
+	}
+
+	// a data-looking frame whose recorder marked the data unusable: the VDIF
+	// invalid bit, which is NOT a filler -- see vdifIsInvalid
+	void frame_invalid(int i, long long frameno)
+	{
+		data(i, frameno);
+		at(i)[3] |= 0x80;	// word 0 bit 31
+	}
+
+	// vdifio's FILL_PATTERN (0x11223344): what a recorder leaves in a frame it
+	// had no data for.  vdifmux looks for it at the frame's end and at its
+	// start (vdifmux.c:598/606) and skips the frame either way.
+	static void putpattern(unsigned char *p)
+	{
+		unsigned int w = 0x11223344u;
+		memcpy(p, &w, 4);
+	}
+
+	void filler_pattern(int i)	// whole frame
+	{
+		for(int b=0; b+4<=framebytes; b+=4)
+			putpattern(at(i)+b);
+	}
+
+	void filler_pattern_head(int i)	// leading four bytes only
+	{
+		memset(at(i), 0, framebytes);
+		putpattern(at(i));
+	}
+
+	void filler_pattern_tail(int i)	// trailing four bytes only; the header
+	{				// stays data-looking so only the end test can catch it
+		data(i, 0);
+		putpattern(at(i)+framebytes-4);
 	}
 };
 
@@ -152,6 +187,100 @@ static void test_walk_filler()
 	      "filler: positions reported");
 	check(r.gaps.empty() && r.missing == 0, "filler: chain runs unbroken across it");
 	check(r.first == 10 && r.last == 14 && r.frames == 5, "filler: data frames only");
+}
+
+static void test_walk_pattern_filler()
+{
+	// the three FILL_PATTERN shapes take no time slot, like the other two
+	// fillers; and the word sitting anywhere else in a data frame must NOT make
+	// it one -- only the two places vdifmux looks count (4.8's form list)
+	// filler takes no frame number either: the data frames either side of the
+	// run carry consecutive numbers (that is the whole point of the form, and
+	// what keeps the correction from counting them as lost time)
+	Stretch s(FB, 8);
+	for(int i=0;i<3;i++)
+		s.data(i, 200 + i);		// 200..202
+	s.filler_pattern(3);
+	s.filler_pattern_head(4);
+	s.filler_pattern_tail(5);
+	for(int i=6;i<8;i++)
+		s.data(i, 200 + i - 3);		// 203..204
+	Stretch::putpattern(s.at(6)+10);	// mid-payload, neither end
+
+	FrameRun r = walkFrameChain(s.bytes.data(), 8, FB, 0, FPS, -1);
+	check(r.fillers.size() == 3, "pattern: all three shapes counted as filler");
+	check(r.fillers.size() == 3 && r.fillers[0] == 3 && r.fillers[1] == 4 && r.fillers[2] == 5,
+	      "pattern: positions reported");
+	check(r.gaps.empty() && r.missing == 0, "pattern: chain runs unbroken across them");
+	check(r.first == 200 && r.last == 204 && r.frames == 5,
+	      "pattern: only the five real data frames counted");
+	check(!vdifIsFiller(s.at(6), 0, FB), "pattern: mid-payload word is not filler");
+}
+
+static void test_place_pattern_filler()
+{
+	// same as test_place_filler, with the pattern instead of the zero header:
+	// the placeholders take no slot and the frames behind them move up
+	const int slots = 8;
+	Stretch s(FB, 9);
+	s.data(0, 0);
+	s.data(1, 1);
+	s.filler_pattern(2);
+	s.filler_pattern_tail(3);
+	for(int i=4;i<9;i++)
+		s.data(i, i - 2);	// 2..6
+	unsigned char dst[FB*slots];
+	memset(dst, 0xEE, sizeof(dst));
+	SlotPlacement p = placeFrames(s.bytes.data(), 9, FB, FPS, 0, dst, slots);
+	check(p.placed == 7, "pattern placement: seven data frames, seven slots");
+	check(p.holes.size() == 1 && p.holes[0].first == 7 && p.holes[0].second == 8,
+	      "pattern placement: tail left without data");
+	check(dst[2*FB + 8] == 2, "pattern placement: frame 2 sits in slot 2");
+}
+
+static void test_walk_invalid_frames()
+{
+	// a frame the recorder marked invalid holds its slot: it advances the chain
+	// like a data frame (unlike a filler, whose number is not even usable), it
+	// is only listed so the caller can clear its data (4.12)
+	Stretch s(FB, 7);
+	for(int i=0;i<3;i++)
+		s.data(i, 300 + i);
+	s.frame_invalid(3, 303);
+	for(int i=4;i<7;i++)
+		s.data(i, 300 + i);
+	FrameRun r = walkFrameChain(s.bytes.data(), 7, FB, 0, FPS, -1);
+	check(r.fillers.empty(), "invalid: not counted as filler");
+	check(r.invalids.size() == 1 && r.invalids[0] == 3, "invalid: position reported");
+	check(r.frames == 7, "invalid: counted on the time axis");
+	check(r.first == 300 && r.last == 306, "invalid: chain runs through it");
+	check(r.gaps.empty() && r.missing == 0, "invalid: no gap invented");
+}
+
+static void test_place_invalid_slot()
+{
+	// the invalid frame keeps its slot and that slot is reported for clearing;
+	// the frames around it do not move (contrast test_place_filler)
+	const int slots = 8;
+	Stretch s(FB, 6);
+	for(int i=0;i<6;i++)
+		s.data(i, 400 + i);
+	s.frame_invalid(2, 402);
+
+	unsigned char dst[FB*slots];
+	memset(dst, 0xEE, sizeof(dst));
+	SlotPlacement p = placeFrames(s.bytes.data(), 6, FB, FPS, 400, dst, slots);
+	check(p.placed == 6, "invalid placement: six frames fill six slots");
+	check(p.invalidslots.size() == 1 && p.invalidslots[0] == 2,
+	      "invalid placement: the slot is reported");
+	check(dst[2*FB + 8] == (unsigned char)(402 & 0xFF),
+	      "invalid placement: data still sits in the slot");
+
+	std::vector<std::pair<int,int> > r = p.invalidRanges();
+	check(r.size() == 2 && r[0].first == 2 && r[0].second == 3,
+	      "invalid placement: its own range");
+	check(r.size() == 2 && r[1].first == 6 && r[1].second == 8,
+	      "invalid placement: tail holes kept alongside");
 }
 
 static void test_walk_chain_seed()
@@ -346,12 +475,16 @@ int main()
 	test_walk_wrap();
 	test_walk_repeat();
 	test_walk_filler();
+	test_walk_pattern_filler();
+	test_walk_invalid_frames();
 	test_walk_chain_seed();
 	test_walk_all_filler();
 	test_place_plain();
 	test_place_offset();
 	test_place_gap();
 	test_place_filler();
+	test_place_pattern_filler();
+	test_place_invalid_slot();
 	test_place_whole_invalid();
 	test_place_tail();
 	test_place_dryrun_matches();

@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""扫描一个 VDIF 文件，汇总帧号链上的中断（缺口与全零 filler 段）.
+"""扫描一个 VDIF 文件，汇总帧号链上的中断（缺口与各种形态的 filler 段）.
 
 用法: scan_filler.py <file.vdif> [fps]
 
 输出：首帧帧头、总帧数，以及每一段"异常"的摘要：
-  类型 zero-run（全零头）/ step（帧号跳跃）/ invalid（invalid 位置位）
+  类型 zero-run（全零头）/ invalid（invalid 位置位）/ pattern-tail、pattern-head
+  （vdifio 的 FILL_PATTERN 0x11223344，在帧尾或帧首 —— vdifmux 认这两处、跳过的
+  长度不同，见 :598/:606）/ step（帧号跳跃）/ framelength=N（帧长与首帧不符）
   起止 fileidx、帧数、段前段后的帧号（时间轴跳了多少帧）、字节数
 """
 import os
 import struct
 import sys
 
+# vdifio/vdifmux.c:30-32 —— 记录系统写不出数据时留在帧字节里的模式（按小端比较）
+FILL_PATTERN = 0x11223344
+
 
 def parse(b):
     """按 vdifio 的字布局解析 32 字节头（小端 8 个 u32）。"""
     w = struct.unpack('<8I', b)
     return {
+        'w0': w[0],
+        'w1': w[1],
         'seconds': w[0] & 0x3FFFFFFF,
         'legacy': (w[0] >> 30) & 1,
         'invalid': (w[0] >> 31) & 1,
@@ -61,10 +68,22 @@ def main():
             d = parse(f.read(32))
             fno = fno_of(d)
 
+            # vdifmux.c:598/606 look for FILL_PATTERN in the frame's last four
+            # bytes (skip the whole frame) and in its first four (skip 8
+            # bytes); a file can carry either form, so both are reported.
+            tail = 0
+            if framebytes >= 4:
+                f.seek(i * framebytes + framebytes - 4)
+                tail = struct.unpack('<I', f.read(4))[0]
+
             if d['allzero']:
                 kind = 'zero-run'
             elif d['invalid']:
                 kind = 'invalid'
+            elif tail == FILL_PATTERN:
+                kind = 'pattern-tail'
+            elif d['w0'] == FILL_PATTERN:
+                kind = 'pattern-head'
             elif d['framelength8'] * 8 != framebytes:
                 kind = 'framelength=%d' % (d['framelength8'] * 8)
             elif prev is not None and fno != prev[1] + 1:

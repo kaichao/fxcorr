@@ -536,6 +536,14 @@ int DataReader::checkFrameContinuity(const u8 *src, int srcbytes, long long read
 	   (int)((firstany - (long long)lastframens + fps) % fps) > 0)
 		reorder = true;
 
+	// A frame the recorder marked invalid needs the pass too, even though its
+	// number is where it should be: the slot it keeps has to be reported so the
+	// valid flags can clear it (reader-model.md 4.12).  Without an invalid frame
+	// in the buffer the condition above is untouched, so the no-interruption
+	// path stays byte for byte what it was.
+	if(!reorder && !run.invalids.empty())
+		reorder = true;
+
 	// P12 step 2b: put the frames where the time axis says they belong.  When
 	// there is neither a gap nor filler nothing moves and the source is the
 	// destination buffer -- which is what keeps the no-interruption path byte
@@ -671,7 +679,10 @@ int DataReader::shiftFrameGaps(const u8 *src, int srcframes, u8 *dstbuf, int slo
 	if(!dryrun)
 	{
 		lastshiftdst = p.firstslot;
-		gapinvalid = p.holes;
+		// holes (slots nobody claimed) and invalid-marked slots (frames the
+		// recorder said not to use) both have to be cleared from the valid
+		// flags -- reader-model.md 4.12
+		gapinvalid = p.invalidRanges();
 
 		memcpy(dstbuf, gapbuffer, (size_t)slots*framebytes);
 
@@ -1105,6 +1116,18 @@ int DataReader::readSubint(int scan, int offsetsec, int offsetns, u8 *buffer, in
 		return 0;
 	}
 	openFile(scan);
+
+	// Every subint's read starts from a clean stream state.  readWindow's
+	// doubling loop walks to the end of the file when the slots cannot be
+	// filled before it, which sets eofbit and failbit; openFile only clears
+	// them when it actually opens a file, so within one file the next subint
+	// would inherit them -- seekg leaves the failbit set, its good() test then
+	// fails and readWindow returns -1, silently dropping that whole subint
+	// (M2 of fxcorr/test/gaps/run_mixed.sh: a filler run longer than the
+	// subint's own frame count leaves less than a subint of data after it, so
+	// filling the slots means reading to the end of the file).  For a read
+	// that stopped inside the file this is a no-op.
+	input.clear();
 
 	long long fileoffset = 0;
 	if(!locate(scan, offsetsec, offsetns, sec, ns, &fileoffset))

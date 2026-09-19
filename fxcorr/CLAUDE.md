@@ -6,13 +6,14 @@
 
 ## 文档分工
 
-- **README.md**：需求（R1-R7）、总体架构（含 mpifxcorr 改造基准三层分类与核心算法链，3.1-3.3 节）、实现阶段（V1–V4，四阶段均已完成的记录）、设计要点。改架构/需求时改它。
+- **README.md**：需求（R1-R7）、总体架构（含 mpifxcorr 改造基准三层分类与核心算法链，3.1-3.3 节）、实现阶段（V1–V5）、设计要点。改架构/需求时改它。
 - **data-spec.md**：数据规范（版本 1.1）—— 目录布局、D1-D13 数据类型、模块 I/O、band_XX.sp / pcal.bin / autocorr.bin / SWIN 二进制格式、时间轴与通道/偏振映射、切批约束。**改数据接口/文件格式时必须先同步它**。
 - **reader-model.md**：fxcorr-f 读取模型与读取缺陷分析——读模型对照（顺序读 vs 定位读）、缺陷根因总表（A 起点 / B 缺口 / C filler / D 有效性）、症状指纹与 `GAPCHECK`/`READPOS` 判据、改造建议。**改 datareader 前先读它**；读取相关的**分析**内容集中在此（data-spec 5.2 只留数据规格约束，`applications/fxcorr-f/CLAUDE.md` 只留目录级实现要点）。
 - **v1-plan.md**：V1 实施方案——组件源码清单、core.cpp 切分落点、datareader 改造、install-difx 注册、验收标准。**已冻结**（2026-09-15）。
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。**已冻结**（2026-09-18）。
 - **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。**已冻结**（2026-09-19）。
-- **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）——**接手 reader 工作时先读它**。**已冻结**（2026-09-19，最新一份）；分析与判据仍在 reader-model.md，本文件不重复。
+- **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）。**已冻结**（2026-09-19）；末节的后续方向由 v5-plan.md 接手。
+- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效），另有验收与回归总表、未完成清单。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、datasim 特性差距、P0-P4 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
@@ -29,18 +30,19 @@
 | 文档 | 性质 | 最后更新 | 一句话 |
 |---|---|---|---|
 | `README.md` | 活 | 2026-09-19 | 需求与架构（R1–R7 的出处） |
-| `data-spec.md` | 活 | 2026-09-18 | 数据接口与文件格式；改接口**先**改它 |
+| `data-spec.md` | 活 | 2026-09-19 | 数据接口与文件格式；改接口**先**改它 |
 | `usage.md` | 活 | 2026-09-19 | 三工具命令行手册 |
 | `build.md` | 活 | 2026-09-13 | 构建手册（构建体系自 V1 定稿后未变） |
 | `reader-model.md` | 活 | 2026-09-19 | 读取路径的**单一权威分析**；改 datareader 先读它 |
 | `algo-plan.md` | 活 | 2026-09-19 | 算法改进的设计与实施记录（P0–P12） |
 | `fxcorr-sim-arch.md` | 活 | 2026-09-15 | fxcorr-sim 架构与公共信号模型 |
-| `v4-plan.md` | 冻结（最新） | 2026-09-19 | **当前版本的路线与结论**（V4 已完成，结论在开头） |
+| `v5-plan.md` | 活（进行中） | 2026-09-19 | **当前版本的路线与定案**（V5：P1 补盲区并修掉 B7、P2 FILL_PATTERN 按整帧认、P3 invalid 位占槽标无效——三件均完成；只差"要真实数据"） |
+| `v4-plan.md` | 冻结 | 2026-09-19 | V4 定案与实施（三层判据、B2）；末节的三条后续方向由 V5 接手 |
 | `v3-plan.md` | 冻结 | 2026-09-19 | V3 定案与实施（P3 OpenMP、P12 病态数据） |
 | `v2-plan.md` | 冻结 | 2026-09-18 | V2 定案与实施（镜像体系、P0–P11） |
 | `v1-plan.md` | 冻结 | 2026-09-15 | V1 定案与实施 |
 
-**接手 reader 工作**：先读 `v4-plan.md` 开头的「V4 结论」→ 再读 `reader-model.md` 的缺陷总表（4.1–4.4）与诊断契约（6.6）。
+**接手 reader 工作**：先读 `v5-plan.md`（**当前版本**：三件收尾事项的定案与验收）与 `v4-plan.md` 开头的「V4 结论」→ 再读 `reader-model.md` 的缺陷总表（4.1–4.4）、4.10–4.12 的三条定案与小节、诊断契约（6.6）。
 **更新文档时**：只同步活文档；冻结文档仅在更正**事实性错误**时动，且同时更新其头部日期。
 
 **本目录之外的文档**（同样在头部声明性质与日期）：
@@ -109,8 +111,8 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `sta/sta_ctrl.c` / `sta/gen_test_sta.py` / `sta/cmp_sta.py` / `sta/README.md` | P9 STA/kurtosis 检验资产（sta_ctrl：difxmessage 控制消息发送 + BINARY_STA 组播抓包；CHANS TO AVG 4 变体覆盖 STA 频域平均分支；原始 record 流逐位对拍）+ 检验步骤/验收判据/验证记录（含 P1 cf32 stride bug 修复与基准控制消息时序坑） |
 | `p10/gen_test_mk5b.py` / `gen_test_lba.py` / `gen_test_ivdif.py` / `gen_test_p10.py` / `verify_lba.py` / `p10/README.md` | P10 输入格式检验资产（Mk5B 10016 帧生成器、LBA 16 字节 ASCII 头+2bit 低位先生成器、fanout 多线程 VDIF 生成器、.input 变体、LBA 自洽验证脚本）+ 检验步骤/验收判据/验证记录（含 LBA 位序、VDIF word3 布局、EDV4 三坑等 bug 记录） |
 | `p11/gen_test_p11.py` / `p11/README.md` | P11 reader 语义检验资产（TEST2 对跖点 → 几何 delay 11.2ms 的 test-delay.vex/v2d 生成器，触发 delay 重对齐跳块语义）+ 检验步骤/验收判据/验证记录（含 vex2difx 从 cwd 找 vex 的坑） |
-| `gaps/README.md` | 缺口/filler 处理检验资产（fxcorr-sim 的 `FXSIM_GAPS` 造记录中断：缺口与 filler 两种形式在**同一位置**、**帧号范围相同**，与 t25362 的真实中断同构）+ 检验步骤/验收判据/验证记录（含 **filler 必须推进帧号**的语义坑、make_testdata.sh 要求 workdir 已存在的坑）。五个脚本：`run_boundary.sh`（缺口跨 subint 边界，B5 判据）、`run_filler.sh`（filler ≫ 缺口的过渡区，判据 = 两种形式逐 subint 无效块一致）、`run_window.sh`（**窗口长度**缺口：filler 段之后还有数据时，段后数据落在读取窗口之外，判据 = `reader/check_reader.py` 的 E4 = 0；2026-09-19 加，修复前红 69 帧）、`run_startoffset.sh`（**文件起点晚于 batch 起点**（A 类）：生成器 `FXSIM_STARTOFFSET` + check_reader 的 E5 绝对时间锚，含"判据必须能报红"的自检；2026-09-19 加）、`scan_filler.py` / `sp_valid.py` / `dump_weight.py`（帧头扫描 / .sp 无效块 / SWIN 权重对比三个诊断工具）。**四个 `run_*.sh` 的验收判据 2026-09-19 起全部收敛到 `reader/check_reader.py`**（A3：绝对判据——文件真值而非"与另一种形式比"，且各带"判据能报红"的自检；旧相对判据保留作交叉核对） |
-| `reader/README.md` | **reader 对账的独立真值层**（2026-09-19 加）：`file_truth.py`（扫 VDIF → 台账 JSON：数据段帧号↔文件偏移、filler 段、缺口；缺口与 filler 在真值里统一为"槽未被占用"）+ `check_reader.py`（五条断言对账 fxcorr-f 的 `READPOS`/`GAPCHECK holes`：E1 定位 / E2 数据 / E3 落点（区分**多标**与**漏标**）/ E4 覆盖（**净损失**：文件里有、却从未进入任何读取窗口的帧）/ E5 锚点（读窗口起点的**绝对**时间 vs batch 起点 + 序号×跨度——E1 只看相邻差、E2/E3 是自洽性判据，`anchorbytes` 整体偏时都抓不到，A 类靠 E5 现形；基准不同源、READPOS 不完整、文件含中断时跳过）。判据是绝对的——文件真值而非"与另一种形式比"；`gaps/` 四个脚本都已接入本工具（2026-09-19，A3），`cmp_swin.py` 在病态数据上的失效背景见其 README 与 `reader-model.md` 4.6/4.7。目录内另有 `test_timeline.cpp` 与 `test_corrections.cpp`——**分层重构两层纯函数的单测**（`applications/fxcorr-f/src/frametimeline.h` 的帧时间轴层、`corrections.h` 的修正量层），零依赖直接 `g++ -I applications/fxcorr-f/src` 编译，53 + 48 项断言（C1/C2，2026-09-19） |
+| `gaps/README.md` | 缺口/filler 处理检验资产（fxcorr-sim 的 `FXSIM_GAPS` 造记录中断：缺口与 filler 两种形式在**同一位置**、**帧号范围相同**，与 t25362 的真实中断同构）+ 检验步骤/验收判据/验证记录（含 **filler 必须推进帧号**的语义坑、make_testdata.sh 要求 workdir 已存在的坑）。七个脚本：`run_boundary.sh`（缺口跨 subint 边界，B5 判据）、`run_filler.sh`（filler ≫ 缺口的过渡区，判据 = 两种形式逐 subint 无效块一致）、`run_window.sh`（**窗口长度**缺口：filler 段之后还有数据时，段后数据落在读取窗口之外，判据 = `reader/check_reader.py` 的 E4 = 0；2026-09-19 加，修复前红 69 帧）、`run_startoffset.sh`（**文件起点晚于 batch 起点**（A 类）：生成器 `FXSIM_STARTOFFSET` + check_reader 的 E5 绝对时间锚，含"判据必须能报红"的自检；2026-09-19 加）、`run_mixed.sh`（**缺口与 filler 同段并存、多组相邻**：照 t25362 的实测段序造两个场景——两组相邻（组间只隔 2 帧数据、同窗口内两次修正叠加）与长 filler 跨 subint，各配纯缺口等价形式；*M2 抓出并修掉了 B7*，见 `reader-model.md` 4.10；2026-09-19 加）、`run_pattern.sh`（**占位帧的字节形态**：同一段时间造三次，只换占位帧为全零头 / 整帧 `FILL_PATTERN` / 帧首 `FILL_PATTERN`，判据 = 三者 `GAPCHECK summary` 逐字段相同 + 逐 subint 无效块一致 + E1–E4 全绿；定案"按整帧认"的实测依据是上游对三者 SWIN 逐字节相同，见 `reader-model.md` 4.11；2026-09-19 加）、`run_invalid.sh`（**invalid 位帧**：帧在位、数据不可用——用后处理把一段帧的 word0 最高位置 1，判据 = 读取位置与对照逐行相同 + 无效块增加 + 真值零 finding；定案"占槽 + 数据标无效"，见 `reader-model.md` 4.12；2026-09-19 加）、`scan_filler.py` / `sp_valid.py` / `dump_weight.py`（帧头扫描 / .sp 无效块 / SWIN 权重对比三个诊断工具）。**七个 `run_*.sh` 的验收判据 2026-09-19 起全部收敛到 `reader/check_reader.py`**（A3：绝对判据——文件真值而非"与另一种形式比"，且各带"判据能报红"的自检；旧相对判据保留作交叉核对） |
+| `reader/README.md` | **reader 对账的独立真值层**（2026-09-19 加）：`file_truth.py`（扫 VDIF → 台账 JSON：数据段帧号↔文件偏移、filler 段、缺口；缺口与 filler 在真值里统一为"槽未被占用"）+ `check_reader.py`（五条断言对账 fxcorr-f 的 `READPOS`/`GAPCHECK holes`：E1 定位 / E2 数据 / E3 落点（区分**多标**与**漏标**）/ E4 覆盖（**净损失**：文件里有、却从未进入任何读取窗口的帧）/ E5 锚点（读窗口起点的**绝对**时间 vs batch 起点 + 序号×跨度——E1 只看相邻差、E2/E3 是自洽性判据，`anchorbytes` 整体偏时都抓不到，A 类靠 E5 现形；基准不同源、READPOS 不完整、文件含中断时跳过）。判据是绝对的——文件真值而非"与另一种形式比"；`gaps/` 六个脚本都已接入本工具（2026-09-19，A3），`cmp_swin.py` 在病态数据上的失效背景见其 README 与 `reader-model.md` 4.6/4.7。目录内另有 `test_timeline.cpp` 与 `test_corrections.cpp`——**分层重构两层纯函数的单测**（`applications/fxcorr-f/src/frametimeline.h` 的帧时间轴层、`corrections.h` 的修正量层），零依赖直接 `g++ -I applications/fxcorr-f/src` 编译，61 + 48 项断言（C1/C2，2026-09-19；timeline 那 61 项含 FILL_PATTERN 两种位置的识别与一条假阳性检验） |
 | `reader/run_t25362.sh` | **真实数据回归**（阶段 D 固化，2026-09-19）：本地驱动 `ssh difx` 跑 t25362 的 BA ds_2（有 filler）与 ds_0（对照），判据 = `GAPCHECK summary` 逐字段对基线 + `check_reader.py` 零 finding；`--no-run` 用现成日志重复对账（自检手段）。用法与自检记录见 `reader/README.md` |
 | `gen_vex_v2d.sh` | vex/v2d 生成脚本（datasim scripts/genv2dvex.sh 的 fxcorr 版；test.vex/test.v2d 模板参数化：站坐标/源/时间/频率/帧长/EOP 环境变量或 obs_info 文件覆盖，`CALC=1` 续跑 vex2difx→difxcalc 链；已全链验证：生成→.input/.calc/.im→sim→f→x→SWIN，详见 applications/fxcorr-sim/CLAUDE.md） |
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |

@@ -323,7 +323,9 @@ def main():
     for (a, b) in uncovered:
         n_in = n_out = 0
         for seg in truth['segments']:
-            if seg['kind'] != 'data':
+            # 'invalid' 段也占着时间槽（数据被标为不可用而已）——E4 问的是"文件里
+            # 有帧、却从未进入任何读取窗口"，那对 invalid 帧同样成立（4.12）
+            if seg['kind'] not in ('data', 'invalid'):
                 continue
             c0 = max(a, seg['start'])
             c1 = min(b, seg['start'] + seg['count'])

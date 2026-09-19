@@ -18,7 +18,10 @@ check_reader.py --log <f 侧 verbose 日志> --vdif <file.vdif> \
 
 判据依赖 `FXCORR_LOGLEVEL=verbose`（`READPOS` 与 `GAPCHECK holes` 两行都在 verbose）。
 
-**调用者（`gaps/` 的四个脚本，2026-09-19 起全部接入）**：`run_window.sh` 判 E4 = 0；
+**调用者（`gaps/` 的七个脚本，2026-09-19 起全部接入）**：`run_mixed.sh` 判两形式逐 subint
+一致 + E4 = 0（B7 的判据）；`run_pattern.sh` 判三种占位帧形态的 summary 逐字段相同 +
+逐 subint 无效块一致 + E4 = 0（FILL_PATTERN 定案，4.11）；`run_invalid.sh` 判读取位置与
+对照逐行相同 + 真值零 finding（invalid 位定案，4.12）；`run_window.sh` 判 E4 = 0；
 `run_startoffset.sh` 判 E5 启用且无超差（并自检"报红"）；`run_filler.sh` / `run_boundary.sh`
 判退出码（E1–E3 无 finding）与 E4 = 0，各带一条自检把旧相对判据抓的缺陷形态造进日志
 （`fxcorr/v4-plan.md` 的 A3）。**跳过也是退出码 0**——靠 E5 判定的脚本必须另行确认那一行
@@ -30,7 +33,8 @@ check_reader.py --log <f 侧 verbose 日志> --vdif <file.vdif> \
 |---|---|---|
 | 帧号连续的数据帧 | 占用 | `data` 段 |
 | 帧号跳过的若干帧 | 空 | 段间帧号差 = 缺口 |
-| 全零头 / invalid 位置的帧（filler） | 空 | `filler` 段（占文件字节） |
+| 全零头 / `FILL_PATTERN`（帧尾或帧首 4 字节）的帧（filler） | 空 | `filler` 段（占文件字节） |
+| 标了 **invalid 位**的帧 | **占用**（帧在位、帧号照常推进） | `invalid` 段（数据不可用，见 4.12） |
 
 两类损坏在台账里都只是"槽未被占用"——**缺口与 filler 在真值里一视同仁**，这正是
 `gapinvalid` 想表达的语义，但后者由读取过程顺带发现、只能自证。缺口形式与 filler 形式
