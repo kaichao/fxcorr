@@ -6,13 +6,18 @@
                   [--truth truth.json] [--batch-json batches/<id>.json]
                   [--fps N] [--json out.json] [--quiet]
 
-背景见 fxcorr/test/reader/README.md。三条断言各管一段，互不代偿：
+背景见 fxcorr/test/reader/README.md。五条断言各管一段，互不代偿：
 
   E1 定位  读取窗口起点应落在名义时间轴上（batch 起点 + k×subint），相邻 subint 差
            恒定。位置错（A/B/C 类）在这里现形。
   E2 数据  readoff 处文件里的第一个数据帧，其帧号应等于该 subint 报的 firstfno。
   E3 落点  文件真值算出的空洞槽区间 == GAPCHECK holes 报的槽区间。多标 = fxcorr 把
            有数据的槽判成洞（丢好数据），漏标 = 洞被当数据积分。
+  E5 锚点  该数据帧的**绝对**时间（帧头给出）应等于 batch 起点 + locate 的时间轴帧号。
+           E2 比的是"文件里的帧号 vs fxcorr 报的帧号"——两边都是从数据里读出来的，
+           anchorbytes 整体偏掉时一起偏，看不出来；E5 引入独立参照（batch.json 的
+           start_mjd），A 类（起点的字节换算）才会现形。判据要求 VDIF 秒字段与
+           batch.json 同一基准，不同则跳过（真实观测常见，见 README）。
 
 E3 的窗口起点由**帧号**反推（第一个数据帧的帧号与 framens 定出 f_lo = sec*fps + framens），
 不采信读到的缓冲区自身——否则 reader 自证（这正是 GAPCHECK holes 单独看时做不到的）。
@@ -34,6 +39,11 @@ READPOS_RE = re.compile(
     r'(?: uncorr (-?\d+) passes (\d+))?')	# uncorr/passes 是 2026-09-18 加的
 HOLES_RE = re.compile(r'GAPCHECK holes buf (\d+):(.*)')
 HOLE_RANGE_RE = re.compile(r'\[(-?\d+),(-?\d+)\)')
+
+# E5 的容差（帧）。正确数据上实测有 3 帧的系统性偏差（读取位置相对名义时间轴略早，
+# 来自 delay 修正与取整），容差取 8 留余量；A 类的 anchorbytes 错是整帧量级（合成
+# 场景 18 帧、t25362 的 BA 1269 帧），超差即报。
+E5_TOL = 8
 
 
 def parse_log(path):
@@ -152,11 +162,50 @@ def main():
     framebytes = truth['framebytes']
     total = truth['nframes']
 
-    # subint 跨度（E1 的判据与 f_lo 递推都要用）
+    # subint 跨度（E1 的判据与 f_lo 递推都要用）与 batch 起点（E5 的绝对参照）
     subint_ns = None
+    batchstart_frame = None
+    nsubints_declared = None
     if args.batch_json:
         with open(args.batch_json) as f:
-            subint_ns = json.load(f).get('subint_ns')
+            bj = json.load(f)
+        subint_ns = bj.get('subint_ns')
+        nsubints_declared = bj.get('n_subints')
+        mjd = bj.get('start_mjd')
+        if mjd:
+            # VDIF 的秒字段以 2000.0（MJD 51544）为原点，batch.json 的 start_mjd 同
+            # 一基准（fxcorr-sim 正是这样算出 startsec 的）；基准不同时下面的检查
+            # 会关掉 E5。
+            batchstart_frame = int(round((mjd - 51544.0) * 86400.0 * fps))
+
+    # 文件第一个数据帧的绝对帧号：E5 的期望要把它排在外面——该 subint 的头部若早于
+    # 文件起点，读只能从文件首帧开始，那是语义而非缺陷（A3 正是做对这条的修复）
+    filestart_frame = None
+    if batchstart_frame is not None:
+        for seg in truth['segments']:
+            if seg['kind'] == 'data':
+                filestart_frame = seg['sec'] * fps + seg['frame']
+                break
+        # 基准一致性：文件起点与 batch 起点之差就是起点偏移。合理的记录偏移是秒级，
+        # 差出小时量级说明两边的秒零点不同（t25362 的 VDIF 秒与 MJD 差 180 天），
+        # 强行相减只会给出误导的常数。
+        if filestart_frame is not None and abs(filestart_frame - batchstart_frame) > 3600*fps:
+            print('E5 anchor   : skipped -- the VDIF second and batch.json start_mjd are on '
+                  'different epochs')
+            batchstart_frame = None
+        # E5 的期望按 subint 序号累加，前提是日志覆盖了 batch 的每一个 subint（读数
+        # 失败的那些不打印 READPOS，序号就错位了——t25362 的前 19 个正是如此）
+        if nsubints_declared is not None and len(subints) != nsubints_declared:
+            print('E5 anchor   : skipped -- READPOS covers %d of %d subints'
+                  % (len(subints), nsubints_declared))
+            batchstart_frame = None
+        # E5 只对"文件连续"的数据有效：缺口与 filler 本来就会让读取位置偏离名义时间
+        # 轴（读取位置要落到中断之后的第一帧，那是 B/C 类要处理的正当事），判据只在
+        # A 类的场景启用。A 类的辨识要点正是"无缺口的积分也错"（reader-model.md 4.1）。
+        if truth.get('fillerframes') or truth.get('gaps'):
+            print('E5 anchor   : skipped -- the file has filler or gaps (B/C class); '
+                  'E5 covers the A class only')
+            batchstart_frame = None
 
     span = int(round(subint_ns / 1e9 * fps)) if subint_ns else None
     rows = []
@@ -177,6 +226,7 @@ def main():
                     row['e2'] = 'no data frame in window'
                 else:
                     row['e2'] = 'ok' if frame == s['firstfno'] else 'firstfno %d vs file %d' % (s['firstfno'], frame)
+                    row['absframe'] = sec * fps + frame	# E5 用（帧头的绝对时间）
                     # E3：窗口起点由帧号反推（f_lo ≡ framens mod fps，取 ≤ 该帧的那个）
                     d = (frame - s['framens']) % fps
                     row['f_lo'] = sec * fps + frame - d
@@ -197,7 +247,7 @@ def main():
             if prev is not None:
                 row['f_lo'] = prev + hs
 
-    for row in rows:
+    for k, row in enumerate(rows):
         if 'f_lo' not in row:
             continue
         row['truth_holes'] = norm(file_truth.holes_in_window(
@@ -219,7 +269,16 @@ def main():
         extra_slots += sum(b - a for (a, b) in extra)
         missing_slots += sum(b - a for (a, b) in missing)
         row['e3'] = 'ok' if not (extra or missing) else 'extra %s missing %s' % (fmt(extra), fmt(missing))
-        if row['e2'] != 'ok' or row['e3'] != 'ok':
+        # E5 绝对时间锚（见文件头）：窗口起点的绝对时间应等于 batch 起点 + locate 给的
+        # 时间轴帧号；只有该 subint 的头部早于文件起点时才允许它是文件首帧
+        if batchstart_frame is not None and 'absframe' in row:
+            # 名义位置 = batch 起点 + 序号 × 跨度；该 subint 的头部早于文件起点时，
+            # 读只能从文件首帧开始（起点偏移的正确行为，A3 修复的正是它）
+            want = batchstart_frame + k*subint_ns/1e9*fps
+            if want < filestart_frame:
+                want = filestart_frame
+            row['e5'] = round(row['absframe'] - want)
+        if row['e2'] != 'ok' or row['e3'] != 'ok' or abs(row.get('e5', 0)) > E5_TOL:
             nbad += 1
 
     # E4：读取窗口对文件的覆盖。定位读按字节数读**一段连续**区域，被 filler 隔开的本
@@ -297,7 +356,8 @@ def main():
         print('  %-5s %-11s %-12s %-6s %-6s %-8s %-18s %-18s %s'
               % ('sub', 'readoff', 'f_lo', 'framens', 'first', 'E1', 'truth holes', 'fxcorr holes', 'verdict'))
         for row, e in zip(rows, e1):
-            ok = row['e2'] == 'ok' and row.get('e3', 'ok') == 'ok'
+            ok = (row['e2'] == 'ok' and row.get('e3', 'ok') == 'ok'
+                  and abs(row.get('e5', 0)) <= E5_TOL)
             if args.only_bad and ok:
                 continue
             print('  %-5d %-11d %-12s %-6d %-6d %-8s %-18s %-18s %s'
@@ -312,6 +372,14 @@ def main():
             flo = [row['f_lo'] for row in rows if 'f_lo' in row]
             print('E1 day      : span %d, window starts at day-second %d → %d (%d subints)'
                   % (span, (flo[0] // fps) % 86400, (flo[-1] // fps) % 86400, len(flo)))
+        if batchstart_frame is not None:
+            offs = [row['e5'] for row in rows if 'e5' in row]
+            print('E5 anchor   : %d subints, max |window start - nominal| %d frame(s) [tolerance %d]'
+                  % (len(offs), max(abs(o) for o in offs) if offs else 0, E5_TOL))
+            for row in rows:
+                if abs(row.get('e5', 0)) > E5_TOL:
+                    print('              sub %d: %+d frames (readoff %d, framens %d, file frame %d)'
+                          % (row['n'], row['e5'], row['readoff'], row['framens'], row['absframe']))
 
     print('summary     : %d subints, %d with a finding; E3 extra %d slots, missing %d slots'
           % (len(rows), nbad, extra_slots, missing_slots))
