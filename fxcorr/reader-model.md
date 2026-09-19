@@ -504,7 +504,37 @@ A/B 的做法：`git show HEAD:` 导出改动前的三个源文件到测试机�
 
 第 2 层的定义值得强调：`gapshiftbytes` 的**正确语义**是"时间位置早于当前读取点的缺口字节总量"，而不是"到目前为止检测到的缺口字节总量"。当前实现是后者的**近似**——在缺口不跨 subint 时两者相等，跨了就不等（B5）。把它写成以**时间**为自变量的函数，B5 不再是"要修的 bug"，而是定义的自然结果。
 
-**落地路线**：本节只定结构，顺序与验收线见 `v4-plan.md` 阶段 C——它现在只定到验收线（接口取决于 4.7 的窗口语义定案），拆层三提交待 B3 之后回填。
+**落地路线**：本节只定结构，顺序与验收线见 `v4-plan.md` 阶段 C（三步已回填）。
+
+**C1（帧时间轴层）已完成，2026-09-19**：落在 `applications/fxcorr-f/src/frametimeline.h`，
+两个纯函数——`walkFrameChain`（一段帧 → 首末帧号、数据帧数、filler 位置、缺口列表）与
+`placeFrames`（槽映射：filler 丢弃、缺口占槽、没人认领的槽报为洞；`dst` 传 NULL 即 dry run，
+**填槽与"够不够"共用同一次走查**，B2 的约束就此固化）。`shiftFrameGaps` 只剩薄包装
+（scratch 缓冲 + 诊断 + `gapinvalid`），`checkFrameContinuity` 的主循环与 `countFillerRange`
+的块循环都改用它——同一套"帧号链 + 跳 filler + 记缺口"逻辑此前写了三遍，这是 B3/B5/C6
+那类缺陷的温床。单测 `fxcorr/test/reader/test_timeline.cpp`（54 项断言，零依赖直接编译）。
+
+等价性三层证据：无缺口数据（`cmp5` 58948_25200）三个产物 md5 与 HEAD(B2) 二进制全同；
+`gaps/` 四个脚本全绿且自检仍报红；**真机 t25362 ds_2 的日志与 B2 版 diff 0 行**（2218 行，
+含全部 `READPOS` / `GAPCHECK` 明细），`band_00.sp` / `autocorr.bin` / `pcal.bin` md5 全同。
+
+**C2（修正量层）已完成，2026-09-19**：落在 `applications/fxcorr-f/src/corrections.h` 的
+`Ledger`——缺口按**槽坐标**记录（换算在 `noteGap` 时做一次，不再每次查询反算），filler 台账
+与两个去重水位同在一处，`gapShift(t)` 与 `fillerFrames()` 是全部查询面。**这一层把 B5 与 B6
+从"待修的 bug"变成了定义**：`gapShift` 以时间为自变量，跨 subint 边界的缺口与 filler 之后的
+缺口都只是它的取值，单测 `fxcorr/test/reader/test_corrections.cpp`（48 项断言）把两个场景
+连同 A 类起点偏移的两个符号、去重、两缺口连锁钉住。两处扫描循环改为按帧序归并后依次
+`noteFiller` / `noteGap`（缺口"之前有多少 filler"由 ledger 自己回答，层 1 的 `fillersbefore`
+随之删除）。等价性证据与 C1 同三层，真机同样是 diff 0 行 + 产物 md5 全同。
+
+**C3（I/O 层）已完成，2026-09-19**：这一层退化成坐标变换与编排——`readSubint` 现在只有
+四步（`locate` 出坐标 → `settleReadPosition` 用修正量把它落定 → `readWindow` 读窗口并重建
+帧栅格 → 交回字节数）；`settleReadPosition` 的循环里只剩"纯函数 `correctedPosition` + 一次
+`scanStretch`"，后者的前身是 `scanSkippedStretch` + `countFillerRange` 两个函数（合并后
+"水位的判断、读字节、走链、记账"四件事在一处，不再跨函数分居）。三层就此定型：**帧时间轴层**
+（`frametimeline.h`，帧号→槽）、**修正量层**（`corrections.h`，以时间为自变量的账）、
+**I/O 层**（`readSubint` / `readWindow` / `scanStretch`，坐标变换与读取）。真机 diff 仍为 0 行，
+产物 md5 全同。
 
 ### 7.3 验收：分层递进，不要一步跳到对拍
 

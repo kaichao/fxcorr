@@ -55,6 +55,42 @@ E3 的窗口起点由**帧号反推**（`f_lo ≡ framens (mod fps)`，取 ≤ �
 `shiftFrameGaps` 的 `dst` 同一坐标系；块换算是 `槽 × payloadbytes/blockbytes + lastcount`，
 只在要对到 `.sp` 时才需要，`GAPCHECK holes` 本身已经是槽区间。
 
+## 与层 1 并列的层 2 单测：`test_corrections.cpp`
+
+`applications/fxcorr-f/src/corrections.h` 是第二层（C2）：`Ledger` 把缺口**按时间槽**记账，
+`gapShift(t)` 回答"时间位置 t 之前丢了多少帧"（并把落在洞里的 t 推到洞尾），`fillerFrames()`
+回答"t 之前的 filler 有多少帧"。同样的零依赖：
+
+```bash
+g++ -std=c++11 -Wall -Iapplications/fxcorr-f/src fxcorr/test/reader/test_corrections.cpp \
+    -o /tmp/test_corrections && /tmp/test_corrections
+```
+
+48 项断言，覆盖这一层存在的理由：**B5**（缺口跨 subint 边界——仍在前方的缺口不缩短本次读）、
+**B6**（filler 之后的缺口——不减掉前面的 filler 就会晚那么多槽生效，测试里同时造了"错算"
+的对照）、A 类起点偏移的两个符号、去重（同一 offset 的缺口只记一次、水位之下的 filler 不重复
+计数）、两个缺口的连锁、以及层 1 与层 2 的级联（`walkFrameChain` 找出的缺口喂给 `Ledger`
+再按时间查询）。
+
+## 层 1 单测：`test_timeline.cpp`
+
+`applications/fxcorr-f/src/frametimeline.h` 是 reader 分层的第一层（`v4-plan.md` 阶段 C）：
+两个纯函数管"帧号 → 时间槽"的映射——`walkFrameChain`（帧号链、filler、缺口）与
+`placeFrames`（槽映射与洞）。它们不依赖 fxcorrcommon、不碰文件、不打日志，所以单测是
+**零依赖**的（本地机器即可跑）：
+
+```bash
+g++ -std=c++11 -Wall -Iapplications/fxcorr-f/src fxcorr/test/reader/test_timeline.cpp \
+    -o /tmp/test_timeline && /tmp/test_timeline
+```
+
+54 项断言，覆盖：连续帧 / 缺口 / 秒回绕（不算缺口）/ 重复帧号 / 两种 filler 形态（全零头
+与 invalid 位）/ 跨段接链 / 全 filler 段；槽映射的起点偏移 / 缺口占槽 / filler 丢弃 /
+缺口盖过整窗 / 尾部不足；以及 **dry run 与实跑逐项相同**——B2 的"填槽与'够不够'共用一份
+算法"这条约束自此可测。
+
+**改 `frametimeline.h` 必须重跑它**：这是那一层唯一的测试面（`reader-model.md` 7.2）。
+
 ## 验证记录（2026-09-19，测试机）
 
 合成四个场景（`fxcorr-sim` 的 `FXSIM_GAPS`，test.vex 配置，4 个 subint）：

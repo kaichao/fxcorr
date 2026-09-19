@@ -35,13 +35,17 @@ A1 若现有 `FXSIM_GAPS` 语法造不出目标形态，则先给生成器加参
 | ✅ B2 | 按 B1 的结论实现（2026-09-19）：`shiftFrameGaps` 的源帧数与目标槽数拆开并加 `dryrun`（填槽与"够不够"共用一份算法）、`readSubint` 第一趟照旧直读进输出缓冲、填不满才改用可增长的 `inbuf` 翻倍多读、扫描范围截断到"填满所需"；`READPOS` 增 `slots` 字段，`check_reader.py` 的 E3 与 E4 的 batch 上界随之改用槽数（E4 的窗口位置仍用 `nframes`）；SwitchedPower 喂入加 `lastReadContiguous()` 保护 | A1 转绿（**E4 69 → 0**）✓；`run_filler.sh` 判据不退（169 == 169）、`run_boundary.sh` / `run_startoffset.sh` 全绿、三条自检仍报红 ✓；无缺口、无 filler 的 64-subint 数据 **md5 逐字节不变**（HEAD 版 A/B 实测）✓。实施与实测见 `reader-model.md` 4.9 |
 | ✅ B3 | 真机复跑 t25362（`ssh difx`，2026-09-19）：BA 站 ds_2（有 filler）与 ds_0（对照）各重跑一遍（verbose），`test/reader/check_reader.py` 对账 | ds_2 的 E4 由 **80 → 0** ✓、E3 extra 63 → 0 ✓、2181 subints 零 finding ✓；ds_0 对照仍零 finding ✓；`GAPCHECK summary` 的 `missing 143` / `filler 1162`（ds_2）与修复前逐项相同 ✓；**多读路径确实被走到**——ds_2 有 4 个 subint 的 `nframes > slots`（最长 540 帧 vs 83 槽，全在 filler 段上），ds_0 一次都没有 ✓ |
 
-## 阶段 C：分层重构（只定目标与验收线）
+## 阶段 C：分层重构
 
 目标见 `reader-model.md` 7.2：把 `checkFrameContinuity` / `shiftFrameGaps` / `countFillerRange` / `locate` / `readSubint` 之间的成员状态耦合，拆成三层——**帧时间轴层**（纯函数：帧号序列 + 文件位置 → 时间轴映射与缺口表）、**修正量层**（`gapshift(t)` / `fillershift(t)`，定义为"时间位置在 t 之前"的累计量）、**I/O 层**（退化为坐标变换）。B3/B5/C6 这类缺陷都是状态机错误，而状态机此前没有测试面。
 
-三次提交对应三层（`refactor(fxcorr-f): ...`），每步的验收 = **阶段 A 全部资产绿 + 无缺口数据逐字节不变**。
+三层的接口由 B2 的实现形态定下来（`reader-model.md` 4.9），三次提交对应三层（`refactor(fxcorr-f): ...`），每步的验收 = **阶段 A 全部资产绿 + 无缺口数据逐字节不变**。
 
-**本阶段的 commit 级规划现在可以定**（B2/B3 已完成）：三层的接口由 B2 的实现形态确定下来了——帧时间轴层 = `shiftFrameGaps` 的槽算法、修正量层 = `gapshiftAt` / `fillershiftbytes`、I/O 层 = `readSubint` 的读够为止（`reader-model.md` 4.9）。
+| 节点 | 做什么 | 验收 |
+|---|---|---|
+| ✅ C1 | **帧时间轴层**（2026-09-19）：新增 `applications/fxcorr-f/src/frametimeline.h`——`vdifFrameNumber` / `vdifIsFiller` 移入，`walkFrameChain`（帧号序列 → 首末帧号、数据帧数、filler 位置、缺口列表）与 `placeFrames`（槽映射：filler 丢弃、缺口占槽、没人认领的槽报为洞）成为**无成员、无 I/O、无日志**的纯函数（`dst` 传 NULL 即 dry run，填槽与"够不够"共用一次走查，B2 的约束在此固化）；`shiftFrameGaps` 退化为薄包装（scratch 缓冲 + 诊断 + `gapinvalid`），`checkFrameContinuity` 的主循环与 `countFillerRange` 的块循环改用 `walkFrameChain`——**同一套"帧号链 + 跳 filler + 记缺口"逻辑此前写了三遍**。新增单测 `fxcorr/test/reader/test_timeline.cpp`（`-Iapplications/fxcorr-f/src` 直接编译，零依赖） | 单测 **54 项断言全过**（本地 clang 与测试机 gcc 各一次）✓；`gaps/` 四个脚本全绿（E4 = 0、`169 == 169`、边界两场景、E5 3 帧）且三条自检仍报红 ✓；无缺口数据（`cmp5` 的 58948_25200，含 delay）`band_00.sp` / `autocorr.bin` / `pcal.bin` 与 HEAD(B2) 二进制跑出的**md5 全同** ✓；**真机 t25362 ds_2**（`ssh difx`）：C1 版日志与 B2 版 **diff 0 行**（2218 行，含全部 `READPOS` / `GAPCHECK` 明细）、`GAPCHECK summary` 逐项相同、`band_00.sp` / `autocorr.bin` / `pcal.bin` md5 全同 ✓ |
+| ✅ C2 | **修正量层**（2026-09-19）：新增 `applications/fxcorr-f/src/corrections.h`——`Ledger` 持有缺口表（**槽坐标**：换算在 `noteGap` 记录时做一次，`gapshiftAt` 里 `(offset − anchorbytes)/framebytes + lost − fillerbefore` 那行反算消失）、filler 台账与两个去重水位，`gapShift(t)`（时间位置在 t 之前丢了多少，并把 t 推出它落在的洞）与 `fillerFrames()` 是这一层的全部查询面；`checkFrameContinuity` 与 `countFillerRange` 的扫描循环改成**按帧序归并** filler 与缺口后依次 `noteFiller` / `noteGap`（缺口"之前有多少 filler"由 ledger 自己回答，层 1 的 `FrameGap.fillersbefore` 随之删掉），三处循环共用同一套记账。接链状态（`gapchecklastfr` / `gapstretchseam`）**留在 DataReader**——它是扫描进度不是修正量，归 C3 的 I/O 层（与原规划的这一处差别记录在此）。新增单测 `fxcorr/test/reader/test_corrections.cpp` | 单测 **48 项断言全过**（含 B5 缺口跨边界、B6 filler 之后的缺口、A 类起点偏移两个符号、去重、两缺口连锁、两层级联）✓；`gaps/` 四脚本全绿（E4 = 0、`169 == 169`、边界两场景、E5 3 帧）且三条自检仍报红 ✓；无缺口数据（`cmp5`）三个产物 **md5 与 C1/HEAD 全同** ✓；**真机 t25362 ds_2**：日志与 B2 版 **diff 0 行**、`GAPCHECK summary` 逐项相同、三个产物 md5 全同 ✓ |
+| ✅ C3 | **I/O 层**（2026-09-19）：`scanSkippedStretch` + `countFillerRange` 合成 **`scanStretch`**（读一段文件并记账的单一入口——水位在哪、逐块读、层 1 走链、层 2 记账全在一处）；`settleReadPosition` 收敛循环里的位置计算抽成 **`correctedPosition`**（纯算术，只碰 ledger），循环本身只剩"纯函数 + 一次 `scanStretch`"；`readSubint` 的"读够为止"（B2 的 inbuf 翻倍）抽成 **`readWindow`**，`readSubint` 退化为编排：locate（坐标）→ settle（修正量）→ readWindow（读+扫描+重建）→ 交回 | 单测 53 + 48 项全过（本地 clang 与测试机 gcc 各一次）✓；`gaps/` 四脚本全绿且三条自检仍报红 ✓；无缺口数据三个产物 md5 与 C1/C2 全同 ✓；**真机 t25362 ds_2**：日志与 B2 版 **diff 0 行**（2218 行）、`GAPCHECK summary` 逐项相同、产物 md5 全同 ✓ |
 
 ## 阶段 D：判据固化
 
@@ -63,9 +67,20 @@ A1 若现有 `FXSIM_GAPS` 语法造不出目标形态，则先给生成器加参
 **阶段 A 与阶段 B 就此收尾**（2026-09-19）：A1–A3 全绿，四个 gaps 资产都是绝对判据
 （`run_window` / `run_startoffset` 从一开始就是，`run_filler` / `run_boundary` 在 A3 补上，
 旧相对判据保留作交叉核对）；B1 的结论见 `reader-model.md` 4.8、B2 的实施与实测见 4.9、
-B3 的真机复跑见 4.9 的实测表末行。**阶段 C（分层重构）的 commit 级规划现在可以回填**——
-B2 已把三层的边界划出来（帧时间轴层 = `shiftFrameGaps` 的槽算法、修正量层 = `gapshiftAt` /
-`fillershiftbytes`、I/O 层 = `readSubint` 的读够为止），重构按此切。
+B3 的真机复跑见 4.9 的实测表末行。**阶段 C 完成**（2026-09-19，C1–C3 全绿）——三层的边界是 B2 划出来的
+（帧时间轴层 = `shiftFrameGaps` 的槽算法、修正量层 = `gapshiftAt` / `fillershiftbytes`、
+I/O 层 = `readSubint` 的读够为止），重构按此切，最后落成三个纯函数头/结构
+（`frametimeline.h` / `corrections.h` / `readWindow` + `scanStretch` + `correctedPosition`）。
+
+每步的等价性证据都是三层，一层比一层强：无缺口二元对比（md5）、合成缺口/filler 四场景
+（绝对判据）、真机 t25362（日志逐行 + 产物 md5）。**三步的真机 diff 都是 0 行**——说明整个
+重构只是把算法搬了家、把内部表示换成了时间槽，没有动行为：C2 的"记录时算成槽"与原来的
+"读取时反算"在 2200 个 subint 上给出逐字节相同的日志与产物，这正是它要证明的。全程
+`READPOS` / `GAPCHECK` 的每个字段都与 B2 版一致（`reader-model.md` 7.6 的契约）。
+
+新增的测试面是这一步的另一个产出：`fxcorr/test/reader/test_{timeline,corrections}.cpp`
+（53 + 48 项断言），把 B2/B5/B6/A 类四种形态从"要靠合成数据跑一遍才能验"变成"本地一条
+命令、秒级"。阶段 D 要固化的正是这两件东西——判据与诊断契约。
 
 **已知风险**：E4 的修法空间被探过一次并否决（4.7 末段），所以 B2 之前不允许动代码；只有一份真实数据（t25362），且它在 E4 形态下的基准不可用（mpifxcorr 的 `vdifmux` 丢字节 + 纯字节数判据，4.6），阶段 C 的真实侧验收只有这一条线。
 
