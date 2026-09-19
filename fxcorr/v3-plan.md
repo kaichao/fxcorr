@@ -26,7 +26,8 @@ V3 范围经 2026-09-15 讨论定案。V2 已完成（P0-P11 全绿，见 v2-pla
 - ✅ A 起点（3 条）/ B 缺口（5 条）/ C filler（6 条）共 14 条全部修完；最后的 B5「缺口跨 subint 边界时修正超前」2026-09-18 修好——读取位置按缺口的时间轴位置过滤（`gapspan` / `gapshiftAt`），`shiftFrameGaps` 的起始槽由帧号偏移决定。
 - ✅ 验收：`fxcorr/test/gaps/run_boundary.sh` 两个场景（跨边界不盖起点 / 盖住起点）在修前报红、修后转绿；`fxcorr/test/gaps/` 的 T1/T2 计数判据不变（73/73 与 73/0）；无缺口数据产物**逐字节不变**（cmp5 md5 相同，S6 与全部合成数据对拍依赖此点）。
 - ✅ 真实数据（`ssh difx`，工作目录 `/data/scalebox/t25362work`）：BA ds_0 的 `READPOS firstfno` 由 4026 回到 **4098**（该 subint 起点应对应的帧号）；无效块落在正确的 subint（835 标缺口 1、2，836 标缺口 3、4，与外部帧号扫描的真实缺口位置吻合）。
-- ⚠ **对拍未归零，未决**：t25362 仍有 576 条差异（积分 0、4、10 各 192 条，全在 BA）。逐 ds 统计表明积分 4/10 的差异**几乎全部来自 ds_2**（该 ds 在积分 4 有 459 帧、积分 10 有 1135 帧被标无效，其余 ds 只有 73–75 帧）——即 **fxcorr 把 filler 占用的时间槽判为无效，mpifxcorr 的基准不判**。这是 C 类 filler 的语义差异、不是 B5；两条出路（认可 filler 无数据应判无效、改用 L1/L2 判据验收；或查 `mpifxcorr` 的 `VDIFDataStream` 为何不做该判定）留待定。
+- ✅ **过渡缓冲区缺陷已修（2026-09-18）**：t25362 的 576 条差异定位到 fxcorr 在 filler 检测过渡区的两处缺陷——① `gapshiftAt` 把缺口文件偏移换算成时间槽时漏扣缺口之前的 filler（长 filler 段之后的缺口一律晚 `filler_before` 个槽才生效）；② 跳过的区段在读取**之后**才补扫，而段里的缺口会缩短正要用的那个位置。修法：`gapspan` 每项记 `fillerbefore`；补扫提为 `scanSkippedStretch`，`readSubint` 读取前循环「算位置 → 扫到位 → 重算」至收敛。效果：ds_2 的无效块 7170→**1749**（积分 4）、17720→**1734**（积分 10），真值 70/73，ds_0 参照 1129/1142；判据 `fxcorr/test/gaps/run_filler.sh`（长 filler 合成，修前红 1071 对 169、修后绿）。详见 `reader-model.md` 4.6/4.7。
+- ⚠ **对拍仍未归零，但方向已翻转、改由基准主导**：ds_2 相关记录 fxcorr 0.993104 对基准 0.975402（积分 4）、0.993146 对 0.980038（积分 10）——基准自身偏低 1.8%/1.3%，而真值只需偏低 0.43%。原因是 mpifxcorr 的 `vdifmux` 把 filler 字节滑过丢弃、输出短于输入，而 `DATA FORMAT: VDIF` 下其块有效性是纯字节数判据（不查 invalid 位），受影响 subint 的尾部块被标无效。**故 t25362 不能用 `cmp_swin.py` 全等验收**；fxcorr 侧残留 ~40 帧/积分（filler 段收尾处一个 subint），**性质未定**——「重读该 subint」的修法已试并否决（会让本 subint 丢好数据，见 `reader-model.md` 4.7），下一步是先补"按文件真值逐 subint 核对无效块"的工具再定性。
 
 ## 验收标准
 

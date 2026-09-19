@@ -80,11 +80,13 @@ static void usage()
 	     << "      delay chain: model delay + fractional sample correction +\n"
 	     << "      fringe rotation, on by default), FXSIM_GAPS (recording\n"
 	     << "      interruptions, for the t25362 regression: comma-separated\n"
-	     << "      <sec>:<frames>[:f] loses that many frame numbers at that\n"
-	     << "      second into the batch; the optional 'f' writes all-zero-header\n"
-	     << "      filler frames in their place instead of leaving the file\n"
-	     << "      short - a real interruption shows both forms across\n"
-	     << "      datastreams), FXCORR_WORKDIR\n"
+	     << "      <sec>:<frames>[:f[<fillframes>]] loses that many frame\n"
+	     << "      numbers at that second into the batch; the optional 'f'\n"
+	     << "      writes all-zero-header filler frames in their place instead\n"
+	     << "      of leaving the file short, one per lost frame unless a count\n"
+	     << "      follows it ('f300') - a real interruption shows both forms\n"
+	     << "      across datastreams, and t25362's have far more filler frames\n"
+	     << "      than lost ones), FXCORR_WORKDIR\n"
 	     << "  env (legacy path): FXSIM_DELAY (1 = inject .calc geometric delay\n"
 	     << "      into the tone phase), FXSIM_FLUX/FXSIM_SEFD (Jy; both set =\n"
 	     << "      SNR scaling), plus the new-path variables above\n";
@@ -364,15 +366,22 @@ static int parseLine(CommonSignal::LineSpec *line)
 }
 
 // FXSIM_GAPS: recording interruptions, for the t25362 regression (data-spec
-// 5.2).  Comma-separated "<sec>:<frames>[:f]" where sec is seconds into the
-// batch, frames is how many frame numbers are lost there, and a trailing "f"
-// makes the recorder write all-zero-header filler frames in their place
-// instead of leaving the file short.  A real observation carries BOTH forms at
-// the same interruption -- one datastream filled, the rest simply short -- so
-// covering fxcorr-f's gap and filler corrections means running a station twice
-// with the two forms.
-//   FXSIM_GAPS="2.5:10:f,4.1:63:f"   two interruptions, filler form
-//   FXSIM_GAPS="2.5:10,4.1:63"       same two, plain missing-frame form
+// 5.2).  Comma-separated "<sec>:<frames>[:f[<fillframes>]]" where sec is
+// seconds into the batch and frames is how many frame numbers are lost there;
+// a trailing "f" makes the recorder write all-zero-header filler frames in
+// their place instead of leaving the file short, and an optional count after
+// it sets how many (default: one per lost frame).  A real observation carries
+// BOTH forms at the same interruption -- one datastream filled, the rest
+// simply short -- so covering fxcorr-f's gap and filler corrections means
+// running a station twice with the two forms.
+//   FXSIM_GAPS="2.5:10:f,4.1:63:f"       two interruptions, filler form
+//   FXSIM_GAPS="2.5:10,4.1:63"           same two, plain missing-frame form
+//   FXSIM_GAPS="2.5:10:f300,4.1:63:f300" same gaps, 300 filler frames each
+//
+// The last form is t25362's own shape and the reason the count is independent
+// of `frames`: its interruptions wrote far more filler than the frame numbers
+// they cost (81..508 filler frames against 10..63 lost), which is what makes
+// the filler correction large enough for the read position to misplace.
 static int applyGaps(VDIFWriter &writer)
 {
 	const char *ge = getenv("FXSIM_GAPS");
@@ -398,17 +407,25 @@ static int applyGaps(VDIFWriter &writer)
 		double atsec = atof(item.substr(0, c1).c_str());
 		string framestr = item.substr(c1 + 1, (c2 == string::npos) ? string::npos : c2 - c1 - 1);
 		long long missing = atoll(framestr.c_str());
-		bool filler = false;
+		long long fillerframes = 0;
 		if(c2 != string::npos)
 		{
 			string form = item.substr(c2 + 1);
-			if(form != "f" && form != "F")
+			if(form.empty() || (form[0] != 'f' && form[0] != 'F'))
 			{
 				cerr << "fxcorr-sim: FXSIM_GAPS item '" << item << "' has unknown form '"
-				     << form << "' (only 'f' for filler is defined)" << endl;
+				     << form << "' (only 'f' for filler, optionally 'f<count>', is defined)" << endl;
 				return -1;
 			}
-			filler = true;
+			// bare "f": one filler frame per lost frame (the original form);
+			// "fN": N filler frames regardless of how many were lost
+			fillerframes = (form.size() > 1) ? atoll(form.c_str() + 1) : missing;
+			if(fillerframes < 0)
+			{
+				cerr << "fxcorr-sim: FXSIM_GAPS item '" << item
+				     << "' has a negative filler count" << endl;
+				return -1;
+			}
 		}
 		if(atsec < 0.0 || missing <= 0)
 		{
@@ -416,7 +433,7 @@ static int applyGaps(VDIFWriter &writer)
 			     << "' needs seconds >= 0 and frames > 0" << endl;
 			return -1;
 		}
-		writer.addGap(atsec, missing, filler);
+		writer.addGap(atsec, missing, fillerframes);
 	}
 	return 0;
 }

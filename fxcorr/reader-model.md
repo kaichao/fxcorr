@@ -234,21 +234,52 @@ D 类是 A/B/C 三类共同的**落点**：检测与修正解决"读哪"，`gapi
 
 **注意**：`gapchecksubints` 从 1 起计，而 `fileoffset < 0` 早退的 subint 不调用 `checkFrameContinuity`（t25362 前 19 个），因此 **.sp 索引 = buffer 编号 + 19**（2026-09-18 实测订正：buffer 816 的 `gapinvalid` 块区间 `[593,765) ∪ [953,1109)` 正是 .sp 835 记录的 `valid_flags`，buffer 817 的 `[218,673) ∪ [687,1032)` 正是 .sp 836 的）。起点的子数据若恰在 batch 起点则无此偏移。
 
-### 4.6 未决：filler 时间槽的判定与 mpifxcorr 不同（对拍未归零的原因）
+### 4.6 已定位：过渡缓冲区过度判无效（对拍未归零的原因，2026-09-18）
 
-B5 修好后 t25362 仍是 576 条差异。逐 ds 拆开看，积分 4/10 的差异**几乎全部来自 ds_2**（filler 那个 datastream）：
+B5 修好后 t25362 仍是 576 条差异，全部落在积分 0、4、10（各 192 条），4/10 的大差异集中在 frq 8..15（ds_2 那个 datastream）。**此前记的「filler 语义差异（fxcorr 判无效、基准不判）」不成立**，三个独立测量否定了它：
 
-| ds | 积分 4 的无效帧 | 积分 10 的无效帧 |
+**① 文件真相**（`test/gaps/scan_filler.py` 直接扫帧头）
+
+| | ds_0（无 filler） | ds_2（有 filler） |
 |---|---|---|
-| ds_0/1/3/4/5/6/7 | 73–75 | 75 |
-| **ds_2** | **459** | **1135** |
+| 文件帧数 | 190912 | 192076 |
+| 异常形态 | 8 处帧号跳跃，**无补零** | 8 段全零头帧（81/82/229/180/17/49/16/508 = **1162 帧**）+ 同样 8 处帧号跳跃 |
+| 真正缺失的时间 | 175 帧 | **143 帧** |
 
-fxcorr 把 filler 帧**占用的时间槽**判为无效（那里确实没有真实数据），基准不判、weight 因此偏高。这是 C 类 filler 的语义差异，不是 B5。副作用：2.3 表里那条「filler 顺读时与普通帧一同流过（上游**无专门识别**；实际影响**未实测**）」——现在实测了，影响就是 weight。
+即 filler **占文件字节、不占时间轴**（段后帧号只跳过真实丢失的帧数），与 4.3 的表述一致；上游 `vdifmux` 也是这个模型（`i += 4` 滑过非 VDIF 字节并丢弃，输出时间轴按 `frameNumber - startFrameNumber`）。mpifxcorr 对单线程 VDIF 文件同样走 `vdifmux`（`VDIFDataStream::dataRead`，`vDiffile.cpp:742`），2.1 节说的"那是 muxed VDIF 的路径"**不准确**。
 
-未决的两条出路：
+**② fxcorr 的稳态账是对的**：`READPOS` 全程 `fillershift 9333184`（= 1162 帧）、`gapframes 143`，与文件扫描逐项吻合。
 
-1. 认可「filler 时间槽无真实数据、应判无效」，改用 L1/L2 判据（`READPOS` 的 `firstfno` + `.sp` 的无效块落位）验收 t25362，不再要求 `cmp_swin.py` 全等；
-2. 或查 `mpifxcorr` 的 `VDIFDataStream` 为什么不做帧号连续性判定——2.1 节说"缺口的处理在流里（`vdifmux`）"，但那是 **muxed VDIF** 的路径；单线程 VDIF 文件走的是哪条、有没有等价的补 invalid 动作，**尚未核实**。
+**③ 坏在每个 filler 群前后的过渡缓冲区**（两个群各一串，实测）：
+
+- `READPOS subint 2020/2021: firstfno -1 lastfno -1`——**整个 subint 没读到有效帧**（`fillershift` 一次跳 5.5→8.5 MB，`readoff` 一次跳 1.15/1.81 MB，正常 658 KB）；
+- 紧跟的 bufs 2023..2034（12 个）`dst` 依次 73,73,73,71,63×7,27，`GAPSHIFT ... holes [0,73)`——把缓冲区**前 27–83 帧（几乎整个 subint）标成空洞**。但这些缓冲区的数据**真实且位置正确**：buf 2023 的 `readoff 1339070944`（文件帧 166718）与 `firstfno 6967`，与文件扫描推得的 6968 一致；
+- 后果：ds_2 的 `.sp` 在积分 4 标 **459 帧**无效、积分 10 标 **1134 帧**无效，真值只有 **70 / 73 帧**——**超判 6–15 倍**；无效块频谱全零（data-spec 5.3），即真实数据被丢弃。对照 ds_0 的 `.sp` 只标 72 / 73 帧，与真值一致。
+
+**结论**：576 条差异的主因是 fxcorr 在 filler 检测**过渡缓冲区**上的缺陷（漏读整个 subint + 后续十余个缓冲区误标空洞），**不是 filler 语义差异、也不是 B5**。
+
+### 4.7 修复（2026-09-18）：两个独立缺陷
+
+**D-a 缺口换算漏扣 filler**：`gapspan` 记的是缺口之后那帧的**文件偏移**，`gapshiftAt` 用 `(offset − anchorbytes)/framebytes + lost` 换算成时间槽——这个换算只在缺口之前没有 filler 时成立（filler 没有时间槽，却占文件帧）。t25362 的 BA ds_2 在长 filler 段之后有缺口时，槽位一律算大 `filler_before`（实测大 572），于是缺口要等 t 追上去才生效；这段时间读位置一直多走 `D` 帧。修法：`gapspan` 每项多记 `fillerbefore`（记录该缺口时的 filler 累计量，两个方向都严格按文件前进、按文件偏移去重，所以就是它前面的 filler 帧数），`gapshiftAt` 里减掉。
+
+**D-b 跳过的区段在读取之后才扫**：filler 段让 `fillershiftbytes` 一次涨掉整段，下一次读取位置随之前跳，中间那段从未被扫；`checkFrameContinuity` 是在**读完之后**才补扫它的，而段里的缺口会缩短**正要用的**这个位置。修法：把补扫提成 `scanSkippedStretch(upto)`，`readSubint` 在读取**之前**循环「算位置 → 扫到位 → 重算」，直到不再有新发现（缺口把位置拉回到扫描范围之内，filler 把它推进已扫过的范围之外；每趟只扫新暴露的一段，总开销是 filler 段本身的长度）。收敛趟数上界 64，实测 t25362 最长的一次 9 趟；`checkFrameContinuity` 仍保留一次调用（此时是空操作），覆盖其它路径的读取。
+
+**效果（t25362，重跑实测）**：
+
+| | 积分 4 的无效块 | 积分 10 的无效块 | ds_2 权重（积分 4 / 10） |
+|---|---|---|---|
+| 修复前 | 7170（459 帧） | 17720（1134 帧） | 0.971958 / 0.930724 |
+| **修复后** | **1749（112 帧）** | **1734（111 帧）** | **0.993104 / 0.993146** |
+| ds_0 参照 | 1129（72 帧） | 1142（73 帧） | 0.995459 / 0.995429 |
+| 真值（文件扫描） | 70 帧 | 73 帧 | — |
+
+对拍仍是 576 条、但**方向翻转且幅度改由基准主导**：ds_2 相关记录 fxcorr 0.993104 对基准 0.975402（积分 4）、0.993146 对 0.980038（积分 10），即基准自身偏低 1.8%/1.3%（真值只需偏低 0.43%）。这与 4.6① 的代码事实一致：mpifxcorr 的 `vdifmux` 把 filler 字节**滑过丢弃**，输出比输入短，而 `DATA FORMAT: VDIF` 时下游块有效性是纯字节数判据（不查 invalid 位），于是受影响 subint 的尾部块被标无效——是字节型缓冲管理的副产品，不是对时间轴的判断。
+
+**残留（未定案）**：fxcorr 仍比 ds_0 参照多标 ~40 帧/积分（112 对 72、111 对 73），集中在 filler 段收尾处那一个 subint（`READPOS` 全文件只剩一处 `dst 12`：该缓冲区开头 12 帧确为 filler、其后的 12 帧才是真缺口）。但**「多出来的就是被丢掉的好数据」这一步尚未与文件真值逐 subint 核对**——ds_0 的参照值本身受它自己那套（不同的）缺口影响，不能直接当基准；`shiftFrameGaps` 把数据右移后尾部落到块数组之外的帧其实属于下一个 subint（那个 subint 会自己读到），未必是真损失。
+
+**「读到缓冲区内的 filler/gap 后重读该 subint」已试并否决（2026-09-19 实测）**：该做法按新的 `fillershiftbytes` 重算位置，但缓冲区里的 filler 位于本 subint 数据**之后**，本就不该进入本 subint 的修正量（位置用的是"本 subint 之前的 filler"），重读把位置前移了 filler 段的前沿，反而把本 subint 开头的好数据推出读取范围——`run_filler.sh` 上 subint 2 由 36 块劣化到 122 块，全是数据。撤回后合成判据恢复 169 == 169、真实数据 1749/1734 不变。**下一步应当先补"按文件真值逐 subint 核对无效块"的工具**，把残留定性（真损失 / 合法标记）之后再决定要不要动。
+
+**复现与判据**（`test/gaps/`）：`run_filler.sh <workdir>`（长 filler 合成复现，判据 = filler 形式与缺口形式的逐 subint 无效块一致，修前红 1071 对 169、修后绿 169 对 169）；`scan_filler.py <vdif> <fps>`（帧头扫描）、`sp_valid.py <band_XX.sp> [--int N|--machine]`（无效块与权重）、`dump_weight.py <swin> <nchan> [--diff <other>]`（SWIN 权重对比）。
 
 ---
 
@@ -319,7 +350,7 @@ fxcorr 把 filler 帧**占用的时间槽**判为无效（那里确实没有真�
 - `GAPCHECK summary`（**info** 级，默认可见）：`buffers / frames / discontinuities / missing frames / filler frames / boundaries`——缺口多的数据这一行就是体检结论。
 - `GAPCHECK buffer ... frameno A -> B (step, missing)`（verbose）：每个缺口一条；补扫区段里发现的为 `GAPCHECK skipped ...`，格式相同。另有 `GAPCHECK boundary ...`（读取位置异常漂移，上限 40 条）。
 - `GAPCHECK holes buf N: [a,b) [c,d)`（verbose）：每个被重建过的 buffer 一条，列出 `shiftFrameGaps` 留下的洞（**post-shift 帧槽区间**，转成块时 × `payloadbytes/blockbytes`）。这是 `.sp` 里 `valid_flags` 的直接来源，B5 修好后用它核对落位（t25362：buf 816 → `[38,49) [61,71)`，正是 .sp 835 的无效区）。
-- `READPOS subint N: readoff O firstfno F lastfno L nframes N missing M filler K gapshift G fillershift H gapframes X dst D framens S`（verbose）：逐 subint 读取位置诊断，**对照两个 ds 即可判定定位是否正确**。`gapframes` 是本次实际生效的缺口帧数、`dst` 是 `shiftFrameGaps` 的起始槽、`framens` 是 locate 给的时间轴帧号——B5 就表现为「跨界的那个 subint `firstfno` 早于对照」。
+- `READPOS subint N: readoff O firstfno F lastfno L nframes N missing M filler K gapshift G fillershift H gapframes X dst D framens S uncorr U passes P`（verbose）：逐 subint 读取位置诊断，**对照两个 ds 即可判定定位是否正确**。`gapframes` 是本次实际生效的缺口帧数、`dst` 是 `shiftFrameGaps` 的起始槽、`framens` 是 locate 给的时间轴帧号——B5 就表现为「跨界的那个 subint `firstfno` 早于对照」；`uncorr` 是未修正的位置（locate 的原始输出）、`passes` 是读取前 `scanSkippedStretch` 的收敛趟数（>1 说明读位置是在补扫过跳过区段之后才定的，t25362 最长一次 9 趟）。
 - 级别由 `FXCORR_LOGLEVEL`（`error`/`warn`/`info`/`verbose`/`debug`，默认 `info`）控制。
 
 ### 6.5 外部交叉验证

@@ -94,6 +94,19 @@ private:
 	void shiftFrameGaps(u8 *buffer, int nframes);
 	long long countFillerRange(long long start, long long end, long long chainfr, long long *gapsp, long long *lastfrp);
 
+	// Reads the stretch between the last scan's watermark and `upto`, counting
+	// its filler into fillershiftbytes and its gaps into gapspan (both through
+	// countFillerRange).  Called before a read and again -- as a no-op -- after
+	// it, so a read position derived from corrections that the stretch itself
+	// produced is never used.  Returns the filler frames found.
+	long long scanSkippedStretch(long long upto, long long *gapsp);
+
+	// file offset a subint is read from: locate()'s linear map, corrected by the
+	// filler and gaps counted so far and settled against the stretches in
+	// between (see the definition).  Returns false when the subint lies entirely
+	// before the file's first frame.
+	bool settleReadPosition(long long uncorrected, int locatecount, long long *fileoffset);
+
 	// frames missing before frame index t on the time axis, moving t forward
 	// past any gap it falls inside (see gapspan)
 	long long gapshiftAt(long long &t) const;
@@ -102,6 +115,8 @@ private:
 	// slot shiftFrameGaps started it at (both reported by READPOS)
 	long long lastgapframes;
 	int lastshiftdst;
+	long long lastuncorrected;	// position before the gap/filler corrections
+	int lastsettlepasses;		// passes the pre-read stretch scan needed
 
 	Configuration *config;
 	Model *model;
@@ -193,6 +208,10 @@ private:
 	// subint reads overlap by their guard margin.
 	long long gapcountedthrough;
 	bool gapcountedvalid;
+	// the last stretch scan ended on a data frame, i.e. the frame-number chain
+	// runs unbroken from the stretch into the buffer just read (see
+	// scanSkippedStretch); consumed by checkFrameContinuity to seed its chain
+	bool gapstretchseam;
 	long long fillershiftbytes;
 	long long fillercountedthrough;
 	bool fillercountedvalid;
@@ -206,7 +225,26 @@ private:
 	// boundary subint read 51 frames early: its gap was noticed inside the
 	// previous subint's buffer, but sits on the time axis after that subint's
 	// end (fxcorr/test/gaps/run_boundary.sh reproduces it on synthetic data).
-	std::vector<std::pair<long long,long long> > gapspan;
+	//
+	// The offset is a file position and has to become a time slot before it can
+	// be compared with t, and the two differ by everything the file carries but
+	// the time axis does not.  A gap only sees the frame-number holes before it
+	// (frames lost, added by the loop in gapshiftAt); the filler frames before
+	// it are invisible to that and have to be subtracted, or the gap is placed
+	// filler_before slots too late and does not apply until the read position
+	// has already walked past it (t25362: the gaps after a 572-frame filler run
+	// came out 572 slots late, holding the read position 63..73 frames too far
+	// along for twelve subints; fxcorr/test/gaps/run_filler.sh reproduces it).
+	// fillerbefore is the filler total at the moment the gap was recorded, which
+	// is exactly the filler lying ahead of it in the file: both scans walk
+	// forward and count each frame once (gapcountedthrough / fillercountedthrough).
+	struct Gap
+	{
+		long long offset;	// file offset of the frame after the gap
+		long long frames;	// frame numbers lost there
+		long long fillerbefore;	// filler frames ahead of it in the file
+	};
+	std::vector<Gap> gapspan;
 	long long lastframesin;		// the frame index locate() mapped the last
 					// subint onto: file position and time-axis slot
 					// coincide only until a gap turns up

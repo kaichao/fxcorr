@@ -39,24 +39,30 @@ public:
 	long long getFrameCount() const { return nframes; }
 
 	// Recording interruption (t25362 regression).  At `atsec` seconds into the
-	// batch, `missingframes` frame numbers are lost.  filler=false writes
+	// batch, `missingframes` frame numbers are lost.  fillerframes=0 writes
 	// nothing for them, so the file comes out shorter than the time axis (the
-	// "plain missing frame" form fxcorr-f's gap correction undoes).  filler=true
-	// instead writes that many all-zero-header frames in their place: bytes but
-	// no time slot, the form the recorder left in t25362's BA ds_2 and the one
-	// fillershiftbytes undoes.  Both forms sit at the same interruption in a
-	// real observation, which is why a test wants both.
+	// "plain missing frame" form fxcorr-f's gap correction undoes).
+	// fillerframes>0 instead writes that many all-zero-header frames in their
+	// place: bytes but no time slot, the form the recorder left in t25362's BA
+	// ds_2 and the one fillershiftbytes undoes.
+	//
+	// The two counts are independent, and t25362 needs them to be: its BA ds_2
+	// runs hold 81..508 filler frames while only 10..63 frame numbers are lost
+	// (the recorder wrote zeros for the whole outage but its frame counter only
+	// advanced by the data that would have been produced).  Making the filler
+	// run as long as the gap -- the only form FXSIM_GAPS could express before
+	// 2026-09-18 -- cannot reproduce what the datareader gets wrong there.
 	//
 	// Call before the first writeFrame; positions are taken in increasing
 	// order (they are sorted on insertion).
-	void addGap(double atsec, long long missingframes, bool filler);
+	void addGap(double atsec, long long missingframes, long long fillerframes);
 
 private:
 	struct Gap
 	{
 		long long atframe;	// first frame number lost, relative to the batch start
 		long long missing;	// how many frame numbers
-		bool filler;		// true: all-zero-header frames occupy the file
+		long long fillerframes;	// all-zero-header frames occupying the file (0 = none)
 	};
 	std::vector<Gap> gaps;
 	size_t gapnext;

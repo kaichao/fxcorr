@@ -39,12 +39,12 @@ VDIFWriter::~VDIFWriter()
 		fclose(f);
 }
 
-void VDIFWriter::addGap(double atsec, long long missingframes, bool filler)
+void VDIFWriter::addGap(double atsec, long long missingframes, long long fillerframes)
 {
 	Gap g;
 	g.atframe = (long long)(atsec * framespersecond + 0.5);
 	g.missing = missingframes;
-	g.filler = filler;
+	g.fillerframes = fillerframes;
 	// keep the list ordered: writeFrame walks it once, front to back
 	size_t at = gaps.size();
 	while(at > 0 && gaps[at-1].atframe > g.atframe)
@@ -73,14 +73,14 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 	while(gapnext < gaps.size() && nframes >= gaps[gapnext].atframe)
 	{
 		const Gap &g = gaps[gapnext];
-		if(g.filler)
+		if(g.fillerframes > 0)
 		{
 			int pbytes = framelength8*8 - 32;
 			unsigned int zh[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 			unsigned char *zbuf = new unsigned char[(size_t)(pbytes > 0 ? pbytes : 1)];
 			memset(zbuf, 0, (size_t)(pbytes > 0 ? pbytes : 1));
 			bool ok = true;
-			for(long long k=0; k<g.missing && ok; k++)
+			for(long long k=0; k<g.fillerframes && ok; k++)
 				ok = fwrite(zh, sizeof(zh), 1, f) == 1 &&
 				     (pbytes <= 0 || fwrite(zbuf, 1, (size_t)pbytes, f) == (size_t)pbytes);
 			delete [] zbuf;
@@ -91,11 +91,13 @@ bool VDIFWriter::writeFrame(const unsigned char *payload, int payloadbytes)
 		// that no data covers, so the frame number either side of it must jump
 		// by exactly what was lost (data-spec 5.2: "the frame-number jump
 		// reflects only what was really lost, regardless of how many filler
-		// frames the run holds").  The filler form additionally leaves that
-		// many frames' worth of BYTES in the file -- bytes but no time slot,
-		// which is what fillershiftbytes undoes.  Advancing the frame number
-		// for filler too is what keeps a filled datastream and a merely short
-		// one describing the same stretch of time.
+		// frames the run holds").  The filler run additionally leaves its own
+		// frames' worth of BYTES in the file -- bytes but no time slot, which
+		// is what fillershiftbytes undoes, and its length is independent of
+		// what was lost (see addGap).  Advancing the frame number by `missing`
+		// only -- never by the filler count -- is what keeps a filled
+		// datastream and a merely short one describing the same stretch of
+		// time.
 		nframes += g.missing;
 		gapnext++;
 	}
