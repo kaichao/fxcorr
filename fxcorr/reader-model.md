@@ -476,6 +476,40 @@ A/B 的做法：`git show HEAD:` 导出改动前的三个源文件到测试机�
 
 `filler frames` 应与**外部帧号扫描**逐一一致（t25362 的 BA 实测 8 个 ds 为 0/0/1162/0/0/0/0/0）；`missing frames` 同理（应等于真值 143）。扫描时 `% FPS` 用错会把正常回绕当成巨量缺口（曾把缺 10 帧算成缺 7760 帧），fps 从 .input 的 `getFramePayloadBytes × 4 × getFramesPerSecond` 反推，**不要硬编码**。
 
+### 6.6 诊断契约（冻结）
+
+这些行是**定位类缺陷的唯一工具**，也是判据工具的输入——把它们当契约：**字段名、语义、单位都不得改动**，新增只能**追加在行尾**（`slots`、`uncorr`、`passes` 都是这么加的，`check_reader.py` 用可选正则组兼容旧日志）。改动它们等于同时改判据工具与基线，必须一并处理。
+
+谁依赖：`fxcorr/test/reader/check_reader.py`（E1–E5 全部读 `READPOS` 与 `GAPCHECK holes`）、`fxcorr/test/gaps/` 的四个 `run_*.sh`（读 summary 与 holes）、`fxcorr/test/reader/run_t25362.sh`（**把 summary 的每个字段与基线逐项比对**）、以及人。
+
+**`READPOS subint N: ...`**（verbose，每 subint 一行）——`missing` / `filler` / `gapshift` / `fillershift` 是**字节或帧**要分清，单位在名字里不给，看下表：
+
+| 字段 | 单位 | 语义 | 判据用它做什么 |
+|---|---|---|---|
+| `subint N` | 序号 | 第 N 个被扫描的 buffer（1-based，与 `GAPCHECK holes buf N` 同号） | 所有判据的索引 |
+| `readoff O` | 字节 | **修正后**的读取位置（相对 batch 起点，帧对齐） | E2/E3/E4 的窗口起点 |
+| `firstfno` / `lastfno` | 帧号 | 缓冲区里第一个 / 最后一个**数据帧**的帧号（每秒回绕） | E1/E2；B5 表现为跨界 subint 的 `firstfno` 早于对照 |
+| `nframes` | 帧 | 为填满这些槽**扫过**的文件帧数 | E4 的**窗口位置** |
+| `slots` | 槽 | 本 subint 的时间槽数（缓冲区按帧计的长度） | E3 的**窗口宽度** |
+| `missing` / `filler` | 帧 | 本次扫描**新计入**的缺口帧数 / filler 帧数 | 诊断（累计值在 summary） |
+| `gapshift` | 字节 | 本次读取位置被缺口**回拉**的量（= `gapframes` × framebytes） | B5 判据 |
+| `fillershift` | 字节 | 累计 filler 量（**不是**本 subint 的） | 诊断 |
+| `gapframes` | 帧 | 本次实际生效的缺口帧数 | 诊断 |
+| `dst` | 槽 | `shiftFrameGaps` 的起始槽（首个数据帧的落点） | `run_boundary.sh` 判据 2 |
+| `framens` | 帧号 | locate 给的时间轴帧号（缓冲区首帧**本应**是哪个号） | E2/E3 的锚 |
+| `uncorr` | 字节 | 未修正的位置（locate 的原始输出） | 诊断（区分"位置本身偏"与"修正量偏"） |
+| `passes` | 趟 | 读取前补扫的收敛趟数（>1 = 位置在扫过跳过区段后才定） | 诊断（t25362 最长 9 趟） |
+
+**`GAPCHECK` 家族**：
+
+| 行 | 级别 | 语义 | 判据用它做什么 |
+|---|---|---|---|
+| `GAPCHECK summary: buffers B frames F discontinuities D missing frames M filler frames K boundaries C step range L..U` | info，一行 | 全批汇总；`step range` 是相邻 buffer 首帧号的步进范围（无缺口时约 ±4） | `run_t25362.sh` 的基线、`gaps/` 的脚本、人 |
+| `GAPCHECK buffer N frame I: frameno A -> B (step S, missing M)` | verbose，每缺口一条 | 主 buffer 内发现的缺口：`I` 是缺口后那帧在缓冲区里的下标 | 人 |
+| `GAPCHECK skipped N: frameno A -> B (step S, missing M)` | verbose | **补扫区段**里发现的缺口（`N` 是当时已扫过的 buffer 数，不是区段号） | 人 |
+| `GAPCHECK holes buf N: [a,b) [c,d) ...` | verbose，每个重建过的 buffer 一条 | `shiftFrameGaps` 留下的洞，**post-shift 槽区间**（块坐标要 × `payloadbytes/blockbytes`） | E3 落点判据、`sp_valid.py` 交叉核对 |
+| `GAPCHECK boundary N: prev end frameno A -> first B (step S; read offsets ...)` | verbose，上限 40 条 | 读取位置异常漂移（`|step| > 3`） | 人 |
+
 ---
 
 ## 7. 对后期改造的建议
@@ -536,6 +570,13 @@ A/B 的做法：`git show HEAD:` 导出改动前的三个源文件到测试机�
 **I/O 层**（`readSubint` / `readWindow` / `scanStretch`，坐标变换与读取）。真机 diff 仍为 0 行，
 产物 md5 全同。
 
+**遗留的理论缺口（C 完成时明确记下）**：缺口那半边已做成"以时间为自变量"（`gapShift(t)`），
+filler 那半边保留的却是**累计**语义（`Ledger::fillerFrames()`，等价于原来的
+`fillershiftbytes/framebytes`）——按本节开头给的定义，它应当是"时间位置在 t 之前的 filler"。
+两者在现有数据上相等，因为扫描水位总在当前读位置附近，且 `readWindow` 把扫描范围**截断到填满
+所需**（多读的尾部不计入本 subint 的账，C3 的 `scanbytes = used2*framebytes`）。把它也做成以
+t 为自变量是一次**语义改动**而非重构，得先有能区分两者的数据；阶段 C 只做等价重构，故未动。
+
 ### 7.3 验收：分层递进，不要一步跳到对拍
 
 现状是每次改完直接跑全链对拍，靠差异面积反推病因——一轮十几分钟且信息量低。建议按层验收：
@@ -576,8 +617,8 @@ A2 起点偏移资产 / A3 判据入口收敛 / B1–B3 窗口长度定案、实
 
 ### 7.6 其他建议
 
-- **诊断输出的稳定性**：`READPOS` 这类逐 subint 诊断是定位类缺陷的主要工具，建议在后续任何 reader 重构中作为**契约**保留（字段名与语义不变），否则排查手段会一并丢失。
-- **真实数据回归集**：t25362 是目前唯一暴露过三类缺陷的数据集，建议把"跑 t25362 → `GAPCHECK summary` 与 `READPOS` 序列符合预期"固化为 reader 改动的常规回归项（数据在 `ssh difx`，`make sync` 不同步到该机，需 rsync 单文件）。
+- ~~**诊断输出的稳定性**~~ —— **已落实（2026-09-19，阶段 D）**：契约写在 **6.6**（字段名、语义、单位成表 + 依赖方 + "新增只能追加在行尾"），`datareader.cpp` 的两处打印点与 `check_reader.py` 的 docstring 各加指向。
+- ~~**真实数据回归集**~~ —— **已落实（2026-09-19，阶段 D）**：`fxcorr/test/reader/run_t25362.sh` 从本地驱动 `ssh difx`，判据 = 基线（`GAPCHECK summary` 逐字段）+ 真值对账（`check_reader.py` 零 finding），带 `--no-run` 与"篡改日志必须报红"的自检记录（见 `test/reader/README.md`）。
 
 ---
 

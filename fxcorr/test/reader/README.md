@@ -191,6 +191,25 @@ E3 extra 0 slots, missing 0 slots; E4 coverage: 0 data frames ... never fell ins
 window`（退出码 0）。这既是读取路径在那条线上的干净证据，也是 E4 判据的假阳性检验——
 无 filler 的文件里窗口连续覆盖，一条都不会报。
 
+## 真实数据回归：`run_t25362.sh`（阶段 D 固化）
+
+```bash
+./fxcorr/test/reader/run_t25362.sh [--no-sync] [--no-build] [--no-run] [host]
+```
+
+从**本地**驱动：`make sync` → `ssh difx` 上编译安装 fxcorr-f → 跑 BA 的 ds_2（有 filler）
+与 ds_0（无 filler 对照）→ 两项判据：
+
+1. **基线**：`GAPCHECK summary` 的每个字段与写死的基线逐项比对（ds_2 `buffers 2181 frames
+   180892 … missing 143 filler 1162 …`、ds_0 `… missing 145 filler 0 …`）。基线是 B2 与
+   阶段 C 三次重构后**逐字节不变**的实测值——任何 reader 改动都该先解释它为什么不该动；
+2. **真值对账**：`check_reader.py` 的 E1–E4（绝对判据），两个 ds 都必须零 finding、E4 = 0。
+
+`--no-run` 用现成日志重复对账，不必重跑（改判据工具时用）。
+
+**自检（2026-09-19）**：篡改 difx 上的日志（`missing frames 143 → 999` 加一条假 `READPOS`）
+→ 两条判据都报红、退出码 1，而 ds_0 对照仍绿；恢复日志后退出码 0。
+
 ## 待办与边界
 
 - **t25362 的残留定性**是本目录要回答的第一个问题（`reader-model.md` 4.7 的 ~40 帧/积分），

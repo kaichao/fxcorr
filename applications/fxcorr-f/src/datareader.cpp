@@ -602,6 +602,12 @@ int DataReader::checkFrameContinuity(const u8 *src, int srcbytes, long long read
 	// by (the part of the gaps lying before its start), not the running total
 	// of everything noticed so far -- the two differ exactly at the subint a
 	// gap straddles, which is what this line exists to show.
+	//
+	// CONTRACT (reader-model.md 6.6): the field names, order and units of this
+	// line and of the GAPCHECK family are frozen -- check_reader.py, the gaps/
+	// scripts and run_t25362.sh parse them, and the t25362 baseline compares
+	// them field by field.  New fields go at the END of the line (the parsers
+	// take them as trailing optional groups).
 	FXLOG(FXLOG_VERBOSE) << "READPOS subint " << gapchecksubints
 	     << ": readoff " << readoffset
 	     << " firstfno " << firstany << " lastfno " << lastany
@@ -673,7 +679,8 @@ int DataReader::shiftFrameGaps(const u8 *src, int srcframes, u8 *dstbuf, int slo
 		// of READPOS's dst for this subint's valid flags.  One line per rebuilt
 		// buffer, so t25362's filler datastream (1162 frames) prints a few
 		// hundred at verbose -- that is the level for exactly this kind of
-		// question.
+		// question.  Frozen format: E3 of check_reader.py reads these ranges
+		// (reader-model.md 6.6).
 		FXLOG(FXLOG_VERBOSE) << "GAPCHECK holes buf " << gapchecksubints << ":";
 		for(size_t g=0;g<gapinvalid.size();g++)
 			FXLOG(FXLOG_VERBOSE) << " [" << gapinvalid[g].first << "," << gapinvalid[g].second << ")";

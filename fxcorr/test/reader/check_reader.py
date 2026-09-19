@@ -21,6 +21,10 @@
 
 E3 的窗口起点由**帧号**反推（第一个数据帧的帧号与 framens 定出 f_lo = sec*fps + framens），
 不采信读到的缓冲区自身——否则 reader 自证（这正是 GAPCHECK holes 单独看时做不到的）。
+
+本工具解析的 `READPOS` / `GAPCHECK holes` / `GAPCHECK summary` 是**冻结的诊断契约**
+（reader-model.md 6.6）：字段名、顺序、单位都不该改，新字段只追加在行尾——下面的正则用
+可选组兼容旧日志（`slots` / `uncorr` / `passes` 都是这么加的）。
 """
 
 import argparse
