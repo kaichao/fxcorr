@@ -1,6 +1,6 @@
 # fxcorr 构建手册
 
-**最后更新**：2026-09-13（构建体系自 V1 定稿后未变）
+**最后更新**：2026-09-20（V5 P4：容器镜像合并为单镜像）
 
 覆盖本仓库全部组件的两种构建方式：**集成构建**（`install-difx` 编排器，推荐）与**独立构建**（单包 autotools，调试/重编译常用）。
 
@@ -60,24 +60,22 @@ make install
 - 包间依赖顺序：先装依赖库再装应用（fxcorr-f/x/sim 依赖 fxcorrcommon、fftw3f；fxcorr-sim 另需 vdifio 的头文件）。
 - 重编译单个应用只改该包：`cd applications/fxcorr-f && make -j8 && make install`。
 
-## 容器构建（fxcorr/docker/，V2）
+## 容器构建（fxcorr/docker/，V2 建成；V5 P4 起为单镜像）
 
-V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化为 **docker host**（镜像体系见 `v2-plan.md`）。镜像定义在 `fxcorr/docker/`，每镜像一个子目录（Dockerfile + Makefile + README，模式参考 go-scalebox build/）。
+V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化为 **docker host**。镜像定义在 `fxcorr/docker/`：**一份两段式 `Dockerfile` + `Makefile` + `README.md`**（V5 P4 把 v2 的 6 个镜像子目录合并为一个，v2 体系见 `v2-plan.md`）。
 
-| 子目录 | 镜像 | 基础 | 说明 |
-|---|---|---|---|
-| `fxcorr-builder/` | fxcorr-builder | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen` 全量编译（后两者依赖 mpifxcorr 安装的 fxcorr.pc，须一并跳过） |
-| `fxcorr-base/` | fxcorr-base | debian:13-slim | 运行时依赖 + 从 builder COPY 的 `/usr/local/difx/lib` 与 `/share`（含 difxcalc 星历数据） |
-| `fxcorr-f/` `fxcorr-x/` `fxcorr-sim/` | 同名 | fxcorr-base | 各自 COPY 一个 bin |
-| `difx-tools/` | difx-tools | fxcorr-base | vex2difx + difxcalc + difx2fits，另补 libgsl28/libgslcblas0 运行时 |
+| stage | 基础 | 内容 |
+|---|---|---|
+| stage 1 `builder` | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen` 全量编译（后两者依赖 mpifxcorr 安装的 fxcorr.pc，须一并跳过）；构建期内容不进运行段 |
+| stage 2 `runtime` | debian:13-slim | 运行时依赖 + 从 builder COPY 的 `/usr/local/difx/lib/*.so*`、`/share`（difxcalc 星历）与 `bin/` 下六个可执行：vex2difx、difxcalc、fxcorr-sim、fxcorr-f、fxcorr-x、difx2fits |
 
-构建顺序（在测试机执行，前置 `make sync`）：
+构建（在测试机执行，前置 `make sync`）：
 
 ```bash
-ssh fxcorr 'cd /root/fxcorr/fxcorr/docker/fxcorr-builder && make build'    # 全量编译，约 30 分钟
-ssh fxcorr 'cd /root/fxcorr/fxcorr/docker/fxcorr-base && make build'        # 依赖 builder:latest
-ssh fxcorr 'cd /root/fxcorr/fxcorr/docker/fxcorr-f && make build'           # 依赖 base:latest（x/sim/difx-tools 同法）
+ssh fxcorr 'cd /root/fxcorr/fxcorr/docker && make build'    # 一次出镜像，全量编译约 13 分钟（8 核实测）
 ```
+
+产物：`fxcorr/fxcorr:latest` 与 `fxcorr/fxcorr:2.9.1`。
 
 debian:13 与 rocky 9.8 构建差异（已实测解决，详见 v2-plan.md 第 4 节）：
 
@@ -86,12 +84,15 @@ debian:13 与 rocky 9.8 构建差异（已实测解决，详见 v2-plan.md 第 4
 - 运行时包名：`libcfitsio10t64`（trixie t64 命名）、`libfftw3-double3`/`libfftw3-single3` 等。
 - 测试机 docker 需 registry mirror（`/etc/docker/daemon.json` 已配 1panel/daocloud/dockerproxy），否则拉 debian:13 超时。
 
-镜像调用：workdir 整体挂载，容器内外绝对路径一致（容器单 batch 对拍 6/6 全等已实测，2026-09-12）：
+镜像调用：workdir 整体挂载，容器内外绝对路径一致（容器单 batch 对拍 6/6 全等已实测，2026-09-12；P4 单镜像后待重跑）：
 
 ```bash
-docker run --rm -v <workdir>:<workdir> -w <workdir> fxcorr-f:latest fxcorr-f <batch_id> <station>
-docker run --rm -v <workdir>:<workdir> -w <workdir> difx-tools:latest difxcalc <config>.calc
+docker run --rm -v <workdir>:<workdir> -w <workdir> fxcorr/fxcorr:latest fxcorr-f <batch_id> <station>
+docker run --rm -v <workdir>:<workdir> -w <workdir> fxcorr/fxcorr:latest difxcalc <config>.calc
 ```
+
+实际不必手写：`FXCORR_RUN_MODE=container` 时 `run_batch.sh` / `make_testdata.sh` 的 `fxc`
+封装自动加这层前缀（P4 起不再按工具选镜像）。
 
 ## 测试机构建工作流
 

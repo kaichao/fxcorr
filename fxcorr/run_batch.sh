@@ -28,18 +28,11 @@ if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v fxcorr-f >/dev/null 2>&
 	set -u
 fi
 
-# ---- 容器模式执行前缀：工具→镜像映射，workdir 整体挂载、cwd 与宿主直跑一致 ----
+# ---- 容器模式执行前缀：单镜像（链路上所有命令同镜像），workdir 整体挂载、cwd 与宿主直跑一致 ----
 run_in_container()
 {
 	local tool="$1"; shift
-	local img
-	case "$tool" in
-		fxcorr-f)   img=fxcorr-f ;;
-		fxcorr-x)   img=fxcorr-x ;;
-		fxcorr-sim) img=fxcorr-sim ;;
-		vex2difx|difxcalc|difx2fits) img=difx-tools ;;
-		*) echo "fxc: no image for tool $tool" >&2; exit 2 ;;
-	esac
+	local img=fxcorr/fxcorr
 	local envargs=()
 	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
 	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")

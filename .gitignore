@@ -455,3 +455,5 @@ replay_pid*
 
 # fxcorr 工作区的工作流 Makefile（make sync），非 autotools 生成物
 !fxcorr/Makefile
+# 容器镜像构建入口（docker/ 下唯一一份；v2 的 6 份子目录 Makefile 曾只靠 rsync 传递）
+!fxcorr/docker/Makefile

@@ -1,6 +1,6 @@
 # fxcorr 脚本与改造概要
 
-**最后更新**：2026-09-19（V4 完成、V5 在读模型收尾，版本路线见 `v5-plan.md`）
+**最后更新**：2026-09-20（V5 进行中：读模型收尾三件已完成，容器单镜像已落盘，版本路线见 `v5-plan.md`）
 
 本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` / `fxcorr-sim` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，仿真数据生成器见 `applications/fxcorr-sim`，共享代码见 `libraries/fxcorrcommon`。
 
@@ -135,6 +135,7 @@ raw data
 | fxcorr-sim（仿真数据生成器） | `applications/fxcorr-sim` |
 | 共享库 | `libraries/fxcorrcommon` |
 | bash 集成 | `fxcorr/`（本目录） |
+| 容器镜像定义 | `fxcorr/docker/`（单镜像 `fxcorr/fxcorr`，V5 P4 合并；构建与调用见其 README） |
 | 原 MPI 核心 | `mpifxcorr/`（保留） |
 
 运行时数据（通常不进 git）：`config/`、`batches/`（批量元数据，D9）、`raw/`、`fengine/`、`vis/`、`product/`、`meta/`。
@@ -161,7 +162,7 @@ raw data
 | `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供对拍 |
 | `run_batch.sh` | fxcorr 流水线：前置校验 → DATA TABLE 软链重指本 batch → 逐站 `fxcorr-f` → `fxcorr-x` → 更新 status |
 
-`watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度由 scalebox 承担；容器化已在 V2 完成（`FXCORR_RUN_MODE=container`，见 `fxcorr/CLAUDE.md`）。
+`watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度由 scalebox 承担；容器化 V2 建成、V5 P4 起为单镜像 `fxcorr/fxcorr`（`FXCORR_RUN_MODE=container`，见 `fxcorr/CLAUDE.md` 与 `docker/README.md`）。
 
 示例：
 
@@ -185,6 +186,7 @@ V1–V4 均已完成，V5 进行中；各阶段的定案、实施与验收分别
 | V3 | 模块级 OpenMP（P3）；按需 GPU；期间收尾 P12 真实观测病态数据 | ✅ |
 | V4 | 读取路径改进（读模型）：A/B/C/D 四类缺陷修完、窗口语义（E4 净损失）归零、reader 三层重构、三层判据与诊断契约固化 | ✅ 见 `v4-plan.md` 开头的结论 |
 | V5 | 读模型收尾：补两个合成盲区（多组相邻的缺口+filler、`FILL_PATTERN`）、invalid 位定案；顺带修掉补盲区时抓出的 B7 | ✅ 见 `v5-plan.md`（只差"要真实数据"那条） |
+| V5 | 另立三项：**容器单镜像**（P4，已完成、验收 5/5）、目录路径环境变量化 + `common/` 改名 `sim-common/`（P5）、fxcorr-sim 造数能力（P6） | 进行中，见 `v5-plan.md` |
 | 可选 | 输出与 difx2fits 更好衔接 | 未做 |
 
 ---

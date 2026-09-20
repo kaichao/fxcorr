@@ -25,6 +25,8 @@ set -euo pipefail
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
 FXCORR_RUN_MODE="${FXCORR_RUN_MODE:-host}"
+# 单镜像：串行链路上所有命令同在 fxcorr/fxcorr（V5 P4）；容器模式下 fxc 与 stationcmd 共用
+CONTAINER_IMG=fxcorr/fxcorr
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v vex2difx >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
@@ -35,18 +37,11 @@ if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v vex2difx >/dev/null 2>&
 	set -u
 fi
 
-# ---- 容器模式执行前缀：工具→镜像映射，workdir 整体挂载、cwd 与宿主直跑一致 ----
+# ---- 容器模式执行前缀：单镜像（链路上所有命令同镜像），workdir 整体挂载、cwd 与宿主直跑一致 ----
 run_in_container()
 {
 	local tool="$1"; shift
-	local img
-	case "$tool" in
-		fxcorr-f)   img=fxcorr-f ;;
-		fxcorr-x)   img=fxcorr-x ;;
-		fxcorr-sim) img=fxcorr-sim ;;
-		vex2difx|difxcalc|difx2fits) img=difx-tools ;;
-		*) echo "fxc: no image for tool $tool" >&2; exit 2 ;;
-	esac
+	local img=$CONTAINER_IMG
 	local envargs=()
 	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
 	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")
@@ -286,7 +281,9 @@ ENVS=()
 [ -n "${FXSIM_LINE+x}" ] && ENVS+=("FXSIM_LINE=$FXSIM_LINE")
 [ -n "${FXSIM_FLUX+x}" ] && ENVS+=("FXSIM_FLUX=$FXSIM_FLUX")
 [ -n "${FXSIM_SEFD+x}" ] && ENVS+=("FXSIM_SEFD=$FXSIM_SEFD")
+[ -n "${FXSIM_PCAL+x}" ] && ENVS+=("FXSIM_PCAL=$FXSIM_PCAL")
 # 输出一条 station 任务命令行（本地直跑或 ssh 远程），xargs 按行执行
+# 本地在容器模式下经 docker run（与 fxc 同前缀；--nodes 与容器模式互斥，前面已挡）
 stationcmd()
 {
 	local bid=$1 st=$2
@@ -295,6 +292,13 @@ stationcmd()
 	if [ -n "$host" ]; then
 		printf 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new %q %q\n' \
 			"$host" "cd '$WORKDIR' && env ${ENVS[*]} LD_LIBRARY_PATH=${DIFXROOT:-/usr/local/difx}/lib:\"\$LD_LIBRARY_PATH\" '$FXCSIM' $args"
+	elif [ "$FXCORR_RUN_MODE" = "container" ]; then
+		local -a cprefix=(docker run --rm)
+		local e
+		for e in "${ENVS[@]}"; do cprefix+=(-e "$e"); done
+		cprefix+=(-v "$WORKDIR:$WORKDIR" -w "$WORKDIR" "$CONTAINER_IMG" fxcorr-sim)
+		printf '%q ' "${cprefix[@]}"
+		printf '%s\n' "$args"
 	else
 		printf '%q %s\n' "$FXCSIM" "$args"
 	fi

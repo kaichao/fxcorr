@@ -1,6 +1,6 @@
 # fxcorr 改造工作区
 
-**最后更新**：2026-09-19（V4 完成）
+**最后更新**：2026-09-20（V5 P4 单镜像完成，验收 5/5）
 
 本目录是 fxcorr 改造的工作区：文档 + bash 编排脚本（**脚本直接放本目录，与 README / data-spec 平级，不再设 scripts/ 子目录**）+ test/ 测试资产。算法实现见 `applications/fxcorr-f`（已建成，见其 CLAUDE.md）、`applications/fxcorr-x`（已建成，见其 CLAUDE.md），仿真数据生成器见 `applications/fxcorr-sim`（已建成，见其 CLAUDE.md；验证档案见其 VERIFICATION.md），共享代码见 `libraries/fxcorrcommon`（已建成）。
 
@@ -13,7 +13,7 @@
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。**已冻结**（2026-09-18）。
 - **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。**已冻结**（2026-09-19）。
 - **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）。**已冻结**（2026-09-19）；末节的后续方向由 v5-plan.md 接手。
-- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效），另有验收与回归总表、未完成清单。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
+- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效，三件均完成），另有验收与回归总表、未完成清单。后半是 2026-09-19/20 新立的三项：**P4 单镜像**（已完成，验收 5/5）、**P5 目录路径环境变量化 + `sim-common/` 改名**、**P6 fxcorr-sim 造数能力**（两项待实施）。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、datasim 特性差距、P0-P4 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
@@ -32,11 +32,11 @@
 | `README.md` | 活 | 2026-09-19 | 需求与架构（R1–R7 的出处） |
 | `data-spec.md` | 活 | 2026-09-19 | 数据接口与文件格式；改接口**先**改它 |
 | `usage.md` | 活 | 2026-09-19 | 三工具命令行手册 |
-| `build.md` | 活 | 2026-09-13 | 构建手册（构建体系自 V1 定稿后未变） |
+| `build.md` | 活 | 2026-09-20 | 构建手册（集成/独立两条路径 + 容器构建；V5 P4 起为单镜像） |
 | `reader-model.md` | 活 | 2026-09-19 | 读取路径的**单一权威分析**；改 datareader 先读它 |
 | `algo-plan.md` | 活 | 2026-09-19 | 算法改进的设计与实施记录（P0–P12） |
 | `fxcorr-sim-arch.md` | 活 | 2026-09-15 | fxcorr-sim 架构与公共信号模型 |
-| `v5-plan.md` | 活（进行中） | 2026-09-19 | **当前版本的路线与定案**（V5：P1 补盲区并修掉 B7、P2 FILL_PATTERN 按整帧认、P3 invalid 位占槽标无效——三件均完成；只差"要真实数据"） |
+| `v5-plan.md` | 活（进行中） | 2026-09-20 | **当前版本的路线与定案**（V5：P1 补盲区并修掉 B7、P2 FILL_PATTERN 按整帧认、P3 invalid 位占槽标无效——三件均完成；P4 单镜像已完成（验收 5/5）；P5、P6 已定案待实施；只差"要真实数据"） |
 | `v4-plan.md` | 冻结 | 2026-09-19 | V4 定案与实施（三层判据、B2）；末节的三条后续方向由 V5 接手 |
 | `v3-plan.md` | 冻结 | 2026-09-19 | V3 定案与实施（P3 OpenMP、P12 病态数据） |
 | `v2-plan.md` | 冻结 | 2026-09-18 | V2 定案与实施（镜像体系、P0–P11） |
@@ -48,7 +48,7 @@
 **本目录之外的文档**（同样在头部声明性质与日期）：
 
 - `test/` 下 13 份 `README.md`——`reader/`、`gaps/` 是**活文档**；其余 11 份（`zoom/ pcal/ mpc/ pulsar/ tcal/ crosspol/ phasearr/ sta/ p10/ p11/ p3/`）是**验证记录**，各对应一个 P 节点、写完不再更新，**重跑回归时以脚本与 `reader/check_reader.py` 为准**（不要把 README 里的旧命令当当前用法）；
-- `docker/<镜像>/README.md`（6 份，V2 镜像体系）——**活文档**，描述各镜像的内容与用法，随镜像变化更新；
+- `docker/README.md`（1 份，V5 P4 起为单镜像 `fxcorr/fxcorr`）——**活文档**，描述镜像内容、构建与调用，随镜像变化更新；
 - `applications/{fxcorr-f,fxcorr-x,fxcorr-sim}/CLAUDE.md`、`applications/fxcorr-sim/VERIFICATION.md`、`libraries/CLAUDE.md`、仓库根 `CLAUDE.md`——**活文档**，随各自代码/验证更新；
 - `mpifxcorr/CLAUDE.md`——描述**冻结的上游代码**，不随改造更新，无需日期。
 
@@ -79,9 +79,9 @@
 ./fxcorr/run_batch.sh 60512_45000         # fxcorr 流水线（batch.json 须已由 make_testdata.sh 写好）
 ```
 
-**容器模式**（V2，验收 4/5 已过）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装按工具→镜像映射（fxcorr-f/x/sim、vex2difx/difxcalc/difx2fits→difx-tools）加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd)` 前缀，FXSIM_NOISE/SEED 透传；默认 host = 宿主直跑（V1 行为不变）。run_batch.sh 调用时 cwd 须在 workdir（软链相对解析）。
+**容器模式**（V2 建成；**V5 P4 起为单镜像，验收 5/5 已过**）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd) fxcorr/fxcorr:latest` 前缀——链路上六个命令同在 `fxcorr/fxcorr`（原先按工具→镜像映射，P4 合并后映射取消），FXSIM_NOISE/SEED 透传；默认 host = 宿主直跑（V1 行为不变）。run_batch.sh 调用时 cwd 须在 workdir（软链相对解析）。镜像定义与构建见 `docker/README.md`。
 
-make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出、container 模式互斥；详见 v1-plan 2.4 实施记录。
+make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出；`--nodes` 与 container 模式互斥（`-p` 不互斥）。容器模式下 station 任务由 `stationcmd()` 输出 `docker run … fxcorr/fxcorr fxcorr-sim` 前缀（P4 验收时补，原先只有 common 走了容器）；详见 v1-plan 2.4 实施记录。
 
 run_bench.sh 实现要点（实测）：batch 定位走 DATA TABLE 软链 target 的 batch_id（fallback batches/ 最新 json）；EXECUTE TIME 截断 = `floor(initsec + (N−1)×intTime) + 1`（mpifxcorr 停写判定按积分起点、整秒字段，N = batch 时长/intTime 不整除即报错）；OUTPUT FILENAME sed 指 `bench/<exp>.difx`；mpirun 在 workdir 内跑（DATA TABLE 相对路径）、root 加 --allow-run-as-root、`LD_LIBRARY_PATH=$DIFXROOT/lib`；mpifxcorr 拒绝覆盖已有 SWIN（脚本先 rm -rf）。batch 时长 < 1s 无整秒解（mpifxcorr 多写 weight-0 积分），默认配置 2.097s 无碍。
 

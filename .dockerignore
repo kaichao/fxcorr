@@ -1,6 +1,15 @@
-# docker 构建上下文排除（fxcorr/docker/* 的构建上下文 = 仓库根）
+# docker 构建上下文排除（fxcorr/docker/ 的构建上下文 = 仓库根）
 .git/
 difx-data/
+
+# 编译产物：宿主上遗留的 .o/.a 若进了上下文，make 会按时间戳复用它们
+# （宿主与镜像的工具链/库版本不同），必须排除，保证镜像内从源码全新编译
+*.o
+*.lo
+*.la
+*.a
+.deps/
+.libs/
 
 # 运行时数据目录（不进镜像）
 fxcorr/config/
