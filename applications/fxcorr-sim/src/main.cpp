@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <fxcorrcommon/configuration.h>
+#include <fxcorrcommon/fxcorrpath.h>
 
 #include "commonsignal.h"
 #include "signalgen.h"
@@ -61,7 +62,8 @@ static void usage()
 {
 	cerr << "usage:\n"
 	     << "  fxcorr-sim common  <batch_id> [workdir]\n"
-	     << "      generate the shared common signal only (common/<batch_id>/)\n"
+	     << "      generate the shared common signal only (sim-common/<batch_id>/,\n"
+	     << "      FXCORR_SIM_COMMON_ROOT)\n"
 	     << "  fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]\n"
 	     << "      read the common signal, generate one station's VDIF;\n"
 	     << "      one tone value applies to all bands, nbands values apply band\n"
@@ -540,7 +542,8 @@ static int doCommon(Configuration &config, const BatchInfo &bi)
 	if(const char *sd = getenv("FXSIM_SEED"))
 		seed = strtoul(sd, 0, 10);
 
-	if(!CommonSignal::generate(grid, totalslices, seed, bi.workdir, bi.batchid, bi.startmjd,
+	if(!CommonSignal::generate(grid, totalslices, seed,
+	                            FxcorrPath::root(FxcorrPath::ROOT_SIM_COMMON), bi.batchid, bi.startmjd,
 	                            line))
 		return EXIT_FAILURE;
 	return EXIT_SUCCESS;
@@ -645,7 +648,7 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 
 	// the common signal must be complete before a station starts
 	CommonSignal::Reader reader;
-	if(!reader.open(bi.workdir + "/common/" + bi.batchid, bi.batchid, grid))
+	if(!reader.open(FxcorrPath::root(FxcorrPath::ROOT_SIM_COMMON) + "/" + bi.batchid, bi.batchid, grid))
 		return EXIT_FAILURE;
 
 	// vpsamps: complex baseband samples per band per frame (= payload bytes
@@ -662,7 +665,7 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 		                         (double)st.framens / 1.0e9);
 
 	// output raw/<station>/<station>_<batch_id>.vdif (data-spec 5.2)
-	string outdir = bi.workdir + "/raw/" + st.station;
+	string outdir = FxcorrPath::root(FxcorrPath::ROOT_RAW) + "/" + st.station;
 	string outpath = outdir + "/" + st.station + "_" + bi.batchid + ".vdif";
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
@@ -771,7 +774,7 @@ static int doStationLegacy(Configuration &config, Model *model, const BatchInfo 
 	if(const char *adenv = getenv("FXSIM_ADAPTIVE"))
 		adaptive = (strcmp(adenv, "1") == 0);
 
-	string outdir = bi.workdir + "/raw/" + st.station;
+	string outdir = FxcorrPath::root(FxcorrPath::ROOT_RAW) + "/" + st.station;
 	string outpath = outdir + "/" + st.station + "_" + bi.batchid + ".vdif";
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
@@ -869,6 +872,19 @@ int main(int argc, char **argv)
 		}
 	}
 	bool legacy = !tonemhzarg.empty();
+
+	// hand the resolved workdir to the shared root resolver (V5 P5): the
+	// library opens .input/.calc/.im paths through it, and the common signal
+	// and raw output below are addressed by root
+	FxcorrPath::init(workdir);
+	workdir = FxcorrPath::workdir();
+	FxcorrPath::print("fxcorr-sim");
+	// the roots THIS tool touches: common (both entries) and, for station, raw
+	static const FxcorrPath::Root usedroots[] = {
+		FxcorrPath::ROOT_SIM_COMMON, FxcorrPath::ROOT_RAW };
+	int nusedroots = (cmd == "common") ? 1 : 2;
+	if(!FxcorrPath::checkRoots(batchid, usedroots, nusedroots, "fxcorr-sim"))
+		return EXIT_FAILURE;
 
 	BatchInfo bi;
 	if(!loadBatchInfo(workdir, batchid, &bi))

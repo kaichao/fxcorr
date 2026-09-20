@@ -1,6 +1,7 @@
 # fxcorr/fxcorr：串行链路单镜像（两段式）
 # stage 1 builder：debian 13 + 构建工具链，全量编译安装到 /usr/local/difx
-# stage 2 runtime：debian 13-slim + 运行时依赖 + 从 builder COPY 的 .so / share / 六个可执行
+# stage 2 runtime：debian 13-slim + 运行时依赖 + 从 builder COPY 的 .so / share /
+# 六个可执行 + 四个 fxcorr 编排脚本（roots.sh 与三个 wrap_*.sh，见文件末尾）
 # 取代 v2 的 6 个镜像（fxcorr-builder/base/f/x/sim/difx-tools），构建不再是链式的。
 # 构建上下文 = 仓库根（见 Makefile：../..），COPY 仓库后在 stage 1 内完成编译。
 
@@ -87,3 +88,11 @@ COPY --from=builder /usr/local/difx/bin/fxcorr-sim /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-f /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-x /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difx2fits /usr/local/difx/bin/
+
+# fxcorr 的规范适配脚本（V5 P5 Q15/Q16）：原 difx 程序（vex2difx / difxcalc /
+# difx2fits）不认识根变量，由这几个脚本转换路径后调用，所以必须与程序同在
+# 镜像里。roots.sh 只被它们 source，同样放这里（$SCRIPTDIR 取同目录）。
+COPY --from=builder /src/fxcorr/roots.sh /usr/local/difx/bin/
+COPY --from=builder /src/fxcorr/wrap_vex2difx.sh /usr/local/difx/bin/
+COPY --from=builder /src/fxcorr/wrap_difxcalc.sh /usr/local/difx/bin/
+COPY --from=builder /src/fxcorr/wrap_difx2fits.sh /usr/local/difx/bin/

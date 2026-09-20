@@ -19,6 +19,9 @@
 | `fxcorr-f` | `run_batch.sh` 逐站 F 引擎 |
 | `fxcorr-x` | `run_batch.sh` 单 batch X 引擎 |
 | `difx2fits` | 后处理：SWIN → FITS |
+| `wrap_vex2difx.sh` / `wrap_difxcalc.sh` | 前处理封装（V5 P5）：在 config/ 内调用原程序 + 把产物里的绝对路径规范化回相对 |
+| `wrap_difx2fits.sh` | 后处理封装（V5 P5）：SWIN → FITS，产物落 `FXCORR_PRODUCT_ROOT`；实验级 |
+| `roots.sh` | 上面三个脚本 source 的目录根解析（与库内 `FxcorrPath` 同规则） |
 
 `mpifxcorr` 不进镜像（MPI 环境不进容器，`run_bench.sh` 对拍仍宿主直跑）。
 

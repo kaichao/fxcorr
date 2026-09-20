@@ -62,6 +62,8 @@ make install
 
 ## 容器构建（fxcorr/docker/，V2 建成；V5 P4 起为单镜像）
 
+**V5 P5 起镜像内还带 fxcorr 的四个编排脚本**（`roots.sh` + `wrap_vex2difx.sh` / `wrap_difxcalc.sh` / `wrap_difx2fits.sh`），容器内可直接调用。
+
 V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化为 **docker host**。镜像定义在 `fxcorr/docker/`：**一份两段式 `Dockerfile` + `Makefile` + `README.md`**（V5 P4 把 v2 的 6 个镜像子目录合并为一个，v2 体系见 `v2-plan.md`）。
 
 | stage | 基础 | 内容 |

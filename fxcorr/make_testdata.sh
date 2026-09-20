@@ -23,12 +23,17 @@
 #   FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 set -euo pipefail
 
+# 五个可重定向的根（V5 P5）：容器/ssh 透传与解析共用一份清单
+FXCORR_ROOT_VARS=(FXCORR_RAW_ROOT FXCORR_SIM_COMMON_ROOT FXCORR_FENGINE_ROOT FXCORR_VIS_ROOT FXCORR_PRODUCT_ROOT)
+
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
 FXCORR_RUN_MODE="${FXCORR_RUN_MODE:-host}"
 # 单镜像：串行链路上所有命令同在 fxcorr/fxcorr（V5 P4）；容器模式下 fxc 与 stationcmd 共用
 CONTAINER_IMG=fxcorr/fxcorr
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# 目录根解析（V5 P5）：与 fxcorr-f/x/sim 内的 FxcorrPath 同规则，一处定义两处用
+. "$SCRIPTDIR/roots.sh"
 if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v vex2difx >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
@@ -50,6 +55,12 @@ run_in_container()
 	[ -n "${FXSIM_FLUX+x}" ] && envargs+=(-e FXSIM_FLUX="$FXSIM_FLUX")
 	[ -n "${FXSIM_SEFD+x}" ] && envargs+=(-e FXSIM_SEFD="$FXSIM_SEFD")
 	[ -n "${FXSIM_PCAL+x}" ] && envargs+=(-e FXSIM_PCAL="$FXSIM_PCAL")
+	# 五个根一并透传（Q12）：容器内程序仍要知道用哪个根。挂载由外部编排平台
+	# 按"各根按宿主同路径可见"的约定负责，本脚本不实现多根挂载。
+	local r
+	for r in "${FXCORR_ROOT_VARS[@]}"; do
+		[ -n "${!r+x}" ] && envargs+=(-e "$r=${!r}")
+	done
 	docker run --rm "${envargs[@]}" -v "$WORKDIR:$WORKDIR" -w "$(pwd)" "$img:latest" "$tool" "$@"
 }
 fxc()
@@ -118,8 +129,11 @@ if [ $# -gt 0 ] && [ -d "$1" ]; then
 fi
 TONES=("$@")
 WORKDIR=$(cd "$WORKDIR" && pwd)
+fxcorr_roots "$WORKDIR"
+WORKDIR=$FXCORR_ROOT_WORKDIR
 CFG="$WORKDIR/config"
 mkdir -p "$CFG" "$WORKDIR/batches"
+fxcorr_mkroots	# Q19：五个根由编排层建齐，程序遇根不存在只报错
 
 # ---- ① 前处理（幂等） ----
 # config 资产缺才复制。
@@ -130,11 +144,11 @@ mkdir -p "$CFG" "$WORKDIR/batches"
 # 见 v1-plan 2.4），多 batch 对拍不做，仅 fxcorr 侧自测。
 [ -f "$CFG/test.vex" ] || cp "$SCRIPTDIR/test/test.vex" "$CFG/test.vex"
 [ -f "$CFG/test.v2d" ] || cp "$SCRIPTDIR/test/test.v2d" "$CFG/test.v2d"
-# vex2difx 的 vex= 路径相对 cwd（非 v2d 目录），.input 也输出到 cwd；
-# 故在 config/ 内跑，与 .v2d/.vex 同目录（.input 内 CALC FILENAME 会绝对化）
+# 前处理走各自的规范适配封装（V5 P5 Q15）：cwd 的处理与"绝对路径改回相对"的
+# 规范化都在那两个脚本里，本脚本只负责幂等与输出约定。
 # 前处理工具的进度/警告输出重定向 stderr，脚本 stdout 只留 batch_id（规格⑥）
-[ -f "$CFG/test.input" ] || (cd "$CFG" && fxc vex2difx test.v2d >&2)
-[ -f "$CFG/test.im" ] || (cd "$CFG" && fxc difxcalc test.calc >&2)
+[ -f "$CFG/test.input" ] || "$SCRIPTDIR/wrap_vex2difx.sh" "$WORKDIR" test.v2d >&2
+[ -f "$CFG/test.im" ] || "$SCRIPTDIR/wrap_difxcalc.sh" "$WORKDIR" test.calc >&2
 if [ "$NBATCH" -gt 1 ]; then
 	if [ ! -f "$CFG/test-sim.input" ]; then
 		sed -e 's/^INT TIME (SEC):[[:space:]]*[0-9.]*$/INT TIME (SEC):     0.256/' \
@@ -199,8 +213,11 @@ if nbatch > 1:
         print('make_testdata.sh: -n %d raises n_subints to %d (batch duration >= 1s for unique batch_id)' % (nbatch, minn), file=sys.stderr)
         nsub = minn
 
-# calc/im 路径取自 .input 的 CALC FILENAME（difxcalc 写的绝对路径 → 转相对）
+# calc/im 路径取自 .input 的 CALC FILENAME；wrap_vex2difx.sh 规范化后通常是
+# 相对 config/ 的裸名，绝对路径也接受（Q20：只对相对路径拼根）
 calcfull = one('CALC FILENAME')
+if not os.path.isabs(calcfull):
+    calcfull = os.path.join(os.path.dirname(os.path.abspath(os.environ['INPUT'])), calcfull)
 calcrel = os.path.relpath(calcfull, workdir)
 imrel = calcrel[:-len('.calc')] + '.im' if calcrel.endswith('.calc') else calcrel + '.im'
 
@@ -224,7 +241,9 @@ for i in range(nbatch):
         'integration_sec': inttime,
         'n_channels': nchan,
         'polarizations': [polx + polx],
-        'difx_dir': 'vis/%s.difx' % bid,
+        # 照抄 .input 的 OUTPUT FILENAME 原样（Q10）：实际落点由运行时根决定，
+        # 本字段只作记录——没有任何程序把它当路径读
+        'difx_dir': one('OUTPUT FILENAME'),
         'created_at': created,
         'status': 'running',
         'fxcorr_f_version': '0.1.0',
@@ -255,6 +274,13 @@ while read -r st fn; do
 	DSFILE+=("$fn")
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
 
+# ---- ③b 根记录与实验级一致性检查（Q18、Q4）：造数前先挡不一致，再记下本 batch 的根 ----
+# 检查先于写入：两者的 roots.json 都在 meta/roots/ 下，写过的不能再当"已有记录"
+for bid in "${BATCHES[@]}"; do
+	fxcorr_check_roots "$bid"
+	fxcorr_write_roots "$bid"
+done
+
 # station → 节点映射（--nodes）；未列出站留空 = 本地
 declare -A NODE_OF
 for entry in $NODEMAP; do
@@ -282,6 +308,10 @@ ENVS=()
 [ -n "${FXSIM_FLUX+x}" ] && ENVS+=("FXSIM_FLUX=$FXSIM_FLUX")
 [ -n "${FXSIM_SEFD+x}" ] && ENVS+=("FXSIM_SEFD=$FXSIM_SEFD")
 [ -n "${FXSIM_PCAL+x}" ] && ENVS+=("FXSIM_PCAL=$FXSIM_PCAL")
+# 五个根同样透传给远程站（分片生成的产物必须落在与本地同一套根上）
+for r in "${FXCORR_ROOT_VARS[@]}"; do
+	[ -n "${!r+x}" ] && ENVS+=("$r=${!r}")
+done
 # 输出一条 station 任务命令行（本地直跑或 ssh 远程），xargs 按行执行
 # 本地在容器模式下经 docker run（与 fxc 同前缀；--nodes 与容器模式互斥，前面已挡）
 stationcmd()
@@ -312,7 +342,7 @@ for bid in "${BATCHES[@]}"; do
 	for i in "${!DSTATION[@]}"; do
 		st=${DSTATION[$i]}
 		out="raw/$st/${st}_${bid}.vdif"
-		if [ -s "$WORKDIR/$out" ]; then
+		if [ -s "$FXCORR_ROOT_RAW/$st/${st}_${bid}.vdif" ]; then
 			echo "make_testdata.sh: skip existing $out" >&2
 		else
 			stationcmd "$bid" "$st" >> "$TASKS"
@@ -330,7 +360,10 @@ fi
 # run_batch.sh 跑每 batch 前会重做软链
 last=${BATCHES[-1]}
 for i in "${!DSTATION[@]}"; do
-	ln -sf "raw/${DSTATION[$i]}/${DSTATION[$i]}_${last}.vdif" "$WORKDIR/${DSFILE[$i]}"
+	# 软链落在 raw 根下（Q2）：workdir 里不再散落软链，raw 区整体可在大盘上；
+	# 目标用绝对路径——相对目标跨文件系统会断
+	ln -sf "$FXCORR_ROOT_RAW/${DSTATION[$i]}/${DSTATION[$i]}_${last}.vdif" \
+	       "$FXCORR_ROOT_RAW/${DSFILE[$i]}"
 done
 if [ "${#BATCHES[@]}" -gt 1 ]; then
 	echo "make_testdata.sh: DATA TABLE links point at batch $last (last of ${#BATCHES[@]})" >&2

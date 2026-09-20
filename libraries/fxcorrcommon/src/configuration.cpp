@@ -30,6 +30,7 @@
 #include "codifio.h"
 #include "mathutil.h"
 #include "sysutil.h"
+#include "fxcorrpath.h"
 
 int Configuration::MONITOR_TCP_WINDOWBYTES;
 
@@ -64,6 +65,7 @@ Configuration::Configuration(const char * configfile, int id, double restartsec)
   infilekeyunconsumed = false;
 
   setJobNameFromConfigfilename(string(configfile));
+  configdir = FxcorrPath::dirname(string(configfile));
   char * difxmtu = getenv("DIFX_MTU");
   if(difxmtu == 0)
     mtu = 1500;
@@ -1198,6 +1200,7 @@ void Configuration::processCommon(istream * input)
   string line;
 
   getinputline(input, &calcfilename, "CALC FILENAME");
+  calcfilename = FxcorrPath::under(configdir, calcfilename);
   getinputline(input, &coreconffilename, "CORE CONF FILENAME");
   getinputline(input, &line, "EXECUTE TIME (SEC)");
   executeseconds = atoi(line.c_str());
@@ -1233,6 +1236,7 @@ void Configuration::processCommon(istream * input)
     outformat = DIFX;
   }
   getinputline(input, &outputfilename, "OUTPUT FILENAME");
+  outputfilename = FxcorrPath::under(FxcorrPath::root(FxcorrPath::ROOT_VIS), outputfilename);
 
   commonread = true;
 }
@@ -1888,7 +1892,12 @@ void Configuration::processDataTable(istream * input)
     datastreamtable[i].numdatafiles = atoi(line.c_str());
     datastreamtable[i].datafilenames = new string[datastreamtable[i].numdatafiles];
     for(int j=0;j<datastreamtable[i].numdatafiles;j++)
+    {
       getinputline(input, &(datastreamtable[i].datafilenames[j]), "FILE ", i);
+      // relative FILE lines resolve against the raw root; absolute ones (the
+      // norm in real observations) are left alone (V5 P5 rule 2)
+      datastreamtable[i].datafilenames[j] = FxcorrPath::under(FxcorrPath::root(FxcorrPath::ROOT_RAW), datastreamtable[i].datafilenames[j]);
+    }
   }
 }
 

@@ -17,6 +17,7 @@
 #include "alert.h"
 #include "model.h"
 #include "sysutil.h"
+#include "fxcorrpath.h"
 
 Model::Model(Configuration * conf, string cfilename)
   : config(conf), calcfilename(cfilename)
@@ -602,6 +603,8 @@ bool Model::readPolynomialSamples(istream * calcinput)
   bool hasLMDerivatives = false;
 
   config->getinputline(calcinput, &imfilename, "IM FILENAME");
+  // the .im sits next to the .calc (V5 P5 rule 2); absolute paths pass through
+  imfilename = FxcorrPath::under(FxcorrPath::dirname(calcfilename), imfilename);
 
   istream * input = config->mpiGetFileContent(imfilename.c_str());
   if (input == NULL)

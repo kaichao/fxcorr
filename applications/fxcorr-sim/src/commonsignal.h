@@ -56,7 +56,7 @@ struct LineSpec
 bool deriveGrid(Configuration &config, Grid *grid, int specresfac = 1);
 
 // Generate the common signal for one batch:
-//   outdir/common/<batchid>/meta.json  +  data_XX.bin (one file per 0.5 s
+//   simcommonroot/<batchid>/meta.json  +  data_XX.bin (one file per 0.5 s
 //   block, XX zero-padded).  Block files are written to <name>.tmp and
 //   renamed; meta.json starts with status "running" and flips to "done"
 //   after the last block, which is what makes the batch visible to stations.
@@ -65,7 +65,7 @@ bool deriveGrid(Configuration &config, Grid *grid, int specresfac = 1);
 //   after gencplx (datasim.cpp generation loop); a line frequency outside
 //   the grid span is rejected.
 bool generate(const Grid &grid, long long totalslices, unsigned long seed,
-              const std::string &outdir, const std::string &batchid,
+              const std::string &simcommonroot, const std::string &batchid,
               double startmjd, const LineSpec &line = LineSpec());
 
 // Station-side reader.  open() parses meta.json and rejects it unless the

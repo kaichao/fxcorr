@@ -13,6 +13,7 @@
 #include <fxcorrcommon/polyco.h>
 #include <fxcorrcommon/architecture.h>
 #include <fxcorrcommon/difxmonitor.h>
+#include <fxcorrcommon/fxcorrpath.h>
 
 #include "spreader.h"
 #include "xmac.h"
@@ -104,6 +105,17 @@ int main(int argc, char **argv)
 		workdir = wd;
 	if(argc > 2)
 		workdir = argv[2];	// argument takes precedence over the environment
+	// hand the resolved workdir to the shared root resolver (V5 P5): the
+	// library opens .input/.calc/.im paths through it, so every relative path
+	// in the config set lands on the same roots this tool uses below
+	FxcorrPath::init(workdir);
+	workdir = FxcorrPath::workdir();
+	FxcorrPath::print("fxcorr-x");
+	// the roots THIS tool touches: fengine (reads .sp) and vis (writes SWIN)
+	static const FxcorrPath::Root usedroots[] = {
+		FxcorrPath::ROOT_FENGINE, FxcorrPath::ROOT_VIS };
+	if(!FxcorrPath::checkRoots(batchid, usedroots, 2, "fxcorr-x"))
+		return EXIT_FAILURE;
 
 	// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
 	string batchjsonpath = workdir + "/batches/" + batchid + ".json";
@@ -120,7 +132,7 @@ int main(int argc, char **argv)
 
 	double startmjd = 0.0;
 	int nsubints = 0;
-	string inputfile, difxdir;
+	string inputfile;
 	if(!extractJsonDouble(json, "start_mjd", &startmjd) ||
 	   !extractJsonInt(json, "n_subints", &nsubints) ||
 	   !extractJsonString(json, "config_file", &inputfile))
@@ -128,8 +140,6 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-x: batch.json missing required fields" << endl;
 		return EXIT_FAILURE;
 	}
-	if(!extractJsonString(json, "difx_dir", &difxdir))
-		difxdir = "vis/" + batchid + ".difx";
 
 	// FXCORR_LOGLEVEL has to be in force before the configuration is loaded:
 	// fxcorrcommon reports the whole parsing pass through the Alert streams
@@ -216,7 +226,7 @@ int main(int argc, char **argv)
 			if(config.getDStationName(configindex, d) == station)
 				dswithinstation++;
 		}
-		string sdir = workdir + "/fengine/" + batchid + "/" + station + "/ds_" + to_string(dswithinstation);
+		string sdir = FxcorrPath::root(FxcorrPath::ROOT_FENGINE) + "/" + batchid + "/" + station + "/ds_" + to_string(dswithinstation);
 		int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
 		int ntotalbands = config.getDNumTotalBands(configindex, ds);
 		readers[ds].resize(ntotalbands);
@@ -297,6 +307,8 @@ int main(int argc, char **argv)
 	// fxcorr-f as usual.  The beam branch needs no intTime grid.
 	if(config.phasedArrayOn(configindex))
 	{
+		// beam/ has no separate root: like config/ and meta/ it always lives
+		// under the workdir (v5-plan.md Q17)
 		BeamEngine beam(&config, configindex, workdir, batchid, nsubints, readers);
 		if(!beam.ok())
 			return fail(monitor, "fxcorr-x: cannot initialise beam output");
@@ -357,7 +369,7 @@ int main(int argc, char **argv)
 	// scan must shift the limit by that offset (+1 so the last integration
 	// always clears it)
 	int executeseconds = (int)((double)nsubints*(double)subintns/1.0e9 + 0.5) + initsec + 1;
-	Integrator integrator(&config, configindex, workdir + "/" + difxdir, executeseconds, scan, initsec, initns, &monitor);
+	Integrator integrator(&config, configindex, executeseconds, scan, initsec, initns, &monitor);
 
 	int coreresultlength = config.getCoreResultLength(configindex);
 	cf32 *subintresults = vectorAlloc_cf32(coreresultlength);

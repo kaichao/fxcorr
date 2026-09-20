@@ -16,10 +16,15 @@
 #   workdir   项目根目录（默认 .；环境变量 FXCORR_WORKDIR 亦可定义，位置参数优先）
 set -euo pipefail
 
+# 五个可重定向的根（V5 P5）：容器透传与解析共用一份清单
+FXCORR_ROOT_VARS=(FXCORR_RAW_ROOT FXCORR_SIM_COMMON_ROOT FXCORR_FENGINE_ROOT FXCORR_VIS_ROOT FXCORR_PRODUCT_ROOT)
+
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
 FXCORR_RUN_MODE="${FXCORR_RUN_MODE:-host}"
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# 目录根解析（V5 P5）：与 fxcorr-f/x/sim 内的 FxcorrPath 同规则，一处定义两处用
+. "$SCRIPTDIR/roots.sh"
 if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v fxcorr-f >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
@@ -36,6 +41,12 @@ run_in_container()
 	local envargs=()
 	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
 	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")
+	# 五个根一并透传（Q12）：容器内程序仍要知道用哪个根。挂载由外部编排平台
+	# 按"各根按宿主同路径可见"的约定负责，本脚本不实现多根挂载。
+	local r
+	for r in "${FXCORR_ROOT_VARS[@]}"; do
+		[ -n "${!r+x}" ] && envargs+=(-e "$r=${!r}")
+	done
 	docker run --rm "${envargs[@]}" -v "$WORKDIR:$WORKDIR" -w "$(pwd)" "$img:latest" "$tool" "$@"
 }
 fxc()
@@ -67,6 +78,8 @@ if [ $# -gt 0 ] && [ -d "$1" ]; then
 fi
 [ $# -eq 0 ] || usage
 WORKDIR=$(cd "$WORKDIR" && pwd)
+fxcorr_roots "$WORKDIR"
+WORKDIR=$FXCORR_ROOT_WORKDIR
 if [ ! -f "$WORKDIR/batches/$BID.json" ]; then
 	echo "run_batch.sh: $WORKDIR/batches/$BID.json not found" >&2
 	exit 2
@@ -78,14 +91,15 @@ else
 	command -v fxcorr-x >/dev/null 2>&1 || { echo "run_batch.sh: fxcorr-x not found (source setup.bash or install)" >&2; exit 2; }
 fi
 mkdir -p "$WORKDIR/meta"
+fxcorr_mkroots	# Q19：五个根由编排层建齐，程序遇根不存在只报错
 
 # ---- ①② 读 batch.json + .input、前置校验、DATA TABLE 软链重做 ----
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
-python3 - "$WORKDIR" "$BID" <<'PYEOF' > "$OUT"
+python3 - "$WORKDIR" "$BID" "$FXCORR_ROOT_RAW" "$FXCORR_ROOT_VIS" <<'PYEOF' > "$OUT"
 import json, math, os, re, sys
 
-workdir, bid = sys.argv[1], sys.argv[2]
+workdir, bid, rawroot, visroot = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 bjpath = os.path.join(workdir, 'batches', bid + '.json')
 bj = json.load(open(bjpath))
 cfgrel = bj['config_file']
@@ -140,17 +154,22 @@ if len(stations) != len(datafiles):
     sys.exit('run_batch.sh: station/file count mismatch in %s (%d stations, %d files)' % (cfgrel, len(stations), len(datafiles)))
 
 # ② DATA TABLE 软链重指本 batch 的 VDIF（fxcorr-f 按 DATA TABLE 文件名读数据）。
-# make_testdata.sh 布局（raw/<st>/<st>_<bid>.vdif）下软链重指本 batch；
-# 真实观测场景 FILE 行已是数据文件路径（绝对路径或直接可见），不软链。
+# make_testdata.sh 布局（raw/<st>/<st>_<bid>.vdif）下软链重指本 batch，落在
+# RAW 根下（Q2）；真实观测场景 FILE 行已是数据文件路径（绝对路径或直接可见），
+# 不软链。
 for st, fn in zip(stations, datafiles):
-    src = 'raw/%s/%s_%s.vdif' % (st, st, bid)
-    if os.path.isfile(os.path.join(workdir, src)):
-        tgt = os.path.join(workdir, fn)
+    src = os.path.join(rawroot, st, '%s_%s.vdif' % (st, bid))
+    if os.path.isfile(src):
+        tgt = os.path.join(rawroot, fn)
         if os.path.islink(tgt) or os.path.exists(tgt):
             os.unlink(tgt)
+        # absolute target: a relative one breaks across filesystems, which is
+        # the whole point of pointing the raw root at a different disk (Q2)
         os.symlink(src, tgt)
 
-outdir = os.path.join(workdir, one('OUTPUT FILENAME').rstrip('/'))
+# OUTPUT FILENAME resolves against the vis root (Q20); an absolute value wins,
+# os.path.join drops the prefix for it - same rule as the programs
+outdir = os.path.join(visroot, one('OUTPUT FILENAME').rstrip('/'))
 print('CFGIN=%s' % cfgrel)
 print('OUTDIR=%s' % outdir)
 print('--')
@@ -194,6 +213,11 @@ if st == "done":
 		f.write("%s,done,%s\n" % (bid, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")))
 ' "$WORKDIR" "$BID" "$1"
 }
+# ---- 根记录与实验级一致性检查（Q18、Q4）：开跑前先挡不一致，再记下本 batch 的根 ----
+# 检查先于写入：两者的 roots.json 都在 meta/roots/ 下，写过的不能再当"已有记录"
+fxcorr_check_roots "$BID"
+fxcorr_write_roots "$BID"
+
 mark_status running
 
 # 逐 datastream fxcorr-f（多 datastream 站每流一个 f 任务，带站内序号）：

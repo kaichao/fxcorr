@@ -14,6 +14,9 @@
 set -euo pipefail
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# 目录根解析（V5 P5）：mpifxcorr 不认这些根，但基准的 .input 副本里要把
+# 相对路径绝对化，得知道 raw 根在哪
+. "$SCRIPTDIR/roots.sh"
 if ! command -v mpifxcorr >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
@@ -40,6 +43,8 @@ if [ $# -gt 0 ] && [ -d "$1" ]; then
 fi
 [ $# -eq 0 ] || usage
 WORKDIR=$(cd "$WORKDIR" && pwd)
+fxcorr_roots "$WORKDIR"
+WORKDIR=$FXCORR_ROOT_WORKDIR
 if [ ! -d "$WORKDIR/batches" ] || [ ! -d "$WORKDIR/config" ]; then
 	echo "run_bench.sh: $WORKDIR does not look like a make_testdata.sh workdir (need config/ and batches/)" >&2
 	exit 2
@@ -166,9 +171,28 @@ done < "$OUT"
 # OUTPUT FILENAME 改指 bench/<exp>.difx：基准 SWIN 与 fxcorr 侧（.input OUTPUT
 # FILENAME 目录）分开落盘，对拍时互不覆盖。CALC FILENAME 为绝对路径，无需改。
 mkdir -p "$WORKDIR/bench"
-sed -e "s/^EXECUTE TIME (SEC):[[:space:]]*[0-9]*$/EXECUTE TIME (SEC): $EXEC/" \
+# V5 P5 起 config 里的相对路径（.input 的 CALC FILENAME / FILE 行、.calc 的
+# IM/FLAG FILENAME）是相对各自根的，而 mpifxcorr 按 **cwd**（workdir）解析。
+# 这里把它们绝对化，并把 .calc 复制一份到 bench/ 一并处理——这正是 Q15
+# "凡调用原 difx 程序，由 bash 做规范转换"的那一层。
+CFGDIR="$WORKDIR/$(dirname "$CFGIN")"
+CALCIN=$(python3 -c "
+import re, sys
+for line in open(sys.argv[1]):
+    m = re.match(r'^CALC FILENAME:\s*(\S+)\s*$', line)
+    if m:
+        print(m.group(1))
+        break
+" "$WORKDIR/$CFGIN")
+CALCBASE=$(basename "$CALCIN")
+sed -e "s|^EXECUTE TIME (SEC):[[:space:]]*[0-9]*$|EXECUTE TIME (SEC): $EXEC|" \
     -e "s|^OUTPUT FILENAME:[[:space:]]*.*$|OUTPUT FILENAME:    $OUTDIR|" \
+    -e "s|^CALC FILENAME:[[:space:]]*.*$|CALC FILENAME:      $WORKDIR/bench/$CALCBASE|" \
+    -e "s|^FILE \([0-9]*/[0-9]*\):[[:space:]]*\([^/].*\)$|FILE \1:           $FXCORR_ROOT_RAW/\2|" \
     "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$(basename "$CFGIN")"
+sed -e "s|^IM FILENAME:[[:space:]]*\([^/].*\)$|IM FILENAME:        $CFGDIR/\1|" \
+    -e "s|^FLAG FILENAME:[[:space:]]*\([^/].*\)$|FLAG FILENAME:      $CFGDIR/\1|" \
+    "$CFGDIR/$CALCBASE" > "$WORKDIR/bench/$CALCBASE"
 rm -rf "$OUTDIR"    # 幂等重跑
 mkdir -p "$OUTDIR"
 

@@ -19,7 +19,8 @@ h_sources = \
 	architecture.h \
 	fraction.h \
 	mpifxcorr.h \
-	difxmonitor.h
+	difxmonitor.h \
+	fxcorrpath.h
 
 internal_h_sources = \
 	pcal_impl.h
@@ -37,7 +38,8 @@ cpp_sources = \
 	datamuxer.cpp \
 	alert.cpp \
 	switchedpower.cpp \
-	difxmonitor.cpp
+	difxmonitor.cpp \
+	fxcorrpath.cpp
 
 # installed under $(includedir)/fxcorrcommon to avoid clashing with the
 # same-named headers mpifxcorr installs into $(includedir) itself

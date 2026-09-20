@@ -17,7 +17,7 @@ static const string LINEAR_POL_NAMES[4] = {"XX", "YY", "XY", "YX"};
 // autocorr.bin header layout (FEngineWriter::writeAutocorrHeader):
 // "FXCAC\0" + u32 version + u32 nsub + u32 nbands + per band (u32 bandindex, u32 nchan)
 
-Integrator::Integrator(Configuration *conf, int cindex, const string &difxdir, int eseconds,
+Integrator::Integrator(Configuration *conf, int cindex, int eseconds,
 	int scan, int startsec, int startns, DifxMonitor *monitor) :
 	config(conf), configindex(cindex), vis_(0), todiskbuffer_(0), monitor_(monitor)
 {

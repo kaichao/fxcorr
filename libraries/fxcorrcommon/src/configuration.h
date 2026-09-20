@@ -1131,6 +1131,9 @@ private:
   int numconfigs, numrules, baselinetablelength, telescopetablelength, datastreamtablelength, freqtablelength;
   long long estimatedbytes;
   string calcfilename, modelfilename, coreconffilename, outputfilename, jobname, obscode;
+  // directory holding the .input, i.e. the whole config set (.vex/.v2d/.calc/.im);
+  // relative CALC/IM/FLAG FILENAMEs resolve against it (V5 P5 rule 2)
+  string configdir;
   mutable string infilekey, infileval;
   mutable bool infilekeyunconsumed;
   int * numprocessthreads;

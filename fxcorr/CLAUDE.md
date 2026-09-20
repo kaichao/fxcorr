@@ -13,7 +13,7 @@
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。**已冻结**（2026-09-18）。
 - **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。**已冻结**（2026-09-19）。
 - **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）。**已冻结**（2026-09-19）；末节的后续方向由 v5-plan.md 接手。
-- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效，三件均完成），另有验收与回归总表、未完成清单。后半是 2026-09-19/20 新立的三项：**P4 单镜像**（已完成，验收 5/5）、**P5 目录路径环境变量化 + `sim-common/` 改名**、**P6 fxcorr-sim 造数能力**（两项待实施）。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
+- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效，三件均完成），另有验收与回归总表、未完成清单。后半是 2026-09-19/20 新立的三项：**P4 单镜像**（已完成，验收 5/5）、**P5 目录路径环境变量化 + `sim-common/` 改名**（2026-09-20 已实施，验收 11/11）、**P6 fxcorr-sim 造数能力**（待实施）。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、datasim 特性差距、P0-P4 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
@@ -67,7 +67,11 @@
 |---|---|---|
 | `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + batch.json），支持多 batch | 已实现 |
 | `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供 cmp_swin.py 对拍 | 已实现 |
-| `run_batch.sh` | fxcorr 流水线：前置校验对齐 → DATA TABLE 软链重指本 batch → 逐站 fxcorr-f → fxcorr-x → 更新 status/meta/batches.index | 已实现 |
+| `run_batch.sh` | fxcorr 流水线：前置校验对齐 → 根记录与实验级一致性检查 → DATA TABLE 软链重指本 batch → 逐站 fxcorr-f → fxcorr-x → 更新 status/meta/batches.index | 已实现 |
+| `roots.sh` | **目录根解析**（V5 P5）：五个根的三档回退、`mkdir -p` 各根、写 `meta/roots/<batch_id>.json`、实验级根一致性检查。被下面四个脚本 source；与库内 `FxcorrPath` 同规则 | 已实现 |
+| `wrap_vex2difx.sh` | vex2difx 封装：在 config/ 内调用（它的 vex= 与产物都相对 cwd）+ 把产物里的绝对路径规范化回相对 | 已实现 |
+| `wrap_difxcalc.sh` | difxcalc 封装：同上（规范化 `.calc` 的 IM/FLAG FILENAME） | 已实现 |
+| `wrap_difx2fits.sh` | difx2fits 封装：把 VIS 根下的 `.difx` 软链到 config/ 旁再调用，产物落 `FXCORR_PRODUCT_ROOT`。**实验级操作**，由编排层在该实验全部 batch 跑完后调一次 | 已实现 |
 
 `watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度 V2 由 scalebox 承担，容器化同列 V2（scalebox Module 需容器镜像）。
 
@@ -79,13 +83,13 @@
 ./fxcorr/run_batch.sh 60512_45000         # fxcorr 流水线（batch.json 须已由 make_testdata.sh 写好）
 ```
 
-**容器模式**（V2 建成；**V5 P4 起为单镜像，验收 5/5 已过**）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd) fxcorr/fxcorr:latest` 前缀——链路上六个命令同在 `fxcorr/fxcorr`（原先按工具→镜像映射，P4 合并后映射取消），FXSIM_NOISE/SEED 透传；默认 host = 宿主直跑（V1 行为不变）。run_batch.sh 调用时 cwd 须在 workdir（软链相对解析）。镜像定义与构建见 `docker/README.md`。
+**容器模式**（V2 建成；**V5 P4 起为单镜像，验收 5/5 已过**）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd) fxcorr/fxcorr:latest` 前缀——链路上六个命令同在 `fxcorr/fxcorr`（原先按工具→镜像映射，P4 合并后映射取消），FXSIM_NOISE/SEED 与**五个根**透传（Q12：容器内程序仍要知道用哪个根；多根挂载由外部编排平台按"各根按宿主同路径可见"保证，脚本不实现）。P5 起四个编排脚本（`roots.sh` + 三个 `wrap_*.sh`）也打进镜像，可在容器内直接调用。默认 host = 宿主直跑。镜像定义与构建见 `docker/README.md`。
 
 make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出；`--nodes` 与 container 模式互斥（`-p` 不互斥）。容器模式下 station 任务由 `stationcmd()` 输出 `docker run … fxcorr/fxcorr fxcorr-sim` 前缀（P4 验收时补，原先只有 common 走了容器）；详见 v1-plan 2.4 实施记录。
 
 run_bench.sh 实现要点（实测）：batch 定位走 DATA TABLE 软链 target 的 batch_id（fallback batches/ 最新 json）；EXECUTE TIME 截断 = `floor(initsec + (N−1)×intTime) + 1`（mpifxcorr 停写判定按积分起点、整秒字段，N = batch 时长/intTime 不整除即报错）；OUTPUT FILENAME sed 指 `bench/<exp>.difx`；mpirun 在 workdir 内跑（DATA TABLE 相对路径）、root 加 --allow-run-as-root、`LD_LIBRARY_PATH=$DIFXROOT/lib`；mpifxcorr 拒绝覆盖已有 SWIN（脚本先 rm -rf）。batch 时长 < 1s 无整秒解（mpifxcorr 多写 weight-0 积分），默认配置 2.097s 无碍。
 
-run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 subint 边界 1µs 容差、时长 intTime 整数倍、intTime 为 subint 整数倍，语义同 fxcorr-f/x 程序内校验）；**DATA TABLE 软链每次重指本 batch 的 VDIF**（make_testdata.sh 多 batch 时软链停在最后 batch，跑其他 batch 必须重做；raw 数据不存在即报错）；站列表取 batch.json stations（缺失时从 .input DATASTREAM 解析）；status 流转 running→done/failed 写回 batch.json（json.dump 保字段序）；done 时追加 `meta/batches.index` 一行 `<batch_id>,done,<UTC 时间戳>`。
+run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 subint 边界 1µs 容差、时长 intTime 整数倍、intTime 为 subint 整数倍，语义同 fxcorr-f/x 程序内校验）；**DATA TABLE 软链每次重指本 batch 的 VDIF**（make_testdata.sh 多 batch 时软链停在最后 batch，跑其他 batch 必须重做；raw 数据不存在即报错）；站列表取 batch.json stations（缺失时从 .input DATASTREAM 解析）；status 流转 running→done/failed 写回 batch.json（json.dump 保字段序）；done 时追加 `meta/batches.index` 一行 `<batch_id>,done,<UTC 时间戳>`。**V5 P5 加两道根相关**：开跑前 `fxcorr_check_roots`（同实验 `vis`/`product` 与已有 batch 记录不一致即报错退出）与 `fxcorr_write_roots`（写 `meta/roots/<batch_id>.json`，程序启动时会比对自己用到的根）；`mkdir -p` 五个根（Q19：根由编排层建，程序遇根不存在只报错）。
 
 ## test/ 测试资产
 
@@ -111,6 +115,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `sta/sta_ctrl.c` / `sta/gen_test_sta.py` / `sta/cmp_sta.py` / `sta/README.md` | P9 STA/kurtosis 检验资产（sta_ctrl：difxmessage 控制消息发送 + BINARY_STA 组播抓包；CHANS TO AVG 4 变体覆盖 STA 频域平均分支；原始 record 流逐位对拍）+ 检验步骤/验收判据/验证记录（含 P1 cf32 stride bug 修复与基准控制消息时序坑） |
 | `p10/gen_test_mk5b.py` / `gen_test_lba.py` / `gen_test_ivdif.py` / `gen_test_p10.py` / `verify_lba.py` / `p10/README.md` | P10 输入格式检验资产（Mk5B 10016 帧生成器、LBA 16 字节 ASCII 头+2bit 低位先生成器、fanout 多线程 VDIF 生成器、.input 变体、LBA 自洽验证脚本）+ 检验步骤/验收判据/验证记录（含 LBA 位序、VDIF word3 布局、EDV4 三坑等 bug 记录） |
 | `p11/gen_test_p11.py` / `p11/README.md` | P11 reader 语义检验资产（TEST2 对跖点 → 几何 delay 11.2ms 的 test-delay.vex/v2d 生成器，触发 delay 重对齐跳块语义）+ 检验步骤/验收判据/验证记录（含 vex2difx 从 cwd 找 vex 的坑） |
+| `test/roots/run_consistency.sh` | **根解析一致性判据**（V5 P5 遗留第 4 条）：三档回退下把 `roots.sh`（脚本侧）与 `FxcorrPath`（程序侧）的五个根逐项比对 + 自检报红。**规则再变时先扩它**——两处实现没有编译器兜底，它只覆盖"根的值"，不覆盖"哪类路径归哪个根" |
 | `gaps/README.md` | 缺口/filler 处理检验资产（fxcorr-sim 的 `FXSIM_GAPS` 造记录中断：缺口与 filler 两种形式在**同一位置**、**帧号范围相同**，与 t25362 的真实中断同构）+ 检验步骤/验收判据/验证记录（含 **filler 必须推进帧号**的语义坑、make_testdata.sh 要求 workdir 已存在的坑）。七个脚本：`run_boundary.sh`（缺口跨 subint 边界，B5 判据）、`run_filler.sh`（filler ≫ 缺口的过渡区，判据 = 两种形式逐 subint 无效块一致）、`run_window.sh`（**窗口长度**缺口：filler 段之后还有数据时，段后数据落在读取窗口之外，判据 = `reader/check_reader.py` 的 E4 = 0；2026-09-19 加，修复前红 69 帧）、`run_startoffset.sh`（**文件起点晚于 batch 起点**（A 类）：生成器 `FXSIM_STARTOFFSET` + check_reader 的 E5 绝对时间锚，含"判据必须能报红"的自检；2026-09-19 加）、`run_mixed.sh`（**缺口与 filler 同段并存、多组相邻**：照 t25362 的实测段序造两个场景——两组相邻（组间只隔 2 帧数据、同窗口内两次修正叠加）与长 filler 跨 subint，各配纯缺口等价形式；*M2 抓出并修掉了 B7*，见 `reader-model.md` 4.10；2026-09-19 加）、`run_pattern.sh`（**占位帧的字节形态**：同一段时间造三次，只换占位帧为全零头 / 整帧 `FILL_PATTERN` / 帧首 `FILL_PATTERN`，判据 = 三者 `GAPCHECK summary` 逐字段相同 + 逐 subint 无效块一致 + E1–E4 全绿；定案"按整帧认"的实测依据是上游对三者 SWIN 逐字节相同，见 `reader-model.md` 4.11；2026-09-19 加）、`run_invalid.sh`（**invalid 位帧**：帧在位、数据不可用——用后处理把一段帧的 word0 最高位置 1，判据 = 读取位置与对照逐行相同 + 无效块增加 + 真值零 finding；定案"占槽 + 数据标无效"，见 `reader-model.md` 4.12；2026-09-19 加）、`scan_filler.py` / `sp_valid.py` / `dump_weight.py`（帧头扫描 / .sp 无效块 / SWIN 权重对比三个诊断工具）。**七个 `run_*.sh` 的验收判据 2026-09-19 起全部收敛到 `reader/check_reader.py`**（A3：绝对判据——文件真值而非"与另一种形式比"，且各带"判据能报红"的自检；旧相对判据保留作交叉核对） |
 | `reader/README.md` | **reader 对账的独立真值层**（2026-09-19 加）：`file_truth.py`（扫 VDIF → 台账 JSON：数据段帧号↔文件偏移、filler 段、缺口；缺口与 filler 在真值里统一为"槽未被占用"）+ `check_reader.py`（五条断言对账 fxcorr-f 的 `READPOS`/`GAPCHECK holes`：E1 定位 / E2 数据 / E3 落点（区分**多标**与**漏标**）/ E4 覆盖（**净损失**：文件里有、却从未进入任何读取窗口的帧）/ E5 锚点（读窗口起点的**绝对**时间 vs batch 起点 + 序号×跨度——E1 只看相邻差、E2/E3 是自洽性判据，`anchorbytes` 整体偏时都抓不到，A 类靠 E5 现形；基准不同源、READPOS 不完整、文件含中断时跳过）。判据是绝对的——文件真值而非"与另一种形式比"；`gaps/` 六个脚本都已接入本工具（2026-09-19，A3），`cmp_swin.py` 在病态数据上的失效背景见其 README 与 `reader-model.md` 4.6/4.7。目录内另有 `test_timeline.cpp` 与 `test_corrections.cpp`——**分层重构两层纯函数的单测**（`applications/fxcorr-f/src/frametimeline.h` 的帧时间轴层、`corrections.h` 的修正量层），零依赖直接 `g++ -I applications/fxcorr-f/src` 编译，61 + 48 项断言（C1/C2，2026-09-19；timeline 那 61 项含 FILL_PATTERN 两种位置的识别与一条假阳性检验） |
 | `reader/run_t25362.sh` | **真实数据回归**（阶段 D 固化，2026-09-19）：本地驱动 `ssh difx` 跑 t25362 的 BA ds_2（有 filler）与 ds_0（对照），判据 = `GAPCHECK summary` 逐字段对基线 + `check_reader.py` 零 finding；`--no-run` 用现成日志重复对账（自检手段）。用法与自检记录见 `reader/README.md` |

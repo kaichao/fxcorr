@@ -7,7 +7,13 @@
 ## 通用约定
 
 - 三工具均**无 MPI、串行**，通过目录接口衔接。
-- `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认当前目录（`.`）；所有相对路径（batches、.input、raw、fengine、vis）均相对 `workdir` 解释。
+- **目录根定位（V5 P5）**：五个可重定向的根 `FXCORR_{RAW,SIM_COMMON,FENGINE,VIS,PRODUCT}_ROOT`，
+  三档回退——该根已设置就用它，否则用 `<workdir>/<规范目录名>`；`workdir` 按
+  "位置参数 > `FXCORR_WORKDIR` > 默认 `.`"解析并绝对化。`config/` `batches/` `meta/`
+  `beam/` **没有独立根**，恒在 workdir 下。**规则权威见 `data-spec.md` 5.2.1**（各类相对
+  路径的基准、只对相对路径拼根、`OUTPUT FILENAME` 的写法、根记录与一致性检查）。
+  `FXCORR_PRINT_ROOTS=1` 可让工具打印各自解析出的根与来源。
+- 只对**相对**路径拼根，**绝对路径一律原样**——真实观测的 `FILE` 行就是绝对路径，不受根变量影响。
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
 - 任务粒度：f 任务 = (batch_id, station, ds_index)（fxcorr-f 的 station/ds_index 参数即该两维；多 datastream 站每记录线程一个 f 任务）；x 任务 = (batch_id) 全站全基线（fxcorr-x 无站参数，站列表由 .input 枚举）。并行模型见 data-spec 第 12 节。
 - 错误行为：参数不足或校验失败时打印原因到 stderr 并以非 0 退出；成功退出 0。
@@ -189,15 +195,22 @@ fxcorr-x 60512_45000
 与 `fxcorr/CLAUDE.md` 测试流程一致（测试机 /root/fxcortest/）：
 
 ```bash
-vex2difx config/test.v2d
-difxcalc config/test.calc                     # 出 .input / .calc / .im
-# 写 batches/<batch_id>.json（全字段一次写全，start_mjd 用精确 repr）
-fxcorr-sim <batch_id> T1                      # 逐站生成 raw 数据
-ln -sf raw/T1/T1_<batch_id>.vdif <DATA TABLE 文件名>
-fxcorr-f <batch_id> T1                        # 逐站
-mkdir -p vis/<experiment>.difx    # OUTPUT FILENAME 所在目录（自动创建亦可）
-fxcorr-x <batch_id>
-difx2fits <experiment>.input                 # 后处理按需
+./fxcorr/wrap_vex2difx.sh . test.v2d     # 前处理 1：出 .input/.calc（含路径规范化）
+./fxcorr/wrap_difxcalc.sh . test.calc    # 前处理 2：出 .im
+./fxcorr/make_testdata.sh               # 造数 + 写 batch.json + 建 DATA TABLE 软链
+./fxcorr/run_batch.sh <batch_id>        # 逐站 f + 一次 x
+./fxcorr/wrap_difx2fits.sh . test        # 后处理：SWIN -> FITS（落 FXCORR_PRODUCT_ROOT）
 ```
 
-以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_bench.sh` / `run_batch.sh`，规格见 v1-plan 2.4）。
+手工等价的调用（cwd 取 workdir）：
+
+```bash
+fxcorr-sim <batch_id> T1                      # 逐站生成 raw 数据（落 FXCORR_RAW_ROOT）
+ln -sf $FXCORR_RAW_ROOT/T1/T1_<batch_id>.vdif  $FXCORR_RAW_ROOT/<DATA TABLE 文件名>
+fxcorr-f <batch_id> T1                        # 逐站
+fxcorr-x <batch_id>                           # SWIN 落 $FXCORR_VIS_ROOT/<OUTPUT FILENAME>
+```
+
+以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_bench.sh` / `run_batch.sh`，
+规格见 v1-plan 2.4；**前处理与后处理的原 difx 程序请走 `wrap_*.sh` 封装**——它们不认识根
+变量、且按 cwd 解析配置里的相对路径，封装负责那层转换）。

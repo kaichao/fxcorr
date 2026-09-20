@@ -217,10 +217,10 @@ static bool writeBlockFile(const string &path, const float *data, long long nflo
 }
 
 bool generate(const Grid &grid, long long totalslices, unsigned long seed,
-              const string &outdir, const string &batchid, double startmjd,
+              const string &simcommonroot, const string &batchid, double startmjd,
               const LineSpec &line)
 {
-	string dir = outdir + "/common/" + batchid;
+	string dir = simcommonroot + "/" + batchid;
 	string mkdircommand = "mkdir -p " + dir;
 	if(system(mkdircommand.c_str()) != 0)
 	{

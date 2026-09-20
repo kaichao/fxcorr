@@ -5,7 +5,8 @@
 > 的触发条件未变，仍在等。
 > **P4（容器镜像合并）、P5（目录路径环境变量化）、P6（fxcorr-sim 造数能力）不来自
 > v4 的后续方向**，是 2026-09-19 / 09-20 新立的三项：P4 已完成（2026-09-20，验收 5/5），
-> P5、P6 方案已定、待实施。
+> **P5 已于 2026-09-20 实施**（三轮复核后：根收敛到五个 + "环境变量三档回退、默认全共享"，
+> 路径策略下沉到 fxcorrcommon；验收 9/10，实施记录与遗留问题见该节）；**P6 方案已定、待实施**。
 > **定案、证据与验收写在这里，根因与判据写在 `reader-model.md`**（4.10 B7、4.11 FILL_PATTERN、
 > 4.12 invalid 位）——两处分工与 v1–v4 一致：本文件只承载路线与验收。
 
@@ -21,7 +22,7 @@
 | 3 | invalid 位定案 | ✅ 完成（P3：定案"占槽 + 数据标无效"并实施） |
 | 4 | **P1 的副产品**：B7——filler 段长于一个 subint 时整段漏读 | ✅ 已修（P1，`reader-model.md` 4.10） |
 | 5 | **六个容器镜像合并为一个**（两段式 Dockerfile，装齐串行链路全部命令） | ✅ 完成（P4，2026-09-20，验收 5/5） |
-| 6 | **各目录路径环境变量化** + `common/` 改名 `sim-common/` | 计划已定（P5），待实施 |
+| 6 | **各目录路径环境变量化** + `common/` 改名 `sim-common/` | ✅ 完成（P5，2026-09-20，验收 9/10） |
 | 7 | **fxcorr-sim 造数能力**：病态数据处方 + 压力测试数据轻量模式 | 计划已定（P6），待实施 |
 
 前四条的共同前提是 v4 阶段 D 已经就位的三层判据（单测秒级、合成几分钟、真机一次 ssh），
@@ -246,7 +247,7 @@ v2 验收第 1 条"六镜像构建成功"由单镜像构建取代；镜像名由
 `debian:13` / `debian:13-slim` / `fxcorr/fxcorr:{latest,2.9.1}`；构建缓存 11.05GB 保留未清
 （清了下次重建就失去缓存、回到全量编译）。验收现场留在 `/root/fxcortest/p4v5/`。
 
-## P5：目录路径环境变量化 + `sim-common/` 改名（2026-09-20 定，待实施）
+## P5：目录路径环境变量化 + `sim-common/` 改名（2026-09-20 定，同日三轮复核修订，**已实施**）
 
 **依据**：现状是 **workdir 单根硬拼**——`fxcorr-f/src/main.cpp:261/290/340/352/412`、
 `fxcorr-x/src/main.cpp:109/140/151/219/360`、`fxcorr-x/src/beamengine.cpp:90`、
@@ -254,34 +255,115 @@ v2 验收第 1 条"六镜像构建成功"由单镜像构建取代；镜像名由
 数据量大，不同类型的数据可能落在**全局存储或不同本地存储**（不同挂载点、不同容量策略），
 目录必须能独立重定向。
 
-**定案：`FXCORR_WORKDIR` + 九个 `_ROOT`**（`FXCORR_` 前缀，与 `RUN_MODE`/`LOGLEVEL` 一致）
+**定案：`FXCORR_WORKDIR` + 五个 `_ROOT`**（`FXCORR_` 前缀，与 `RUN_MODE`/`LOGLEVEL` 一致）
 
-| 变量 | 默认 | 内容 |
-|---|---|---|
-| `FXCORR_WORKDIR` | **当前目录的绝对路径**（未设置时取 `realpath(".")`） | 项目根；位置参数仍优先于它 |
-| `FXCORR_CONFIG_ROOT` | `$FXCORR_WORKDIR/config` | 配置与模型（`.input`/`.vex`/`.v2d`/`.im`） |
-| `FXCORR_BATCHES_ROOT` | `$FXCORR_WORKDIR/batches` | 批量元数据（batch.json，D9） |
-| `FXCORR_RAW_ROOT` | `$FXCORR_WORKDIR/raw` | 原始基带 VDIF |
-| `FXCORR_SIM_COMMON_ROOT` | `$FXCORR_WORKDIR/sim-common` | 仿真公共信号（D15，原 `common/`） |
-| `FXCORR_FENGINE_ROOT` | `$FXCORR_WORKDIR/fengine` | f 输出（f 写、x 读） |
-| `FXCORR_VIS_ROOT` | `$FXCORR_WORKDIR/vis` | SWIN 可见度 |
-| `FXCORR_BEAM_ROOT` | `$FXCORR_WORKDIR/beam` | 相位阵波束（P8） |
-| `FXCORR_PRODUCT_ROOT` | `$FXCORR_WORKDIR/product` | 最终产品；**fxcorr 程序不写它**，由调用 difx2fits 的脚本设置（Q7） |
-| `FXCORR_META_ROOT` | `$FXCORR_WORKDIR/meta` | 索引、difxmsg、roots 记录 |
+| 变量 | 常规位置（**设置该根时**的取值） | 内容 | 典型用途 |
+|---|---|---|---|
+| `FXCORR_WORKDIR` | **当前目录的绝对路径**（未设置时取 `realpath(".")`） | 项目根；位置参数仍优先于它 | 全部目录的默认基准 |
+| `FXCORR_RAW_ROOT` | `$FXCORR_WORKDIR/raw` | 原始基带 VDIF | 指向本地大盘 |
+| `FXCORR_SIM_COMMON_ROOT` | `$FXCORR_WORKDIR/sim-common` | 仿真公共信号（D15，原 `common/`） | 另挂一块大容量**共享**盘 |
+| `FXCORR_FENGINE_ROOT` | `$FXCORR_WORKDIR/fengine` | f 输出（f 写、x 读） | 指向计算节点本地盘 |
+| `FXCORR_VIS_ROOT` | `$FXCORR_WORKDIR/vis` | SWIN 可见度（接管 `OUTPUT FILENAME`，Q10） | 与下游处理 / 独立存储对接 |
+| `FXCORR_PRODUCT_ROOT` | `$FXCORR_WORKDIR/product` | 最终科学产品（Q16） | 本地生成 → 迁移到全局 |
 
-**三条解析规则**
+**没有独立根的四类目录**（Q17）：`config/`、`batches/`、`meta/`、`beam/`——恒在
+`$FXCORR_WORKDIR/` 下。四者量小（KB~MB）、或必须全局一致可见、或本就按 batch 组织在 workdir 内，
+独立重定向只有坏处没有用途。
+
+**Q9 定案（2026-09-20 两轮复核）：按"环境变量是否设置"三档回退，默认全共享。**
+
+**回退链**（纯值判断，不探测文件系统）：
+
+1. `FXCORR_<X>_ROOT` 已设置 → 该类路径按它的值解析；
+2. 否则 `FXCORR_WORKDIR` 已设置 → 按规范目录名解析为 `$FXCORR_WORKDIR/<name>`
+   （`config/` 与 `meta/` 没有独立根，恒为这一档）；
+3. 都没有 → 现状（位置参数给的 workdir，或 `workdir = "."`）。
+
+**默认全共享**（复核第二轮的定案）：只设 `FXCORR_WORKDIR` 时所有目录都在它下面——即**所有节点
+共享同一份全局存储**。需要本地化时才显式把对应 `_ROOT` 指向本地盘。`data-spec.md` 第 2 节那张
+存储归属表要相应改口径：从"固定归属"改为"**默认全共享；本地化通过 `_ROOT` 启用**"。
+
+**哪些目录支持独立根**，按"数据量 + 一致性"两条判：
+
+| 目录 | 量级 | 独立根 | 判据 |
+|---|---|---|---|
+| `config/` `batches/` `meta/` | KB~MB | ❌ 已删（Q17） | 量小、必须全局一致可见 |
+| `beam/` | MB | ❌ 已删（Q17） | 按 batch 组织在 workdir 内即可，位置稳定性由 workdir 保证 |
+| `vis/` | MB~GB | ✅ | SWIN 跨 batch 追加同一组文件、多节点各写各的会分裂；留显式覆盖是为了把它放到独立存储与下游处理对接 |
+| `raw/` | TB | ✅ | 本地记录，各站数据在各记录节点 |
+| `fengine/` | 大 | ✅ | 每节点只持有自己写的站 |
+| `sim-common/` | **最大** | ✅ | 量大，可能要另挂一块盘 |
+| `product/` | 大 | ✅ | 可本地生成，再由编排层迁移到全局（Q16） |
+
+**`FXCORR_SIM_COMMON_ROOT` 的方向性约束**：它**需要**重定向（≥16× 单站 2bit，全部目录里最大，
+可能要另挂一块盘），但重定向目标**必须是全站可见的共享目录**——"全站读同一份公共信号"正是
+跨站相干的来源（`fxcorr-sim-arch.md` 的一致性规则），各节点各存一份即失相干。**这一点代码
+强制不了**（程序只看到一个路径字符串），只能靠文档约定 + 编排层在部署时校验。实现与文档都不要
+把它与 RAW / FENGINE 并列成"本地存储"类。
+
+**"常规位置"与"未设置时的行为"是两件事**——上面那一列是**设置该根时**的取值。这些根按现状分
+两类：**程序拼接类**（BATCHES、SIM_COMMON、FENGINE、BEAM 的目录本身）在现状里本就是
+`workdir + "/<name>"` 拼接——对它们，"未设置"与"设为常规位置"**等价**，设置只是换个目录；
+**cwd 类**（DATA TABLE 的 `FILE` 行、`OUTPUT FILENAME`、`CALC FILENAME`）在现状里按 cwd 解释，
+只有按下面规则 2 的基准（或显式设根）才接管。行为改变只发生在后者。
+
+原 Q9（"根是开关、只在显式设置时才接管"）只覆盖 cwd 类，已被上面这条替换。
+
+**核实证据（2026-09-20，代码级，Q9–Q11 的事实基础）**
+
+1. **SWIN 落点 = `.input` 的 `OUTPUT FILENAME`；`difx_dir` 是死参数。**
+   `applications/fxcorr-x/src/integrate.cpp:20` 的 `difxdir` 形参在构造体内一次未被引用，
+   该处注释自陈 "difx_dir in batch.json is metadata only"；落盘在
+   `libraries/fxcorrcommon/src/visibility.cpp:1071/1083`——
+   `sprintf("%s/DIFX_%05d_%06d.s%04d.b%04d", config->getOutputFilename(), ...)`，
+   原样当目录字符串用，无 basename/dirname、无 workdir 前缀。
+   实测（P4 现场 `/root/fxcortest/p4v5/`）：SWIN 落在 `config/test.difx/`，而 batch.json 写的是
+   `vis/<batch_id>.difx`——`vis/` 目录**根本不存在**。
+2. **`Configuration` 的一切路径相对进程 cwd。** 唯一打开入口是
+   `libraries/fxcorrcommon/src/configuration.cpp:110` 的裸 `ifstream`：`.input` 的 `CALC FILENAME`
+   （`:1200` → `:267` → `model.cpp:26`）、`.calc` 里的 `IM FILENAME`（`model.cpp:604-609`）、
+   DATA TABLE 的 `FILE` 行（`configuration.cpp:1887` 原样存 → `fxcorr-f/src/datareader.cpp:245`
+   裸打开）全部如此；fxcorr **不**走 `libraries/difxio` 的 `locateAltFilename`（"相对 .input
+   所在目录"回退，仅 `--localdir` 开启时生效）。
+3. **`run_batch.sh:153` 的 `os.path.join(workdir, OUTPUT FILENAME)` 不是第二条真相**——
+   第二参数为绝对路径时 `os.path.join` 丢弃 `workdir`，语义与 C++ 侧恰好相同；两者只在
+   cwd == workdir 时吻合，这正是 `fxcorr/CLAUDE.md:82`「run_batch.sh 调用时 cwd 须在 workdir」的由来。
+4. **两类数据的路径形态正好相反**——这是"只对相对路径拼根"（规则 2）的依据：
+
+   | 路径 | 合成数据（make_testdata.sh 产物） | 真实观测（`sites/MPIfR/oneoff/difx2difx_testset/ma008_1.input`） |
+   |---|---|---|
+   | `FILE d/d:` | `TEST1.vdif` **裸名** | `/data/ma008/eb_module/...` **绝对** |
+   | `CALC FILENAME` / `OUTPUT FILENAME` | **绝对**（vex2difx 在 config/ 内跑，按 cwd 绝对化） | `ma008_1.calc` / `ma008_1.difx` **裸名** |
+   | `IM FILENAME` / `FLAG FILENAME`（写在 .calc 里） | 绝对 | 未知（仓库内无样本） |
+
+   一律拼根有两个后果：① 验收 2 在合成资产上**测不到 VIS_ROOT**（`OUTPUT FILENAME` 已是绝对
+   路径，指到哪都不参与），判据假绿；② 真实观测的 SWIN 落点被无声改变。只对相对路径拼根，
+   两类数据各取所需。
+5. **配置加载期即可接管全部路径**（第二轮复核，纠正前一版的说法）：`.input` 的 `CALC FILENAME`、
+   `.calc` 的 `IM` / `FLAG FILENAME` 虽在 `Configuration` / `Model` 构造期就被打开、
+   `main.cpp` 拿不到中间字符串，但**打开动作就发生在 fxcorrcommon 里**
+   （`configuration.cpp:110` 的 `mpiGetFileContent`）——在该处读环境变量并拼根即可，不必在
+   `main.cpp` 层拦截。fxcorrcommon 是 V1 新建的库、mpifxcorr 用自己的源码副本，改它不影响
+   mpifxcorr。**这是 P5 在库层的唯一改动点**（Q11）。
+
+**三条解析规则**（第二、三条按第二轮复核改写）
 
 1. **优先级**：命令行位置参数 > 环境变量 > 默认值。`FXCORR_WORKDIR` 未设置时取当前目录的
    绝对路径（不是字面 `.`），使派生出的各根一律是绝对路径。
-2. **类别按用途定，不按路径内容定**（P5 讨论 Q1）：`FILE d/d:` 行 → RAW_ROOT；batch.json 的
-   `config_file` → CONFIG_ROOT、`difx_dir` → VIS_ROOT；f 写/x 读的 `.sp` 目录 → FENGINE_ROOT；
-   `fxcorr-sim` 的公共信号 → SIM_COMMON_ROOT——**一律按代码在此处"正在处理哪类数据"决定用哪个根**。
+2. **只对相对路径拼根，绝对路径一律原样**（真实观测的 `FILE` 行就是绝对路径，见
+   `sites/MPIfR/oneoff/difx2difx_testset/ma008_1.input:1715`）。三类相对路径的基准各自独立：
+
+   | 路径 | 基准 |
+   |---|---|
+   | DATA TABLE 的 `FILE d/d:` | `FXCORR_RAW_ROOT` |
+   | `.input` 的 `CALC FILENAME`；`.calc` 里的 `IM` / `FLAG FILENAME` | **`.input` 所在目录**——这一组文件是一套，整目录搬走即可用，比"相对 workdir"自然（不必写 `config/test.calc`） |
+   | `.input` 的 `OUTPUT FILENAME` | `FXCORR_VIS_ROOT`（未设置则 `$FXCORR_WORKDIR/vis`） |
+
+3. **类别按用途定，不按路径内容定**（Q1）：一律按代码在此处"正在处理哪类数据"决定用哪个根。
    实测依据：`fxcorr/test/test.v2d` 的 `file = TEST1.vdif` 经 vex2difx 后在 `.input` 里就是
    **裸文件名**（无 `raw/` 这一级），路径字符串本身不携带类别信息。
-3. **绝对路径直接用、不拼根**（真实观测的 `FILE` 行就是绝对路径，见
-   `sites/MPIfR/oneoff/difx2difx_testset/ma008_1.input:1715`）；只有相对路径才前缀对应根。
-   batch.json 里 `config_file` / `difx_dir` 的相对基准同样从 workdir 改为各自根（Q3），
-   与程序侧同规则。
+   （原表里的"`difx_dir` → VIS_ROOT"一项按 Q10 撤销；batch.json 的 `config_file` 按 Q3
+   相对 `$FXCORR_WORKDIR` 解析。）
 
 **Q2 定案：软链保留，落点搬到 RAW_ROOT。** 合成数据的 `FILE` 行是裸名 `TEST1.vdif`，与真实文件
 `raw/<st>/<st>_<batch_id>.vdif` **不同名**，这个映射只能由软链承担（`run_batch.sh:152-158`，
@@ -293,10 +375,100 @@ v2 验收第 1 条"六镜像构建成功"由单镜像构建取代；镜像名由
 
 **Q4 定案：编排层落记录 + 程序启动比对。** f 写 fengine 与 x 读 fengine、sim common 写
 sim-common 与 station 读，是跨进程交接点，两边根不一致就是静默读空。
-`run_batch.sh` 开跑前把生效的根写 `$FXCORR_META_ROOT/roots/<batch_id>.json`；三个程序启动时
+`run_batch.sh` 开跑前把生效的根写 `$FXCORR_WORKDIR/meta/roots/<batch_id>.json`（meta 无独立根，
+Q17）；三个程序启动时
 若该文件存在则与自解析结果比对，**不一致即报错退出**；文件不存在（单工具直跑、测试场景）跳过，
 现有用法不受影响。这是在环境变量不进 batch.json 的前提下，唯一能事后追溯"这批数据用了哪套
 布局"的手段。
+
+**Q10 定案：`difx_dir` 退为记录字段，不再当路径用。** 实测该字段从未被读取（证据 1）。
+`make_testdata.sh` 仍写它，值改为照抄 `.input` 的 `OUTPUT FILENAME` 原样（相对就写相对），
+并加注"实际落点由运行时根 / cwd 决定"；`fxcorr-x/src/integrate.cpp` 那个死参数删掉（或改名
+`swindir` 并注明只作记录）。`FXCORR_VIS_ROOT` 的作用面因此收敛到 `OUTPUT FILENAME` 一处。
+
+**Q11 定案（第二轮复核重写）：路径策略下沉到 fxcorrcommon 的加载层，一处覆盖全部路径。**
+在 `libraries/fxcorrcommon/src/configuration.cpp` 与 `model.cpp` 的打开动作处按规则 2 的基准表
+拼根——`mpiGetFileContent`（`configuration.cpp:110`）是唯一打开入口，改动集中在一处。要点：
+
+- **只拼相对路径**，绝对路径一律原样（规则 2）；
+- 基准三类各自独立：`FILE` 行 → `FXCORR_RAW_ROOT`；`CALC` / `IM` / `FLAG` → `.input` 所在目录；
+  `OUTPUT FILENAME` → `FXCORR_VIS_ROOT`；
+- 这是 fxcorrcommon **首次引入路径策略**（此前它是上游代码的忠实副本），要记进
+  `libraries/fxcorrcommon/CLAUDE.md` 并说明与 mpifxcorr 同名文件的差异；
+- **程序层的 `workdir + "/<name>/..."` 仍然照改**（Q9 回退链）——两者分工：库层管
+  `.input`/`.calc` 内部路径，程序层管规范目录本身。
+
+**这条是 P5 的语义边界，写进 `data-spec.md` 5.2.1。**
+
+**Q12 定案（第二轮复核）：容器挂载不由 P5 负责，交给外部编排平台。**
+`run_in_container` 保持现状的 workdir 挂载，**只把 `-e` 透传从 `FXSIM_*` 扩到五个根**——程序在
+容器内仍需知道用哪个根。多根挂载由 scalebox 按部署实际统一处理，脚本里不实现。文档写一条
+**约定**："容器内各根须按宿主同路径可见"，由平台保证。
+
+**Q13 定案（复核建议 6）：`common/` → `sim-common/` 硬切，不兼容读旧名。** 公共信号可重新生成
+（`fxcorr-sim common` 一次），兼容读旧名会让"目录名"这一契约变成两个。文档写明旧布局需重跑
+公共信号。
+
+**Q14 定案（第二轮复核）：两个脚本都写记录；每个程序只比对"自己真的会用到"的那几个根。**
+
+- **两份都写**：`make_testdata.sh` 与 `run_batch.sh` 各写一次 `meta/roots/<batch_id>.json`。
+  理由是 sim common 写 sim-common、station 读 sim-common 同样跨进程（P5 自己列的交接点），
+  只由 `run_batch.sh` 写会漏掉造数阶段。
+- **只比用到的**：文件里记录 `FXCORR_WORKDIR` 与五个根的值，各程序拿自己会读写的子集去比——
+  fxcorr-f 比 RAW / FENGINE / VIS（后者是因为它往 SWIN 目录写 PCAL 与 SWITCHEDPOWER 文本，
+  见遗留第 12 条）；fxcorr-x 比 FENGINE / VIS；fxcorr-sim common 比 SIM_COMMON；
+  fxcorr-sim station 比 SIM_COMMON / RAW。
+  若全部拿来比，fxcorr-f 会因为"用户改了 `FXCORR_PRODUCT_ROOT`"这种与它无关的差异而报错退出——
+  那是误报。
+
+**Q15 定案（复核建议 9）：`run_bench.sh` 与七个 `gaps/*.sh` 维持默认布局。** 前者受 mpifxcorr 的
+cwd 语义限制（不可改），后者是回归资产（判据只要求改名后全绿）。**代价写进文档**：这些脚本在
+设了根变量的环境下会读到别处——脚本开头对五个根做 unset 或显式报错（实施时二选一，验收 10）。
+
+**Q16 定案（第二轮复核）：新增 `fxcorr/wrap_difx2fits.sh`，把 difx2fits 纳入根体系并入镜像。**
+脚本职责：按规范定位 `$FXCORR_VIS_ROOT` 下的 SWIN → 调 difx2fits → 产物落
+`$FXCORR_PRODUCT_ROOT`。这是"bash 做规范适配层"（Q15 的原则）的又一处应用——difx2fits 不认
+fxcorr 的根变量，由脚本完成转换。
+
+- **`FXCORR_PRODUCT_ROOT` 因此有了真实读者**，不再是空承诺。本地产出 + 迁移到全局的用法：
+  脚本写到本地 product 根，**迁移由编排层负责，P5 不实现迁移逻辑**，只在文档写清。
+- 脚本**打包进容器镜像**（`fxcorr/docker/Dockerfile` 的 COPY 清单加一项，`docker/README.md`
+  的镜像内容表同步）；容器模式下仍用 `docker run … fxcorr/fxcorr wrap_difx2fits.sh` 调用。
+- **它是实验级操作，不是 batch 级**：SWIN 跨 batch 追加、difx2fits 一次读整个 `.difx` 目录，
+  所以**不能放进 `run_batch.sh` 逐 batch 调用**，只能是该实验所有 batch 跑完后单独调一次；
+  触发者是编排层（scalebox），不属 `run_batch.sh` 的职责。
+
+**Q17 定案（第二、三轮复核）：删除四个根——`CONFIG` / `BATCHES` / `META` / `BEAM`。**
+四类目录恒在 `$FXCORR_WORKDIR/` 下：
+
+- `config/`、`batches/`、`meta/`：量小（KB~MB）、必须全局一致可见，独立重定向只有坏处；
+- `beam/`：MB 级、按 batch 组织，位置稳定性由 workdir 保证（第三轮复核时删）。
+
+连带：`meta/roots/`（Q4）、`meta/difxmsg/`（f/x 的状态落盘）、`meta/batches.index`、
+`beam/<batch_id>/beam.bin` 都固定，不再参与根解析。
+
+**Q18 定案：跨 batch 的实验级根要做一致性检查。** `vis/`、`beam/`、`product/` 是**实验级**的
+（SWIN 跨 batch 追加同一组文件），中途改了 `FXCORR_VIS_ROOT`（换 shell、改部署配置）会让同一
+实验的产物分裂在两处，**difx2fits 读不全且没有任何报错**。`meta/roots/<batch_id>.json`（Q4）
+只能事后追溯、不能预防。做法：`run_batch.sh` 开跑前找同实验已有 batch 的 `roots.json`，比对
+这三个实验级根，**不一致即报错退出**；batch 级根（RAW / FENGINE / SIM_COMMON）不参与——
+它们按 batch 组织，换根是合法的。
+
+**Q19 定案：根目录由编排层创建，程序只建自己输出目录的下一级。** `run_batch.sh` /
+`make_testdata.sh` 开跑前 `mkdir -p` 各根；程序遇到根不存在时报明确错误、**不自动创建**——
+程序分不清"根不存在"是配置写错还是首次运行，自动建会把配置错误吞掉。现状的"按需 mkdir"
+只保留在 `fengine/`、`beam/`、`meta/difxmsg/` 这类**已知输出目录的下一级**上。
+
+**Q20 定案：路径值的书写与绝对化规则。** 两条：
+
+- **`.input` 的 `OUTPUT FILENAME` 相对 `FXCORR_VIS_ROOT` 写**——写 `test.difx`，**不要**写
+  `vis/test.difx`，否则拼出来是 `$VIS_ROOT/vis/test.difx`。写进 `data-spec.md` 5.2.1。
+- **环境变量取相对值时一律相对进程 cwd 绝对化**（与 `FXCORR_WORKDIR` 同规则），**不会**相对
+  `FXCORR_WORKDIR` 二次解析——否则 `RAW_ROOT=raw` 会有两种可能的含义。
+
+**Q21 定案：加 `FXCORR_PRINT_ROOTS` 自检开关。** `=1` 时三个程序在启动阶段打印各目录的最终
+解析路径与"落在三档回退的哪一档"。它是 Q18 的检查、roots.json 比对、以及"根到底生效没有"
+这三个场景的共同基础设施，成本极低。属诊断输出，归 `FXCORR_LOGLEVEL` 的 `info` 级。
 
 **`common/` → `sim-common/` 改名**（Q8）：目录改，**子命令仍叫 `fxcorr-sim common`**
 （"用 common 子命令生成 sim-common 目录"）。改名的理由是消歧：现在 `common` 一词三义——
@@ -306,32 +478,109 @@ sim-common 与 station 读，是跨进程交接点，两边根不一致就是静
 
 **`work/` 从规范中删除**：全仓库无任何代码或脚本使用它（只在 `data-spec.md` 第 2 节出现）。
 
-**适用范围**：**只覆盖串行部分**——fxcorr-f/x/sim 三工具与三个编排脚本。`mpifxcorr` 与
-`run_bench.sh` 不适用（其输入路径由上游 `Configuration` 按 cwd 相对解析，环境变量改不了）；
-对拍场景须用默认布局。
+**适用范围**：**只覆盖串行部分**——fxcorr-f / x / sim 三工具与编排脚本（含 Q16 新增的
+`wrap_difx2fits.sh`）。`mpifxcorr` 与 `run_bench.sh` 不适用：前者用**自己那份**源码副本
+（fxcorrcommon 的库层改动传不过去），后者的输入路径由 mpifxcorr 的 `Configuration` 按 cwd 解析。
+
+**原则（Q15，第二轮复核提炼）**：新目录规范**只约束上述三个二进制**；凡调用原 difx 程序
+（vex2difx / difxcalc / difx2fits / mpifxcorr），一律由 **bash 脚本做"当前规范 → 原程序所需
+形式"的转换**——`run_bench.sh` 里 sed 改 `OUTPUT FILENAME` 是现成例子，`wrap_difx2fits.sh`
+（Q16）是第二例。这条要写进 `data-spec.md` 作为总则，否则以后每加一个原程序调用都要重新讨论。
 
 **配套改动**
 
-- **程序侧**：三处 `workdir + "/<name>/..."` 改为"按用途取根"；入口统一把 workdir 绝对化。
-  输出目录沿用现有"按需 mkdir"（`beam`/`meta/difxmsg` 已有先例），输入目录不存在时报明确错误。
+- **库层**（新，Q11）：`libraries/fxcorrcommon/src/configuration.cpp` / `model.cpp` 在
+  `mpiGetFileContent` 处按规则 2 的基准表拼根（只拼相对路径）；记进该库的 CLAUDE.md。
+- **程序侧**：三处 `workdir + "/<name>/..."` 改为"按用途取根"（Q9 三档回退）；入口统一把
+  workdir 绝对化。`integrate.cpp` 的死参数按 Q10 处理。输出目录沿用现有"按需 mkdir"
+  （`beam`/`meta/difxmsg` 已有先例），输入目录不存在时报明确错误。
 - **脚本侧**：`make_testdata.sh` / `run_batch.sh` 实现同一套解析（bash 与 C++ 两处实现必须同规则，
-  规则以 `data-spec.md` 为唯一权威）；软链改绝对目标（Q2）；写 `meta/roots/<batch_id>.json`（Q4）。
-- **容器侧**（接 P4）：`run_in_container` 的 `-e` 透传从 `FXSIM_*` 扩到九个 ROOT；挂载从
-  `-v "$WORKDIR:$WORKDIR"` 扩为按各根**同路径逐个挂载**（Q5）——因为 `.input`/batch.json 里可能
-  是宿主绝对路径，容器内必须按同样路径可见，不能做重定向映射。
-- **文档侧**：`data-spec.md`（第 2 节顶层结构、D 编号表、5.2.1 workdir 语义、5.8、第 10 节、
-  第 12 节）、`fxcorr/CLAUDE.md`、`usage.md` 的环境变量一节。
+  规则以 `data-spec.md` 为唯一权威）；开跑前 `mkdir -p` 各根（Q19，失败即退出）；
+  **跨 batch 的实验级根一致性检查**（Q18）；软链改绝对目标（Q2，**两处硬编码的 `raw/` 路径要
+  同步**）；写 `meta/roots/<batch_id>.json`（Q4、Q14）；`difx_dir` 按生效的 SWIN 目录回填（Q10）；
+  新增 `fxcorr/wrap_difx2fits.sh`（Q16）。
+- **容器侧**（接 P4）：`run_in_container` 的 `-e` 透传从 `FXSIM_*` 扩到五个根；
+  挂载按 Q12 交给平台，脚本不实现（**不做容器内的根可见性防呆**：Q12 的约定由平台保证，
+  容器里报"目录不存在"即宿主的根没挂进来）。`fxcorr/docker/Dockerfile` 的 COPY 清单加
+  `wrap_difx2fits.sh`（Q16），`docker/README.md` 的镜像内容表同步。
+- **文档侧**：`data-spec.md`（第 2 节顶层结构、D 编号表、**存储归属表改口径**（Q9）、
+  5.2.1 workdir 语义 → 改为"根语义" + `OUTPUT FILENAME` 的写法（Q20）、5.8、第 10 节、
+  第 12 节）、`fxcorr/CLAUDE.md`（`common/` → `sim-common/`；`run_batch.sh` 调用时 cwd 须在
+  workdir 一条按 Q2/Q9 改写）、`usage.md` 的环境变量一节（五个根 + 三档回退 + Q21 开关）。
 
 **验收（实施后执行）**
 
 | # | 判据 |
 |---|---|
-| 1 | 默认布局下（只给 `FXCORR_WORKDIR`）产物与当前逐字节相同——回归不破 |
-| 2 | **非默认布局**：把 `FXCORR_RAW_ROOT` / `FXCORR_VIS_ROOT` 指到别处，全链路跑通、产物与默认布局一致（这条是 P5 的核心判据，没有它等于没测） |
-| 3 | 绝对路径的 `FILE` 行（真实观测形态）不受影响，根变量不参与 |
-| 4 | `meta/roots/<batch_id>.json` 落盘内容与各进程实际解析一致；故意把 x 的 FENGINE_ROOT 指错能报错退出 |
-| 5 | `sim-common/` 改名后，`gaps/` 七个脚本与单测 71 + 48 全绿（改名是纯字符串替换，判据沿用现成的） |
-| 6 | 容器模式（接 P4）多根挂载后全链路跑通 |
+| 1 | **零根回归**：不设任何根、只给 `FXCORR_WORKDIR`，产物与当前逐字节相同（Q9 的三档回退：默认路径一字不改） |
+| 2 | **非默认布局**：把 `FXCORR_RAW_ROOT` / `FXCORR_VIS_ROOT` 指到别处，全链路跑通、产物与默认布局逐字节相同；**判据自身要能报红**——先在"不设根"下确认读的是默认位置，否则"指到别处也对"可能只是根没生效（假绿） |
+| 3 | **两类数据各验一次**：合成数据（`FILE` 裸名 → RAW_ROOT 生效）与真实形态（`FILE` 绝对 + `OUTPUT FILENAME` 裸名 → VIS_ROOT 生效）；后者用 `ma008_1.input` 改写一份最小样本 |
+| 4 | **库层接管生效（Q11）**：把 `.input` 的 `CALC FILENAME` 与 `.calc` 的 `IM FILENAME` 都写成裸名，`.input`/`.calc`/`.im` 整体搬到另一目录后仍能跑通——这是库层改动唯一能证明生效的判据 |
+| 5 | `meta/roots/<batch_id>.json` 落盘内容与各进程实际解析一致；故意把 x 的 FENGINE_ROOT 指错能报错退出；改一个与 f 无关的根（如 `FXCORR_PRODUCT_ROOT`）**不**触发 f 报错 |
+| 6 | **跨 batch 检查（Q18）**：同一实验连跑两个 batch，第二个开跑前把 `FXCORR_VIS_ROOT` 改掉 → **报错退出**；只改 RAW / FENGINE 则正常通过 |
+| 7 | **根不存在时的行为（Q19）**：把某个根指到不存在的路径，脚本报错退出；绕过脚本直跑程序也报明确错误、**不自动建目录** |
+| 8 | `sim-common/` 改名后，`gaps/` 七个脚本与单测 71 + 48 全绿（改名是纯字符串替换，判据沿用现成的） |
+| 9 | 容器模式（接 P4）全链路跑通；`wrap_difx2fits.sh` 在容器内可调用，FITS 落到 `FXCORR_PRODUCT_ROOT` 且 `SIMPLE = T` 可读（Q16） |
+| 10 | 设了根变量后跑 `gaps/*.sh`，按 Q15 的选择（unset / 报错）行为符合预期；`FXCORR_PRINT_ROOTS=1` 的输出与 roots.json 一致（Q21） |
+| 11 | **两处实现一致**（遗留第 4 条）：`fxcorr/test/roots/run_consistency.sh` —— 三档回退下 `roots.sh` 与 `FxcorrPath` 逐项相同，自检能报红 |
+
+**实施记录（2026-09-20，验收 11/11 全过）**
+
+| # | 结果 |
+|---|---|
+| 1 | ✅ 默认布局全链路跑通；SWIN 与 mpifxcorr 基准 6 记录逐条相等（`cmp_swin.py`） |
+| 2 | ✅ 非默认 `RAW`/`VIS` 根：全链路跑通、对拍相等，且与默认布局产物 **sha256 完全相同**（`5dd2e120…`） |
+| 3 | ✅ 真实形态（`FILE` 绝对 + `OUTPUT FILENAME` 裸名）：新建 workdir 造配置，`FXCORR_RAW_ROOT` 指向**空目录**、`FXCORR_VIS_ROOT` 指向别处——f/x 全链路跑通（GAPCHECK 与基准一致）、SWIN 落 `$VIS_ROOT/real.difx`、空 RAW 根**始终为空**（绝对路径不拼根）。产物 sha256 与合成布局相同 |
+| 4 | ✅ 从 `/tmp` 跑（cwd ≠ workdir）fxcorr-f 正常完成——`.input` 的相对 `CALC FILENAME` 被拼到**配置目录**而不是 cwd（改动前必然失败，这是库层接管的直接判据） |
+| 5 | ✅ 程序侧比对生效：改 `FXCORR_VIS_ROOT` 报错并打印"recorded / resolved"两值；改 `FXCORR_PRODUCT_ROOT`（f 用不到的根）照常跑完 |
+| 6 | ✅ 脚本侧 Q18：改 `VIS` 根**报错退出**、只改 `RAW` 根**通过**（batch 级根不参与） |
+| 7 | ✅ 根不存在：脚本 `mkdir -p` 建齐（Q19）；绕过脚本直跑程序被 roots 比对拦下，**未自动建目录** |
+| 8 | ✅ `gaps/` 七个脚本全 PASS（boundary/filler/window/startoffset/mixed/pattern/invalid）+ 单测 71 + 48 全绿 |
+| 9 | ✅ 容器全链路跑通（造数 + 跑批）；`wrap_difx2fits.sh` 在容器内可调用，FITS 落 `FXCORR_PRODUCT_ROOT` 且 `SIMPLE = T`；**容器产物与宿主 sha256 相同**（`5dd2e120…`） |
+| 10 | ✅ `FXCORR_PRINT_ROOTS` 输出与 `roots.json` 一致；gaps 脚本在默认布局下不受影响 |
+| 11 | ✅ 新增 `fxcorr/test/roots/run_consistency.sh`：默认 / 只设 `WORKDIR` / 五个根全设（含相对值）三档下，脚本侧与程序侧逐项一致；自检改坏一侧能报红 |
+
+**实施中抓出并修掉的三处**（都不是设计问题，是落地时的连带）：
+
+1. **规范化打破了 `run_bench.sh`**——`wrap_vex2difx` / `wrap_difxcalc` 把 `.input`/`.calc` 的绝对路径改回
+   相对后，mpifxcorr（按 cwd 解析）找不到 `.calc`，第一次跑直接卡死。按 Q15 补上：run_bench
+   复制到 `bench/` 的 `.input`/`.calc` 把 `CALC FILENAME`、`FILE` 行、`IM`/`FLAG FILENAME`
+   绝对化。**这是 Q15 原则的第一个真实用例**——原 difx 程序的适配层不是可选项。
+2. **`fxcorr_check_roots` 初版跳过本 batch 自己的记录**，于是"同一个 batch 重跑换了根"漏检
+   （产物同样分裂）；已改为与自己也比——调用方保证 check 发生在 write 之前，首次运行仍无记录。
+3. **`make_testdata.sh` 解析 `CALC FILENAME` 时假设它是绝对路径**，规范化后失效（`relpath`
+   会按 cwd 算）；已改为相对时拼 `.input` 所在目录。
+
+**落地形态小结**（改了什么）：
+
+- 库层：新增 `fxcorrcommon/src/fxcorrpath.{h,cpp}`（`FxcorrPath`）；`configuration.cpp` 三个
+  打开点 + `model.cpp` 一个打开点接线。
+- 程序层：三个 `main.cpp` 各 `init()` + `print()` + `checkRoots()`（各自用到的根不同），
+  f/x/sim 的 `fengine`/`vis`/`sim-common`/`raw` 输出改用根；`Integrator` 的 `difxdir` 死参数删除。
+- 脚本层：新增 `roots.sh`（两脚本 source）、`wrap_vex2difx.sh`、`wrap_difxcalc.sh`、
+  `wrap_difx2fits.sh`；两脚本改用根、`mkdir -p` 各根、软链落 RAW 根且目标绝对、`difx_dir` 照抄
+  `OUTPUT FILENAME`、写 `meta/roots/<batch_id>.json`、加 Q18 检查；`run_bench.sh` 补原程序适配。
+- 容器层：Dockerfile 加四个脚本的 COPY（`roots.sh` + 三个 `wrap_*.sh`）。
+
+**遗留与风险（2026-09-20 列出，实施后清理为 3 条）**
+
+> **已落实的 13 条**（实施时解决，不再单列）：验收 2 假绿（→ 验收 3 补真实形态样本）、软链搬家
+> 破坏旧用法（→ 已搬 + 两处硬编码同步 + 文档改）、D 编号表漏改（→ 第 9/10 节已核）、
+> `difx_dir` 静态不可定（→ 按 Q10 实现）、库层引入路径策略的代价（→ 记入该库 CLAUDE.md）、
+> `SIM_COMMON` 须指向共享目录（→ 写进 5.2.1 与存储归属表）、VIS_ROOT 下有 f 写的文件（→ 写进
+> 根表）、文档原先写错（→ usage.md / data-spec 已改）、batch.json 三个记录字段（→ 5.3 已标注
+> `difx_dir` 没有程序读它）、三档回退第三档靠 cwd / `FXCORR_WORKDIR` 已存在 / 容器防呆不做
+> （→ 信息性，已写进 5.2.1 与 Q12）。
+
+1. **编号断档**：Q1–Q4、Q8–Q21 有出处；Q5（容器挂载）与 Q7（PRODUCT_ROOT）在第一轮修订中
+   分别改写为 Q12 与 Q16，旧编号不再引用；**Q6 在讨论中未留记录**。若 Q6 曾是被否掉的方案，
+   请补一句说明，否则后续编号从 Q22 续。
+2. **真实观测的 `IM FILENAME` / `FLAG FILENAME` 形态仍未知**：仓库内无真实 `.calc` 样本。
+   库层接管（Q11）之后形态是绝对还是相对都不影响正确性，但**验收 4 目前只用合成数据构造过**；
+   真实数据到手后要补一次（V5 未完成清单第 1 项）。
+3. **一致性判据的边界**：`fxcorr/test/roots/run_consistency.sh` 只比**五个根的值**，不比
+   "哪类路径归哪个根"的映射（`FILE` 行 → RAW、`OUTPUT FILENAME` → VIS 那部分只能靠评审与
+   验收 3/4）。**规则再变时先扩这个脚本**；它带自检，改坏了会自己报红。
 
 ## P6：fxcorr-sim 造数能力（病态数据 + 压力测试数据）（2026-09-20 定，待实施）
 
@@ -450,7 +699,9 @@ bit30、epoch 异常、帧长不符）——2026-09-20 定。其中 invalid 位�
    触发条件与挑数据依据仍是 `reader-model.md` 4.8 的形态清单。
 2. **filler 修正量的形态**（`v4-plan.md` 未解决第 4 条）：仍是"累计"而非"以时间为自变量"。
 3. **病态数据的对拍基准**（同第 5 条）：mpifxcorr 自身在 filler 上丢字节，这条线只能靠文件真值判据。
-4. **两项待实施**：目录路径环境变量化 + `sim-common/` 改名（P5）、fxcorr-sim 造数能力（P6）
-   ——方案与验收判据都已定，实施未开始，见各自小节。P5 的容器挂载接在 P4 的单镜像上扩展
-   （多根挂载与透传）；P6 与两者无强耦合，可独立排期，只有压测那一条（验收 5）需要 P4 的
+4. **P5 已实施**（2026-09-20，**验收 10/10**）——实施记录与"实施中抓出的三处"见 P5 末节。
+   **P6（fxcorr-sim 造数能力）待实施**，与 P5 无强耦合，只有压测那一条（验收 5）需要 P4 的
    镜像就位。
+5. **P5 复核遗留十六条**（编号断档、验收 2 假绿、真实 `.calc` 的 `IM`/`FLAG FILENAME` 形态未知、
+   四处实现无强制、软链搬家破坏旧用法、库层引入路径策略的长期代价、`difx_dir` 无法静态确定等）
+   见 P5 末节"遗留与风险"，**实施前先逐条过**。

@@ -1,7 +1,8 @@
 # fxcorr 数据规范文档（完整版）
 
 **版本**：1.1
-**最后更新**：2026-09-19（5.2 补 invalid 位帧的语义；其余自 09-18 未变）
+**最后更新**：2026-09-20（V5 P5：目录根变量化——5.2.1 为规则权威；`common/` 改名 `sim-common/`；
+`work/` 删除。此前为 09-19：5.2 补 invalid 位帧的语义）
 **适用系统**：fxcorr-f / fxcorr-x 流水线（由 DiFX/mpifxcorr 重构）
 **处理模式**：非实时、按时间批量、串行可手工执行
 
@@ -32,7 +33,7 @@
 分布部署原则（V2 多节点预留；V1 单机同机无差别，不冲突）：
 
 - **计算本地化**：f/x 都在节点本地计算，充分利用本地 CPU——f 任务（batch×站×datastream）调度到该站 raw 数据所在节点；x 任务（batch，全站全基线）优先调度到输入谱数据所在节点。
-- **共享存储主数据流**：配置与元数据（config/、batches/、meta/、product/）及跨 batch 追加的 SWIN（vis/）放共享存储，全部节点一致可见；大批量数据（raw/、fengine/）可放本地存储，目录逻辑集中、物理分布（每节点只持有自己写的部分，见第 2 节存储归属表）。
+- **共享存储主数据流**：默认一切都在 `$FXCORR_WORKDIR` 下，即全部节点共享同一份**全局存储**。需要本地化时按 5.2.1 的根变量把 `raw/`（TB 级，各记录节点本地）与 `fengine/`（各计算节点本地）指到本地盘，目录逻辑集中、物理分布（每节点只持有自己写的部分）。配置与元数据（`config/`、`batches/`、`meta/`）没有独立根、恒在 workdir 下；跨 batch 追加的 SWIN（`vis/`）有独立根，但**只能指向全站可见的共享位置**（各节点各写各的会分裂，见第 2 节存储归属表）。
 - **网络/计算/存储权衡**：必要时以**重复计算**（同一数据各节点各算一份，省网络传输、费 CPU）或**网络传输**（拉数到计算节点，省 CPU、费网络）为调节手段，在三者复用上取平衡；实现不应做死"必须本地"或"必须共享"的假设。
 
 ---
@@ -40,30 +41,31 @@
 ## 2. 顶层目录结构
 
 ```
-project/                          # 项目根目录（可自定义）
+project/                          # 项目根目录（FXCORR_WORKDIR，可自定义）
 ├── config/                       # 配置与模型文件
 ├── batches/                      # 批量元数据（batch.json，D9）
-├── common/                       # 仿真公共信号（fxcorr-sim common 输出，D15）
+├── sim-common/                   # 仿真公共信号（fxcorr-sim common 输出，D15）
 ├── raw/                          # 原始基带数据
 ├── fengine/                      # fxcorr-f 输出（频域谱）
 ├── vis/                          # fxcorr-x 输出（SWIN 可见度）
 ├── beam/                         # fxcorr-x 相位阵输出（波束频谱，P8）
 ├── product/                      # 最终科学产品（FITS / Mark4）
-├── meta/                         # 全局索引与日志
-└── work/                         # 临时工作区（可选，不进 git）
+└── meta/                         # 全局索引、日志与根记录（meta/roots/）
 ```
 
-多节点部署的存储归属（V2 预留；V1 单机同机，无差别）：
+多节点部署的存储归属（**V5 P5 起由根变量决定**，见 5.2.1）。**默认全部在 project/ 下，
+即所有节点共享同一份全局存储**；需要把某类数据放到别处（本地盘、另一块共享盘）时，
+才给对应的根变量赋值：
 
-| 目录 | 归属 | 说明 |
-|---|---|---|
-| `config/` `batches/` `meta/` `product/` | 共享存储 | 配置、元数据、索引、产品；量小，全部节点须一致可见 |
-| `common/` | 共享存储 | 仿真公共信号（fxcorr-sim common 一次生成、各站 station 任务只读；≥16× 单站 2bit 数据量，见 11 节）；batch 的全部 station 完成后可删（生命周期同 fengine/，见 12 节） |
-| `vis/` | 共享存储 | SWIN 跨 batch 追加、difx2fits 直读（追加保序前提：同实验 batch 串行，见第 12 节） |
-| `beam/` | 共享存储 | 相位阵波束频谱，按 batch 组织；下游波束消费者直读 |
-| `raw/` | 本地存储 | TB 级原始基带；各站数据在各记录节点 |
-| `fengine/` | 本地存储 | 各站 f 输出在计算节点；目录逻辑集中、物理分布（每节点只持有自己写的站） |
-| `work/` | 本地存储 | 临时文件，进程结束可清理 |
+| 目录 | 默认位置 | 独立根 | 说明 |
+|---|---|---|---|
+| `config/` `batches/` `beam/` | `$FXCORR_WORKDIR/<name>` | ❌ | 量小、或按 batch 组织在 workdir 内；恒在 workdir 下（Q17） |
+| `meta/` | `$FXCORR_WORKDIR/meta` | ❌ | 同上；索引与根记录必须全局一致可见 |
+| `raw/` | `$FXCORR_WORKDIR/raw` | ✅ `FXCORR_RAW_ROOT` | TB 级原始基带，可指向各记录节点的本地盘 |
+| `fengine/` | `$FXCORR_WORKDIR/fengine` | ✅ `FXCORR_FENGINE_ROOT` | 各站 f 输出，可指向计算节点本地盘（目录逻辑集中、物理分布） |
+| `sim-common/` | `$FXCORR_WORKDIR/sim-common` | ✅ `FXCORR_SIM_COMMON_ROOT` | 全部目录里最大（≥16× 单站 2bit，见 11 节）；**重定向目标必须是全站可见的共享目录**——"全站读同一份公共信号"是跨站相干的来源，各节点各存一份即失相干 |
+| `vis/` | `$FXCORR_WORKDIR/vis` | ✅ `FXCORR_VIS_ROOT` | SWIN 跨 batch 追加、difx2fits 直读（追加保序前提：同实验 batch 串行，见第 12 节） |
+| `product/` | `$FXCORR_WORKDIR/product` | ✅ `FXCORR_PRODUCT_ROOT` | 可本地生成，再由编排层迁移到全局 |
 
 ---
 
@@ -85,7 +87,7 @@ project/                          # 项目根目录（可自定义）
 | D12 | Mark4 科学产品 | Mark4 文件集 | 后处理 | Mark4 | MB~GB | 测地学常用格式 |
 | D13 | 全局索引/日志 | `meta/` | 运行过程 | 文本/JSON | KB~MB | 批量索引、运行日志等 |
 | D14 | 波束数据 | `beam/<batch_id>/beam.bin` | fxcorr-x（相位阵） | 二进制（beam.bin） | MB 级 | 相位阵波束加权和频谱，按 acc 窗口记录（P8 2026-09-13；上游无对照格式，fxcorr 自定，见 5.5 节） |
-| D15 | 仿真公共信号 | `common/<batch_id>/` | fxcorr-sim common | 二进制（float32 频域 slice）+ JSON | 较大 | 频域公共信号（量化前复基带频谱，权威一份，各站 station 只读切频段；≥16× 单站 2bit 数据量，见 11 节）；格式见 5.8 节（2026-09-14 新增） |
+| D15 | 仿真公共信号 | `sim-common/<batch_id>/` | fxcorr-sim common | 二进制（float32 频域 slice）+ JSON | 较大 | 频域公共信号（量化前复基带频谱，权威一份，各站 station 只读切频段；≥16× 单站 2bit 数据量，见 11 节）；格式见 5.8 节（2026-09-14 新增） |
 
 ---
 
@@ -95,7 +97,7 @@ project/                          # 项目根目录（可自定义）
 |------|------|----------|----------|------|
 | **vex2difx** | 前处理1 | D1（.vex）、D2（.v2d） | D3（.input）、D4（.calc）、D5（.flag） | 纯配置生成，不碰原始数据 |
 | **difxcalc / calcif2** | 前处理2 | D4（.calc） | D6（.im） | 生成几何延迟模型 |
-| **fxcorr-sim common** | 数据生成1 | D3（.input）、D9（batch.json） | D15（common/ 公共信号） | 每个 batch 一次；频域公共信号按全站 band 布局推导 specRes 网格（5.8 节） |
+| **fxcorr-sim common** | 数据生成1 | D3（.input）、D9（batch.json） | D15（sim-common/ 公共信号） | 每个 batch 一次；频域公共信号按全站 band 布局推导 specRes 网格（5.8 节） |
 | **fxcorr-sim station** | 数据生成2 | D3、D9、D15 | D7（raw/ 单站 VDIF） | 每站一任务，多节点并行；只读公共信号，不改写 |
 | **fxcorr-f** | 核心（Station-based） | D3（.input）、D4（.calc）、D6（.im）、D7（raw）、D9（batch.json，只读） | D8（频域谱+自相关+pcal） | 按台站、按批量处理 |
 | **fxcorr-x** | 核心（Baseline-based） | D3（.input）、D4（.calc）、D6（.im）、D8（fengine）、D9（batch.json，只读） | D10（SWIN 可见度）；相位阵配置时改出 D14（beam.bin，无 SWIN） | 按批量处理多台站数据；UVW 由模型求值 |
@@ -158,13 +160,57 @@ raw/
 
 fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建），单二进制三入口（架构见 fxcorr-sim-arch.md）：`common` 生成共享公共信号（D15，5.8 节）、`station` 读公共信号生成单站 VDIF、无子命令本机串行。其配置输入与参数语义：
 
-- **配置目录（workdir）定位**：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。workdir 内所有相对路径（`batches/<batch_id>.json`、`.input` 的 config_file、`common/`、`raw/` 输出）均相对它解释。三工具（fxcorr-sim/f/x）与编排脚本（make_testdata.sh / run_batch.sh / run_bench.sh）统一此语义。
-- **配置来源**：读 `workdir/batches/<batch_id>.json`（D9）取 start_mjd / n_subints / config_file；band 结构、采样率、PHASE CAL tone 网格全部来自 `workdir/<config_file>`（.input，非 MPI 构造），与 fxcorr-f 同一解析语义——这是分批次对齐要求的硬理由。common 的 specRes/numSamps 网格由**全站** band 布局推导（5.8 节）。
+- **目录根定位（V5 P5 起，规则唯一权威在本节）**：三工具（fxcorr-sim/f/x）与编排脚本
+  （make_testdata.sh / run_batch.sh / run_bench.sh / wrap_vex2difx.sh / wrap_difxcalc.sh /
+  wrap_difx2fits.sh）共用同一套解析——C++ 侧实现在
+  `libraries/fxcorrcommon/src/fxcorrpath.cpp`，bash 侧在 `fxcorr/roots.sh`，两处必须同规则。
+
+  **三档回退**：① `FXCORR_<X>_ROOT` 已设置 → 用它的值（相对则按 cwd 绝对化）；② 否则 →
+  `<workdir>/<规范目录名>`。`workdir` 本身按"位置参数 > `FXCORR_WORKDIR` > 默认 `.`"解析
+  并绝对化。五个可重定向的根与各自接管的路径：
+
+  | 变量 | 接管 |
+  |---|---|
+  | `FXCORR_RAW_ROOT` | `.input` DATA TABLE 的 `FILE d/d:`（相对时）；DATA TABLE 软链的落点 |
+  | `FXCORR_SIM_COMMON_ROOT` | fxcorr-sim 的公共信号目录 |
+  | `FXCORR_FENGINE_ROOT` | f 写 / x 读的 `.sp` 目录 |
+  | `FXCORR_VIS_ROOT` | `.input` 的 `OUTPUT FILENAME`（相对时）；PCAL / SWITCHEDPOWER 文本 |
+  | `FXCORR_PRODUCT_ROOT` | difx2fits 的产物（由 wrap_difx2fits.sh 使用） |
+
+  `config/` `batches/` `meta/` `beam/` **没有独立根**，恒在 `$FXCORR_WORKDIR/` 下。
+  **不设任何根 = 全部在 workdir 下**（默认全共享），设了才换位置。
+
+  **两类路径的基准**——只对**相对**路径拼根，**绝对路径一律原样**（真实观测的 `FILE` 行
+  就是绝对路径）：
+
+  | 路径 | 相对谁 |
+  |---|---|
+  | DATA TABLE 的 `FILE d/d:` | `FXCORR_RAW_ROOT` |
+  | `.input` 的 `CALC FILENAME`；`.calc` 的 `IM` / `FLAG FILENAME` | **`.input` 所在目录**（配置是一套，整个 config 目录可搬走） |
+  | `.input` 的 `OUTPUT FILENAME` | `FXCORR_VIS_ROOT`——**写 `test.difx`，不要写 `vis/test.difx`**，否则会拼成 `$VIS_ROOT/vis/test.difx` |
+
+  **根记录与一致性检查**：编排脚本开跑前把生效的根写 `meta/roots/<batch_id>.json`；三个
+  程序启动时与该文件比对**自己真的会用到**的根，不一致即报错退出（只比用到的——否则会被与
+  自己无关的根误伤）。脚本侧另有一道：`vis`/`product` 跨 batch 追加，与同实验已有 batch 的
+  记录不一致即报错。
+
+  **其余环境变量**：`FXCORR_PRINT_ROOTS=1` 打印各根解析结果与来源；`FXCORR_RUN_MODE` /
+  `FXCORR_LOGLEVEL` / `FXCORR_STA` / `FXCORR_KURTOSIS` 见 usage.md。
+
+  **原 difx 程序的调用约定**：vex2difx / difxcalc / difx2fits / mpifxcorr **不认识根变量**，
+  且按 cwd 解析 `.input`/`.calc` 内的相对路径——一律由 bash 封装脚本做"当前规范 → 原程序所需
+  形式"的转换（vex2difx/difxcalc 另把产物里的绝对路径规范化回相对），不要在新编排代码里
+  直接调用它们。两个具体例子：`wrap_difx2fits.sh` 把 VIS 根下的 `.difx` 软链到 config/ 旁再调
+  difx2fits；`run_bench.sh`（对拍基准）用 sed 把 `.input` 的 `OUTPUT FILENAME` 改指 `bench/`
+  ——**它是唯一一处 SWIN 落点不走 `FXCORR_VIS_ROOT` 的地方**，因为它跑的是 mpifxcorr。
+- **配置来源**：读 `$FXCORR_WORKDIR/batches/<batch_id>.json`（D9）取 start_mjd / n_subints / config_file；band 结构、采样率、PHASE CAL tone 网格全部来自 `$FXCORR_WORKDIR/<config_file>`（.input，非 MPI 构造），与 fxcorr-f 同一解析语义——这是分批次对齐要求的硬理由。common 的 specRes/numSamps 网格由**全站** band 布局推导（5.8 节）。
 - **任务粒度**：common 任务 = (batch_id)（每 batch 一次）；station 任务 = (batch_id, station)（与 fxcorr-f 同构，多节点并行）；一致性靠共享存储单份 common，不靠多节点重复生成。
 - **legacy 模式**：station 子命令带 tone_mhz 位置参数时走旧时域合成路径（tone/噪声/pcal/FXSIM_DELAY/FXSIM_FLUX/FXSIM_SEFD/FXSIM_ADAPTIVE），供字节对拍回归；tone 参数 0 个 = 无 tone、1 个 = 所有 band 同频率、nbands 个 = 逐 band。新路径下 tone 由 P2 谱线机制（common 端频域注入）提供。
 - **噪声**：`FXSIM_NOISE`（高斯噪声 σ，默认 0.02；0 关闭），`FXSIM_SEED`（公共种子，默认固定）。公共信号只与 (seed, batch) 有关、与站无关；站噪声种子 = f(seed, station) 派生。两站噪声全关时输出逐位一致（跨站相干校验）。
 - **PHASE CAL 注入**：`.input` 的 `PHASE CAL INT (MHZ)` > 0 时按 Configuration 的 tone 网格自动注入（幅度 0.7，避开 2bit 量化器电平陷阱，见 applications/fxcorr-sim/CLAUDE.md），频率/计数与 fxcorr-f 提取端完全一致，构成注入-提取闭环（legacy 与新路径均实现；新路径 P4 双语义：.input PHASE CAL 网格 tone（0.7 幅度、batch 起点连续相位，两路径共用网格读取）＋ FXSIM_PCAL 梳齿（datasim `-p` 语义：k·interval MHz、1/500 幅度、帧边 taper））。
-- **输出**：`workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF；多 band 时帧内样本 band 交织；帧时间戳/帧号按 batch 起点换算逐帧自增）。
+- **输出**：`$FXCORR_RAW_ROOT/<station>/<station>_<batch_id>.vdif`（2bit VDIF；多 band 时帧内
+  样本 band 交织；帧时间戳/帧号按 batch 起点换算逐帧自增）。未设该根时即
+  `$FXCORR_WORKDIR/raw/`。
 
 ### 5.3 F-Engine 输出（fengine/）
 
@@ -212,7 +258,7 @@ fengine/
   "integration_sec": 1.0,
   "n_channels": 256,
   "polarizations": ["RR", "LL", "RL", "LR"],
-  "difx_dir": "vis/experiment.difx",
+  "difx_dir": "experiment.difx",
   "created_at": "2026-09-08T12:35:12Z",
   "status": "done",
   "fxcorr_f_version": "0.1.0",
@@ -225,7 +271,7 @@ fengine/
 - 时间与结构：`batch_id` / `start_mjd` / `start_time` / `duration_sec` / `n_subints` / `subint_ns`——fxcorr-sim 与 fxcorr-f 读（start_mjd 建议写精确 repr，如 58948.291666666664）。
 - `config_file` / `calc_file` / `im_file`：三工具读 .input（config_file）；calc/im 为元数据。
 - `stations`：全部参与站（x 任务 = 全站全基线，任务集推导见第 6 节）。
-- `baselines` / `integration_sec` / `n_channels` / `polarizations` / `difx_dir`：可见度输出元数据，均可由 .input 提前推导（baselines = 全部基线组合，polarizations 由 BASELINE TABLE 定）；fxcorr-x 读 `difx_dir` 作元数据，实际输出目录以 .input 的 OUTPUT FILENAME 为准。
+- `baselines` / `integration_sec` / `n_channels` / `polarizations` / `difx_dir`：可见度输出元数据，均可由 .input 提前推导（baselines = 全部基线组合，polarizations 由 BASELINE TABLE 定）。**`difx_dir` 是纯记录字段**（V5 P5 Q10 起）：写的是 `.input` 的 `OUTPUT FILENAME` 原样，**没有任何程序读它**——SWIN 的实际落点是 `FXCORR_VIS_ROOT` + `OUTPUT FILENAME`（data-spec 5.2.1），**不要拿 `difx_dir` 当"这批数据落在哪"的权威**，那件事只有 `meta/roots/<batch_id>.json` 知道。
 - `status`：running / done / failed，编排脚本更新。
 
 **batch.json 位置语义**（D9，谁写谁读）：
@@ -409,10 +455,10 @@ difxmsg/ 仅 container 模式（`FXCORR_RUN_MODE=container`）产生：组播受
 60512_45060,pending,
 ```
 
-### 5.8 仿真公共信号（common/）
+### 5.8 仿真公共信号（sim-common/）
 
 ```
-common/
+sim-common/
 └── <batch_id>/                      # fxcorr-sim common 输出（D15）
     ├── meta.json                    # 格式版本与网格参数
     └── data_XX.bin                  # 每 0.5s 块一个文件（XX 从 00 顺序编号）
@@ -437,7 +483,7 @@ common/
 
 - **数据文件布局**：`data_XX.bin` 内按 slice 顺序平铺——每 slice `numSamps` 个复数（re,im 各 float32 小端交替），slice 内频点序 = 网格升序（minStartFreq 起）；块 XX 覆盖 batch 第 `XX×0.5s` 起的 0.5s。
 - **完成可见性**：块文件先写 `<name>.tmp` 再 `rename`；全部块落盘后 meta.json 写 `status=done`。station 端发现 meta 缺失或 status≠done 即报错退出。
-- **生命周期**：batch 的全部 station 任务完成后 `common/<batch_id>/` 可删（编排层清理，同 fengine/ 12 节语义）；重跑 batch 时 common 覆盖生成（status 回 running→done）。
+- **生命周期**：batch 的全部 station 任务完成后 `sim-common/<batch_id>/` 可删（编排层清理，同 fengine/ 12 节语义）；重跑 batch 时 common 覆盖生成（status 回 running→done）。
 - **数据量**：float32 复基带 = 8 字节 × 覆盖带宽 × 时长，恒为单站 2bit VDIF 的 16 倍（11 节）；异带多站时覆盖跨度放大（可达全站总量 20 倍），共享存储容量须按此评估。
 
 ---
@@ -529,7 +575,7 @@ D3 (.input) + D9 (batch.json)
         ↓
    [fxcorr-sim common]     ← 每个 batch 一次
         ↓
-D15 (common/<batch_id>/ 频域公共信号)
+D15 (sim-common/<batch_id>/ 频域公共信号)
         ↓
    [fxcorr-sim station]    ← 按台站、多节点并行（只读 D15）
         ↓
@@ -548,7 +594,7 @@ D7 (raw/<station>/<station>_<batch_id>.vdif)
 | F 自相关文件 | D8 | `autocorr.bin` | `autocorr.bin` |
 | 可见度文件 | D10 | `DIFX_<MJD>_<sec>.s<XX>.b<XX>` | `DIFX_60512_45000.s0000.b0000` |
 | 波束文件 | D14 | `beam/<batch_id>/beam.bin` | `beam/60512_45000/beam.bin` |
-| 公共信号 | D15 | `common/<batch_id>/data_XX.bin` + `meta.json` | `common/60512_45000/data_00.bin` |
+| 公共信号 | D15 | `sim-common/<batch_id>/data_XX.bin` + `meta.json` | `sim-common/60512_45000/data_00.bin` |
 | 批量元数据 | D9 | `batches/<batch_id>.json` | `batches/60512_45000.json` |
 | FITS 产品 | D11 | `<exp>_<batch_id>.FITS` | `exp_60512_45000.FITS` |
 
@@ -597,7 +643,6 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
 - **batch duration 选择**：硬约束 = intTime 整数倍 + 起点 subint 边界（上文）+ batch_id 秒唯一（时长 ≥1s）。之上权衡：① **调度并行度**——batch 是并行/调度单元（scalebox task，编排外置 V2+），batch 数越多多节点并行越好；② **内存**——x 侧 .sp 整 batch 常驻（V1），duration × 站数 × D8 数据率须在节点内存内；③ **重试成本**——失败重跑整个 batch（V1 无 batch 内回滚）；④ **吞吐 vs 延迟**——启动开销（配置读入、目录、SWIN 头）摊销想大，首个结果的可见延迟与 fengine/ 存储峰值想小。**大 duration 不利**：x 侧内存线性涨（OOM 风险）、失败重算面大、并行度下降（batch 少 → 节点闲置）、端到端延迟高、fengine/ 中间数据峰值大（D8 ≈ 16×D7，见 11 节）。
 - **站间时间同步**：per-station 串行架构下站间不靠 MPI 屏障同步，同步信息全在数据时间戳（VDIF 帧 epoch/帧号、.sp header 的 scan/sec/ns）+ .im/.calc 的时钟与几何延迟模型；fxcorr-f 的粗延迟（采样级移位）+ 条纹旋转/小数采样即"把两站拉到同一时刻"。站间残余延迟误差 Δτ 的后果按量级分档：**< 1 采样** → 被小数采样校正吸收；**1 采样～亚 subint** → 带宽 smearing 去相关（幅度 ×sinc(Δτ·Δν)，4MHz 带宽 1 采样误差即 -36%）+ 跨频相位斜坡 2πΔf·Δτ；**帧级（4ms）** → 两站乘不同时刻信号，完全去相关、weight 崩；**subint 级** → .sp 时间戳错位，错位相乘、静默错数据。注意：fxcorr-x 按 .sp header 时间对齐、**不校验站间一致性**（站间错位不报错、静默产出低质量数据，与 mpifxcorr 行为一致）；真实观测的站钟漂移靠 .im 时钟多项式补偿，模型不准的残余误差随时间演化。
 - **并行模型（V3，2026-09-15 定案）**：并行维度只有时间——batch 即并行/调度单元（多 batch 并发由 scalebox 编排承担，编排外置不在本项目）；无空间切分（原 V2 P2 基线子集方案已取消，见 algo-plan P2 节）。**同实验 batch 串行约定（路线 B）**：同一实验的 batch 按时间序串行处理，实验级共享文件（PCAL_* 文本读改写、SWITCHEDPOWER_* 追加、SWIN 跨 batch 追加）不存在并发写点，无需加锁；同实验多 batch 并行（积压追赶场景）属 scalebox 编排层职责，届时再评估这些文件的并发语义。
-- **work/**：临时文件（如中间缓冲），进程结束后可安全清理，不进 git。
 
 ---
 

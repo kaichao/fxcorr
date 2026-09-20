@@ -29,16 +29,18 @@ class Integrator {
 public:
 	/**
 	 * @param configindex configuration index of the batch's scan
-	 * @param difxdir  vis/<experiment>.difx/ from batch.json, metadata only;
-	 *                 SWIN writes go to the .input OUTPUT FILENAME directory
-	 *                 (created if missing)
 	 * @param eseconds total correlation length of this batch, seconds
 	 * @param scan     0 in V1 (single scan)
 	 * @param startsec seconds of the batch start relative to the scan start
 	 * @param startns  nanoseconds remainder of the batch start
 	 * @param monitor  optional DifxMessage emitter for RUNNING status
+	 *
+	 * There is no output-directory parameter: SWIN writes go to the .input
+	 * OUTPUT FILENAME directory (created if missing), which Configuration
+	 * resolves against FXCORR_VIS_ROOT (v5-plan.md Q10 - batch.json's
+	 * difx_dir was never read by anything).
 	 */
-	Integrator(Configuration *config, int configindex, const std::string &difxdir, int eseconds,
+	Integrator(Configuration *config, int configindex, int eseconds,
 		int scan, int startsec, int startns, DifxMonitor *monitor = 0);
 	~Integrator();
 

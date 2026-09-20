@@ -13,6 +13,7 @@
 #include <fxcorrcommon/architecture.h>
 #include <fxcorrcommon/difxmonitor.h>
 #include <fxcorrcommon/switchedpower.h>
+#include <fxcorrcommon/fxcorrpath.h>
 
 #include "datareader.h"
 #include "fenginewriter.h"
@@ -245,6 +246,18 @@ int main(int argc, char **argv)
 		workdir = wd;
 	if(argc > 3)
 		workdir = argv[3];	// argument takes precedence over the environment
+	// hand the resolved workdir to the shared root resolver (V5 P5): the
+	// library opens .input/.calc/.im paths through it, so every relative path
+	// in the config set lands on the same roots this tool uses below
+	FxcorrPath::init(workdir);
+	workdir = FxcorrPath::workdir();
+	FxcorrPath::print("fxcorr-f");
+	// the roots THIS tool touches: raw (FILE lines), fengine (its output) and
+	// vis (it writes the PCAL / SWITCHEDPOWER text files into the SWIN dir)
+	static const FxcorrPath::Root usedroots[] = {
+		FxcorrPath::ROOT_RAW, FxcorrPath::ROOT_FENGINE, FxcorrPath::ROOT_VIS };
+	if(!FxcorrPath::checkRoots(batchid, usedroots, 3, "fxcorr-f"))
+		return EXIT_FAILURE;
 	// multi-datastream stations (real observations: one datastream per
 	// recording thread): ds_index selects the station's n-th datastream
 	// (0-based, default 0; fengine output goes to ds_<ds_index>/)
@@ -409,7 +422,7 @@ int main(int argc, char **argv)
 	// fengine layout: per datastream subdirectory (ds_N, N = station-local
 	// datastream index), so multi-datastream stations (one stream per
 	// recording thread) never collide (data-spec 5.3)
-	string outdir = workdir + "/fengine/" + batchid + "/" + station + "/ds_" + to_string(dsarg);
+	string outdir = FxcorrPath::root(FxcorrPath::ROOT_FENGINE) + "/" + batchid + "/" + station + "/ds_" + to_string(dsarg);
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
 		return fail(monitor, "fxcorr-f: cannot create " + outdir);
