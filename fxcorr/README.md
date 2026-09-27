@@ -1,6 +1,6 @@
 # fxcorr 脚本与改造概要
 
-**最后更新**：2026-09-20（V5 进行中：读模型收尾三件已完成，容器单镜像已落盘，版本路线见 `v5-plan.md`）
+**最后更新**：2026-09-27（**V6 规划已开**：主题是**规模与部署**——真实规模验证、压测轻量模式、多节点部署形态、两级 `merge`，见 `v6-plan.md`（⚠ 未实施）。V5 已收尾：读模型收尾三件、容器单镜像、目录根变量化、多 datastream 生成、x 按 ds 组的分片 + `merge` 全部落地，见 `v5-plan.md`）
 
 本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` / `fxcorr-sim` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，仿真数据生成器见 `applications/fxcorr-sim`，共享代码见 `libraries/fxcorrcommon`。
 
@@ -172,7 +172,7 @@ raw data
 ```bash
 ./fxcorr/make_testdata.sh                 # 一次性：前处理 + 仿真数据 + batch.json
 ./fxcorr/run_bench.sh                     # 对拍基准（difx 原命令）
-./fxcorr/run_batch.sh 60512_45000 STA1,STA2,STA3
+./fxcorr/run_batch.sh 00000001 STA1,STA2,STA3
 ```
 
 ---

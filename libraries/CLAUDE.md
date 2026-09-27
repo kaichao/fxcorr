@@ -1,6 +1,6 @@
 # libraries 目录说明
 
-**最后更新**：2026-09-15
+**最后更新**：2026-09-27（fxcorrcommon 加**分片接口**：`Visibility` 的 `setActiveBaselines` / `setActiveDatastreams` / `setOutputPath`，见下节末条；09-20：新增 `fxcorrpath.{h,cpp}` 目录根解析——本库首次引入路径策略）
 
 14 个共享库，每个都是独立 autotools + libtool 包，通过 pkg-config 相互发现（无统一根构建）。fxcorrcommon 已建成。
 

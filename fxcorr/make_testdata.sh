@@ -184,8 +184,7 @@ startsec = float(one('START SECONDS'))
 subintns = int(one('SUBINT NANOSECONDS'))
 inttime = float(one('INT TIME (SEC)'))
 nchan = int(one('NUM CHANNELS 0'))
-pol = one('REC BAND 0 POL')          # V1 单 pol：取第一个 datastream 的记录偏振
-polx = 'X' if pol == 'R' else ('Y' if pol == 'L' else pol)
+pol = one('REC BAND 0 POL')          # 兜底值：极化产品解析失败时用第一个 datastream 的
 
 # datastream 序 → 站名：DATASTREAM 段逐块 TELESCOPE INDEX + TELESCOPE TABLE
 telnames = re.findall(r'^TELESCOPE NAME \d+:\s*(\S+)\s*$', text, re.M)
@@ -207,6 +206,44 @@ for st in stations:
 a = re.findall(r'^D/STREAM A INDEX \d+:\s*(\d+)\s*$', text, re.M)
 b = re.findall(r'^D/STREAM B INDEX \d+:\s*(\d+)\s*$', text, re.M)
 baselines = ['%s-%s' % (stations[int(x)], stations[int(y)]) for x, y in zip(a, b)]
+
+# 极化产品：**逐条 baseline 推导**（data-spec 第 8 节）——每条 baseline 只出 1 个
+# product，其极化 = A 侧 band 的极化 × B 侧 band 的极化；RR/RL/LR/LL 四种组合就是
+# 四条独立条目（极化维度展开进了 baseline 编号）。.input 文本里没有现成的组合
+# 字符串，只能按 recordedbandpols[band] 自己拼——与 configuration.cpp:1029-1042
+# 的 polpairs 同规则。此前这里硬写 [polx+polx]（单元素），与规范不符。
+dsblocks = re.split(r'^TELESCOPE INDEX:', text, flags=re.M)[1:]
+dspols = [dict((int(k), v) for k, v in
+               re.findall(r'^REC BAND (\d+) POL:\s*(\S+)\s*$', blk, re.M))
+          for blk in dsblocks]
+polarizations = []
+ca = cb = ba = None
+for ln in text.split('\n'):
+    m = re.match(r'D/STREAM A INDEX \d+:\s*(\d+)\s*$', ln)
+    if m:
+        ca, cb, ba = int(m.group(1)), None, None
+        continue
+    m = re.match(r'D/STREAM B INDEX \d+:\s*(\d+)\s*$', ln)
+    if m:
+        cb = int(m.group(1))
+        continue
+    m = re.match(r'D/STREAM A BAND \d+:\s*(\d+)\s*$', ln)
+    if m:
+        ba = int(m.group(1))
+        continue
+    m = re.match(r'D/STREAM B BAND \d+:\s*(\d+)\s*$', ln)
+    if not m:
+        continue
+    if None in (ca, cb, ba):
+        continue
+    pa = dspols[ca].get(ba, '') if ca < len(dspols) else ''
+    pb = dspols[cb].get(int(m.group(1)), '') if cb < len(dspols) else ''
+    if pa and pb and (pa + pb) not in polarizations:
+        polarizations.append(pa + pb)
+if not polarizations:
+    sys.stderr.write('make_testdata.sh: WARNING: no pol product derived from '
+                     'BASELINE TABLE, falling back to the first datastream pol\n')
+    polarizations = [pol + pol]
 
 try:
     nsub = int(os.environ.get('BATCH_NSUBINTS', '4'))
@@ -277,7 +314,7 @@ for i in range(nbatch):
         'subint_ns': subintns,
         'integration_sec': inttime,
         'n_channels': nchan,
-        'polarizations': [polx + polx],
+        'polarizations': polarizations,
         # 照抄 .input 的 OUTPUT FILENAME 原样（Q10）：实际落点由运行时根决定，
         # 本字段只作记录——没有任何程序把它当路径读
         'difx_dir': one('OUTPUT FILENAME'),
