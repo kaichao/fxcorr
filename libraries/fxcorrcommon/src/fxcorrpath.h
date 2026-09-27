@@ -32,7 +32,6 @@ public:
 	enum Root
 	{
 		ROOT_RAW = 0,		// FXCORR_RAW_ROOT: DATA TABLE's FILE lines
-		ROOT_SIM_COMMON,	// FXCORR_SIM_COMMON_ROOT: simulated common signal
 		ROOT_FENGINE,		// FXCORR_FENGINE_ROOT: f output / x input
 		ROOT_VIS,		// FXCORR_VIS_ROOT: SWIN (takes over OUTPUT FILENAME)
 		ROOT_PRODUCT,		// FXCORR_PRODUCT_ROOT: final products

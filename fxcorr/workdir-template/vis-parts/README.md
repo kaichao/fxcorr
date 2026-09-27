@@ -45,7 +45,7 @@ vis-parts/
 由此推出一条部署硬约束：
 
 > **`FXCORR_WORKDIR`（含 `config/` `batches/` `meta/` `vis-parts/`）必须落在
-> 全局共享存储上**；本地根只有 `RAW` / `FENGINE` / `SIM_COMMON` 三个。
+> 全局共享存储上**；本地根只有 `RAW` / `FENGINE` 两个（`SIM_COMMON` 已随 V6 S2.5 取消）。
 
 放本地盘的代价：实验级 merge 要读**跨数百个节点的全部 batch 产物**，就得由
 编排层逐节点搬运——而 24 h 观测总共才十几 GB（84,375 batch × 0.14 MB ≈ 11.8 GB），

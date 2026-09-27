@@ -16,7 +16,10 @@
 - autotools（autoconf / automake / libtool）、pkg-config
 - C/C++ 编译器：gcc/g++（测试机为 gcc 11.5）；MPI 环境用于 mpifxcorr（测试机 openmpi 的 mpicc/mpicxx/mpirun 软链在 /usr/bin，install-difx 的 `CXX=/usr/bin/mpicxx` 依赖此）
 - 库：fftw3（含 single 精度 fftw3f）、expat
-- IPP（Intel Performance Primitives）：**可选**。无 IPP 的环境（测试机）必须带 `--noipp`，否则 genipppc 崩溃；fxcorr 三应用与 fxcorrcommon 不依赖 IPP，上游 datasim 因 subband.{h,cpp} 硬编码 IPP 在 --noipp 下无法构建（由 fxcorr-sim 替代，不装 datasim）
+- IPP（Intel Performance Primitives）：**必须关掉**。无 IPP 的环境（测试机）带 `--noipp`，否则 genipppc 崩溃；**有 IPP 的环境同样要带**——理由见下条。fxcorr 三应用与 fxcorrcommon 不依赖 IPP，上游 datasim 因 subband.{h,cpp} 硬编码 IPP 在 --noipp 下无法构建（由 fxcorr-sim 替代，不装 datasim）
+- **为什么有 IPP 也要关**（2026-09-28 查明）：让 `fxcorrcommon` 启用 IPP 不是慢，是**错**——IPP 构建下 `architecture.h` 把 `vectorAlloc_f64` 映射到 `ippsMalloc_64f`，而 `model.cpp` 用它分配的 `Model` 延迟模型数组数值不对，于是 fxcorr-sim 生成的仿真数据延迟偏差约一个样本，表现为**极少数 2bit 量化电平翻转**（t25362 4 站 1.024 s batch：33511 字节 / 131 MB，0.025%），**全程没有任何报错**；而且只在"真实观测参数 + 延迟非零 + 逐字节对拍"三者齐备时暴露。细节见 `libraries/CLAUDE.md`
+- **排查提示**：先看 `/usr/local/difx/lib/pkgconfig/ipp.pc` 是否存在——`--noipp` 的作用就是**跳过生成它**（缺了它，`fxcorrcommon` 的 `PKG_CHECK_MODULES(IPP, ipp)` 失败、`HAVE_IPP` 不被定义）。漏带一次 `--noipp` 它就会留下，之后每次 configure 都启用 IPP。`fxcorrcommon` 的 `configure.ac` 已修（选项真正 gate 探测、默认改为禁用），但**始终带 `--noipp`** 仍是第一道保险
+- **改了 `fxcorrcommon` 的构建配置后，三个应用都要重编**：否则会以 `undefined symbol: ...Ipp32fc...` 之类的形式失败（旧二进制引用的 IPP 版符号在新库里不存在）
 
 ## 方式 A：集成构建（install-difx，推荐）
 

@@ -17,7 +17,10 @@ SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # 目录根解析（V5 P5）：mpifxcorr 不认这些根，但基准的 .input 副本里要把
 # 相对路径绝对化，得知道 raw 根在哪
 . "$SCRIPTDIR/roots.sh"
-if ! command -v mpifxcorr >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
+# 判据同 make_testdata.sh：用 fxcorr 自己的工具，不用 mpifxcorr——机器上可能已经
+# 有另一份 difx 的 bin 在 PATH 里（测试机的 BASH_ENV 注入 /opt/difx/2.9.0），
+# 那里有 mpifxcorr 却没有 fxcorr 三工具，用它会跳过 source 而混用两份 difx。
+if ! command -v fxcorr-f >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
 	set +u

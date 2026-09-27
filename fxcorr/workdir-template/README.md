@@ -33,7 +33,6 @@
 |---|---|---|
 | `config/` | 配置与模型（**有实物**：三份配置 + 32 个 filelist） | 前处理链、filelist 的作用、`.input` 里三个决定运行时的字段 |
 | `batches/` | 批量元数据（D9） | batch.json 全字段、`stations`/`baselines` 是**逐条展开**而非去重 |
-| `sim-common/` | 仿真公共信号（D15，**只有仿真有**） | 量级由覆盖跨度决定、三种压缩手段、同 ds 组同副本 |
 | `raw/` | 原始基带（D7） | 命名、DATA TABLE 软链、`_ds<N>` 的三处同口径、时间语义三坑 |
 | `fengine/` | F 频域谱（D8） | 三层编号各回答什么、为什么必须落 tmpfs |
 | `vis/` | SWIN 可见度（D10） | 追加顺序为什么不能乱、两个被并发写的文本文件 |
@@ -58,19 +57,21 @@
 | datastream | 16（每站 8） | 32 | 32 |
 | 唯一频率 | 32 | 32 | 32 |
 | 频率范围（MHz） | 2936.40–9976.40 | 同 base | **2936.40–3928.40** |
-| **跨度** | **7040 MHz** | 7040 MHz | **992 MHz** |
+| **跨度** | **7072 MHz** | 7072 MHz | **1024 MHz** |
 | `chan_def` 数 = recorded band | 64 | 64 | 64 |
 | 通道带宽 / `NUM CHANNELS` | 32 MHz / 128 | 同 | 同 |
 | `INT TIME` / `SUBINT` | 1.024 s / 5.12 ms | 同 | 同 |
 | 前处理产物 | `T25362_1.input` | `t25362-4st_1.input` | `t25362-4st-mini_1.input` |
 
-**跨度 7040 MHz 与 `fxcorr/data-volume.md` §3 记的 6816 MHz 不一致**（文档写 2936.4–**9752.4**，
-而 9752.4 不在配置里，配置的最高频点是 9976.4）。这个数决定 `sim-common` 的体量，
-**S0 实测时以哪个为准要一并定案**——本目录按配置文件的实际值记 7040。
+**跨度的口径是 `max(freq + bw) − min(freq)`**——fxcorr-sim 的 `deriveGrid` 定义
+（`applications/fxcorr-sim/src/commonsignal.cpp`），**不是** `max(freq) − min(freq)`
+（那给出 7040 / 992）。带宽那一项不能漏：**网格分辨率**由它决定（`deriveGrid` 的
+候选筛选与它绑定），进而决定每帧占几个 slice。
 
 **mini 跨度**把 32 个唯一频率重排到 2936.40 起的连续网格（间隔 = 32 MHz 带宽），
 `$IF` 的 `if_freq` 不动——实测两个变体都能过 `vex2difx` + `difxcalc`。这一条是
-`fxcorr/data-volume.md` §6 的**杠杆 1**（降 `sim-common`），S0 第①次跑用它先暴露流程问题。
+`fxcorr/data-volume.md` §6 的**杠杆 1**（降公共信号的覆盖跨度——V6 S2.5 之后它不再落盘，但各站
+仍要按跨度跑一遍生成器，所以这条杠杆依然成立），S0 第①次跑用它先暴露流程问题。
 
 ## 4 站的造法与其后果
 

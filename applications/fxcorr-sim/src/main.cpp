@@ -29,6 +29,10 @@ struct BatchInfo
 	double startmjd;
 	int nsubints;
 	string inputfile;
+	// The common signal's PRNG seed: the one parameter a batch has to share
+	// across its stations.  Everything else about the signal (grid, extent) is
+	// derived from .input on the spot, so it is stored nowhere (V6 S2.5).
+	unsigned long seed;
 };
 
 // Everything derived from .input for one station (frame structure, bands,
@@ -63,11 +67,10 @@ struct StationSetup
 static void usage()
 {
 	cerr << "usage:\n"
-	     << "  fxcorr-sim common  <batch_id> [workdir]\n"
-	     << "      generate the shared common signal only (sim-common/<batch_id>/,\n"
-	     << "      FXCORR_SIM_COMMON_ROOT)\n"
 	     << "  fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]\n"
-	     << "      read the common signal, generate one datastream of one station\n"
+	     << "      generate one datastream of one station; the common signal is\n"
+	     << "      synthesised in-process (its seed comes from batches/<id>.json,\n"
+	     << "      its grid and extent from .input)\n"
 	     << "      (ds_index = station-local 0-based datastream number, default 0,\n"
 	     << "      same numbering as fxcorr-f's ds_index; the file is\n"
 	     << "      raw/<station>/<station>_<batch_id>[_ds<N>].vdif, the _ds suffix\n"
@@ -76,7 +79,7 @@ static void usage()
 	     << "      by band; any tone argument switches to the legacy time-domain\n"
 	     << "      synthesis path (byte-comparison regression only)\n"
 	     << "  fxcorr-sim         <batch_id> [workdir]\n"
-	     << "      serial: common + every datastream of every station in .input\n"
+	     << "      serial: every datastream of every station in .input\n"
 	     << "      (single machine only)\n"
 	     << "  env (new path): FXSIM_NOISE (default 0.02, 0 disables), FXSIM_SEED,\n"
 	     << "      FXSIM_ADAPTIVE (1 = running-rms quantiser), FXSIM_SPECRES\n"
@@ -108,7 +111,7 @@ static void usage()
 	     << "      SNR scaling), plus the new-path variables above\n";
 }
 
-// batch.json field extraction, shared with CommonSignal::Reader
+// batch.json field extraction
 static bool loadBatchInfo(const string &workdir, const string &batchid, BatchInfo *bi)
 {
 	bi->workdir = workdir;
@@ -124,13 +127,18 @@ static bool loadBatchInfo(const string &workdir, const string &batchid, BatchInf
 	jss << jf.rdbuf();
 	string json = jss.str();
 	jf.close();
-	if(!CommonSignal::Reader::extractJsonDouble(json, "start_mjd", &bi->startmjd) ||
-	   !CommonSignal::Reader::extractJsonInt(json, "n_subints", &bi->nsubints) ||
-	   !CommonSignal::Reader::extractJsonString(json, "config_file", &bi->inputfile))
+	// seed is required: every station of the batch must agree on it, or their
+	// common signals differ and the cross-station coherence is gone (V6 S2.5).
+	double seedsigned = 0.0;
+	if(!CommonSignal::jsonDouble(json, "start_mjd", &bi->startmjd) ||
+	   !CommonSignal::jsonInt(json, "n_subints", &bi->nsubints) ||
+	   !CommonSignal::jsonString(json, "config_file", &bi->inputfile) ||
+	   !CommonSignal::jsonDouble(json, "seed", &seedsigned))
 	{
 		cerr << "fxcorr-sim: batch.json missing required fields" << endl;
 		return false;
 	}
+	bi->seed = (unsigned long)seedsigned;
 	return true;
 }
 
@@ -370,11 +378,12 @@ static bool setupStation(Configuration &config, Model *model, const BatchInfo &b
 	return true;
 }
 
-// ---- common subcommand: derive the grid and write the shared signal ----
-
-// FXSIM_SPECRES / FXSIM_LINE parsing, shared by the common and station
-// entries so both derive the same grid (a station's expected grid must
-// match the one the common signal was generated with)
+// ---- FXSIM_SPECRES / FXSIM_LINE parsing (station path) ----
+//
+// FXSIM_SPECRES scales the GCD grid and FXSIM_LINE adds a spectral line to the
+// common signal.  Both are read here so every station of a batch derives the
+// same grid and the same line - station tasks generate the signal locally, so
+// a disagreement between them would break coherence rather than fail loudly.
 static int parseSpecres()
 {
 	int specres = 1;
@@ -526,58 +535,43 @@ static int applyFrameOffset(VDIFWriter &writer)
 	return 0;
 }
 
-static int doCommon(Configuration &config, const BatchInfo &bi)
+// Total slice count of a batch: the batch duration rounded up to a frame
+// boundary, the maximum over datastreams (the common signal covers the whole
+// batch), and every frame has to come out as a whole number of slices.  This
+// is a pure function of (.input, grid, nsubints), which is exactly why a
+// station task can recompute it rather than read it from anywhere (V6 S2.5:
+// only the seed is a parameter; the grid and the extent are derivable).
+static bool deriveTotalslices(Configuration &config, const CommonSignal::Grid &grid,
+                              const BatchInfo &bi, long long *totalslices)
 {
-	int specres = parseSpecres();
-	if(specres < 0)
-		return EXIT_FAILURE;
-	CommonSignal::LineSpec line;
-	if(parseLine(&line) != 0)
-		return EXIT_FAILURE;
-
-	CommonSignal::Grid grid;
-	if(!CommonSignal::deriveGrid(config, &grid, specres))
-		return EXIT_FAILURE;
-
-	// total slice count: the batch duration rounded up to a frame boundary,
-	// the maximum over stations (the common signal covers the whole batch);
-	// each frame must be a whole number of slices
-	long long totalslices = 0;
+	long long total = 0;
 	for(int d = 0; d < config.getNumDataStreams(); d++)
 	{
 		int bpf, fps;
 		long long ratehz, nsampframe, framens;
 		if(!deriveFrame(config, d, &bpf, &fps, &ratehz, &nsampframe, &framens))
-			return EXIT_FAILURE;
+			return false;
 		double slicesperframe = (double)framens / (grid.stimeus * 1000.0);
 		if(fabs(slicesperframe - rint(slicesperframe)) > 1.0e-9)
 		{
 			cerr << "fxcorr-sim: frame duration " << framens
 			     << " ns is not a whole number of " << grid.stimeus
 			     << " us slices" << endl;
-			return EXIT_FAILURE;
+			return false;
 		}
 		long long durationns = (long long)bi.nsubints * (long long)config.getSubintNS(0);
 		long long nframes = (durationns + framens - 1) / framens;
 		long long slices = nframes * (long long)rint(slicesperframe);
-		if(slices > totalslices)
-			totalslices = slices;
+		if(slices > total)
+			total = slices;
 	}
-	if(totalslices <= 0)
+	if(total <= 0)
 	{
 		cerr << "fxcorr-sim: empty batch" << endl;
-		return EXIT_FAILURE;
+		return false;
 	}
-
-	unsigned long seed = 20260912UL;
-	if(const char *sd = getenv("FXSIM_SEED"))
-		seed = strtoul(sd, 0, 10);
-
-	if(!CommonSignal::generate(grid, totalslices, seed,
-	                            FxcorrPath::root(FxcorrPath::ROOT_SIM_COMMON), bi.batchid, bi.startmjd,
-	                            line))
-		return EXIT_FAILURE;
-	return EXIT_SUCCESS;
+	*totalslices = total;
+	return true;
 }
 
 // ---- station subcommand, new path: read the common signal, synth + pack ----
@@ -677,10 +671,27 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	if(!CommonSignal::deriveGrid(config, &grid, specres))
 		return EXIT_FAILURE;
 
-	// the common signal must be complete before a station starts
-	CommonSignal::Reader reader;
-	if(!reader.open(FxcorrPath::root(FxcorrPath::ROOT_SIM_COMMON) + "/" + bi.batchid, bi.batchid, grid))
+	// V6 S2.5 (plan E): the common signal is generated here, in this process -
+	// there is no common/ directory to read.  Its grid and extent are pure
+	// functions of .input (recomputed on the spot, no need to store or ship
+	// them); the seed comes from batch.json, the one parameter that has to be
+	// shared by every station of the batch.  The numbers are identical to what
+	// the old file path produced, because both run the same fillSliceBlock().
+	CommonSignal::LineSpec line;
+	if(parseLine(&line) != 0)
 		return EXIT_FAILURE;
+	long long totalslices = 0;
+	if(!deriveTotalslices(config, grid, bi, &totalslices))
+		return EXIT_FAILURE;
+	CommonSignal::SliceStream stream;
+	if(!stream.init(grid, totalslices, bi.seed, line))
+		return EXIT_FAILURE;
+	long long nblocks = stream.nblocks();
+	long long blockfloats = stream.blockfloats();
+	cerr << "DBG seed=" << bi.seed << " nsubints=" << bi.nsubints
+	     << " totalslices=" << totalslices << " nblocks=" << nblocks
+	     << " blockfloats=" << blockfloats
+	     << " numsamps=" << stream.numsamps() << endl;
 
 	// vpsamps: complex baseband samples per band per frame (= payload bytes
 	// per band * 2, datasim's 4-bit-complex counting of 2-bit real samples)
@@ -714,15 +725,15 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	if(applyFrameOffset(writer) != 0)
 		return EXIT_FAILURE;
 
-	// block buffer sized for one full common-signal block; the reader
-	// delivers the last block truncated to the batch length
-	vector<float> blockbuf((size_t)reader.blockfloats());
+	// block buffer sized for one full common-signal block; the last block is
+	// truncated to the batch length by whichever source is in use
+	vector<float> blockbuf((size_t)blockfloats);
 	int payloadbytes = st.bytesperbandframe * st.nbands;
 	unsigned char *payload = new unsigned char[payloadbytes];
 	long long frameswritten = 0;
-	for(long long blk = 0; blk < reader.nblocks(); blk++)
+	for(long long blk = 0; blk < nblocks; blk++)
 	{
-		long long nfloats = reader.readBlock(blk, &blockbuf[0]);
+		long long nfloats = stream.fillBlock(blk, &blockbuf[0]);
 		if(nfloats < 0)
 		{
 			delete [] payload;
@@ -867,44 +878,36 @@ int main(int argc, char **argv)
 	int dslocal = 0;
 	vector<double> tonemhzarg;
 
-	if(cmd == "common" || cmd == "station")
+	if(cmd == "station")
 	{
-		if(argc < (cmd == "common" ? 3 : 4))
+		if(argc < 4)
 		{
 			usage();
 			return EXIT_FAILURE;
 		}
 		batchid = argv[2];
-		if(cmd == "station")
+		station = argv[3];
+		if(argc > 4)
+			workdir = argv[4];   // argument takes precedence over the environment
+		if(argc > 5)
 		{
-			station = argv[3];
-			if(argc > 4)
-				workdir = argv[4];   // argument takes precedence over the environment
-			if(argc > 5)
+			// station-local datastream index, same numbering as fxcorr-f's
+			// ds_index and the raw/fengine file names (data-spec 5.2/5.3).
+			// Its position is fixed, so the legacy tone list has to be
+			// preceded by it: "station <bid> <st> <workdir> 0 1.5"
+			char *end;
+			long v = strtol(argv[5], &end, 10);
+			if(end == argv[5] || *end != '\0' || v < 0)
 			{
-				// station-local datastream index, same numbering as fxcorr-f's
-				// ds_index and the raw/fengine file names (data-spec 5.2/5.3).
-				// Its position is fixed, so the legacy tone list has to be
-				// preceded by it: "station <bid> <st> <workdir> 0 1.5"
-				char *end;
-				long v = strtol(argv[5], &end, 10);
-				if(end == argv[5] || *end != '\0' || v < 0)
-				{
-					cerr << "fxcorr-sim: bad ds_index '" << argv[5]
-					     << "' (a non-negative integer expected; tone_mhz values"
-					        " now come after it)" << endl;
-					return EXIT_FAILURE;
-				}
-				dslocal = (int)v;
+				cerr << "fxcorr-sim: bad ds_index '" << argv[5]
+				     << "' (a non-negative integer expected; tone_mhz values"
+				        " now come after it)" << endl;
+				return EXIT_FAILURE;
 			}
-			for(int a = 6; a < argc; a++)
-				tonemhzarg.push_back(atof(argv[a]));
+			dslocal = (int)v;
 		}
-		else
-		{
-			if(argc > 3)
-				workdir = argv[3];
-		}
+		for(int a = 6; a < argc; a++)
+			tonemhzarg.push_back(atof(argv[a]));
 	}
 	else
 	{
@@ -923,16 +926,13 @@ int main(int argc, char **argv)
 	bool legacy = !tonemhzarg.empty();
 
 	// hand the resolved workdir to the shared root resolver (V5 P5): the
-	// library opens .input/.calc/.im paths through it, and the common signal
-	// and raw output below are addressed by root
+	// library opens .input/.calc/.im paths through it, and raw output below is
+	// addressed by root.  The common signal has no root any more (V6 S2.5).
 	FxcorrPath::init(workdir);
 	workdir = FxcorrPath::workdir();
 	FxcorrPath::print("fxcorr-sim");
-	// the roots THIS tool touches: common (both entries) and, for station, raw
-	static const FxcorrPath::Root usedroots[] = {
-		FxcorrPath::ROOT_SIM_COMMON, FxcorrPath::ROOT_RAW };
-	int nusedroots = (cmd == "common") ? 1 : 2;
-	if(!FxcorrPath::checkRoots(batchid, usedroots, nusedroots, "fxcorr-sim"))
+	static const FxcorrPath::Root usedroots[] = { FxcorrPath::ROOT_RAW };
+	if(!FxcorrPath::checkRoots(batchid, usedroots, 1, "fxcorr-sim"))
 		return EXIT_FAILURE;
 
 	BatchInfo bi;
@@ -955,9 +955,6 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	if(cmd == "common")
-		return doCommon(config, bi);
-
 	if(cmd == "station")
 	{
 		StationSetup st;
@@ -968,11 +965,10 @@ int main(int argc, char **argv)
 		return doStationNew(config, model, bi, st);
 	}
 
-	// default: serial common, then every datastream of every station (a
-	// multi-datastream station gets one file per datastream, each with its
-	// own noise stream - see stationNoiseSeed)
-	if(doCommon(config, bi) != EXIT_SUCCESS)
-		return EXIT_FAILURE;
+	// default: every datastream of every station, serially (a multi-datastream
+	// station gets one file per datastream, each with its own noise stream -
+	// see stationNoiseSeed).  There is no separate common step any more: each
+	// station task generates the slices it needs on its own (V6 S2.5).
 	for(int d = 0; d < config.getNumDataStreams(); d++)
 	{
 		string stname = config.getDStationName(0, d);

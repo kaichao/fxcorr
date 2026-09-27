@@ -9,7 +9,7 @@
 #
 # 解析后可用：
 #   FXCORR_ROOT_WORKDIR      绝对化的项目根
-#   FXCORR_ROOT_RAW / _SIM_COMMON / _FENGINE / _VIS / _PRODUCT
+#   FXCORR_ROOT_RAW / _FENGINE / _VIS / _PRODUCT
 #
 # 三档回退（v5-plan.md Q9）：FXCORR_<X>_ROOT 已设置 → 用它的值（相对则按 cwd
 # 绝对化）；否则 <workdir>/<目录名>。config/ batches/ meta/ beam/ 没有独立根，
@@ -37,17 +37,16 @@ fxcorr_roots()
 {
 	FXCORR_ROOT_WORKDIR=$(cd "$1" && pwd)
 	FXCORR_ROOT_RAW=$(fxcorr_root FXCORR_RAW_ROOT raw)
-	FXCORR_ROOT_SIM_COMMON=$(fxcorr_root FXCORR_SIM_COMMON_ROOT sim-common)
 	FXCORR_ROOT_FENGINE=$(fxcorr_root FXCORR_FENGINE_ROOT fengine)
 	FXCORR_ROOT_VIS=$(fxcorr_root FXCORR_VIS_ROOT vis)
 	FXCORR_ROOT_PRODUCT=$(fxcorr_root FXCORR_PRODUCT_ROOT product)
 }
 
-# 建齐五个根（Q19：根由编排层创建，程序遇根不存在只报错、不自动建）
+# 建齐四个根（Q19：根由编排层创建，程序遇根不存在只报错、不自动建）
 fxcorr_mkroots()
 {
 	local r
-	for r in "$FXCORR_ROOT_RAW" "$FXCORR_ROOT_SIM_COMMON" "$FXCORR_ROOT_FENGINE" \
+	for r in "$FXCORR_ROOT_RAW" "$FXCORR_ROOT_FENGINE" \
 	         "$FXCORR_ROOT_VIS" "$FXCORR_ROOT_PRODUCT"; do
 		mkdir -p "$r" || {
 			echo "roots.sh: cannot create root $r" >&2
@@ -66,7 +65,6 @@ fxcorr_write_roots()
 {
   "workdir": "$FXCORR_ROOT_WORKDIR",
   "raw": "$FXCORR_ROOT_RAW",
-  "sim_common": "$FXCORR_ROOT_SIM_COMMON",
   "fengine": "$FXCORR_ROOT_FENGINE",
   "vis": "$FXCORR_ROOT_VIS",
   "product": "$FXCORR_ROOT_PRODUCT"

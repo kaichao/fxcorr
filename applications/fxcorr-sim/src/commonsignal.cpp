@@ -23,22 +23,13 @@ static bool isInteger(double x)
 	return fabs(x - rint(x)) < 1.0e-9;
 }
 
-static string readAll(const string &path)
-{
-	ifstream f(path.c_str());
-	if(!f.is_open())
-		return "";
-	stringstream ss;
-	ss << f.rdbuf();
-	return ss.str();
-}
-
 // Whole-experiment band layout: per-station band start frequency and
 // bandwidth in MHz.  Every band must land on the grid, so the frequency
 // differences and bandwidths of ALL bands (not just band 0 like datasim)
 // enter the GCD; this catches multi-band layouts datasim's getSpecRes misses.
 static bool collectBands(Configuration &config,
-                         vector<double> *freqs, vector<double> *bws)
+                         vector<double> *freqs, vector<double> *bws,
+                         vector<long long> *vpsperband)
 {
 	if(config.getNumDataStreams() == 0)
 		return false;
@@ -51,11 +42,15 @@ static bool collectBands(Configuration &config,
 			     << " has no recorded bands" << endl;
 			return false;
 		}
+		// complex baseband samples per band per frame: main.cpp's vpsamps
+		// (the frame payload is the total across bands, so divide first)
+		long long vps = (long long)config.getFramePayloadBytes(0, d) / nbands * 2;
 		for(int b = 0; b < nbands; b++)
 		{
 			int fq = config.getDRecordedFreqIndex(0, d, b);
 			freqs->push_back(config.getFreqTableFreq(fq));
 			bws->push_back(config.getFreqTableBandwidth(fq));
+			vpsperband->push_back(vps);
 		}
 	}
 	return true;
@@ -69,34 +64,62 @@ bool deriveGrid(Configuration &config, Grid *grid, int specresfac)
 		return false;
 	}
 	vector<double> freqs, bws;
-	if(!collectBands(config, &freqs, &bws))
+	vector<long long> vpsperband;
+	if(!collectBands(config, &freqs, &bws, &vpsperband))
 		return false;
 
-	// GCD of all pairwise frequency differences and all bandwidths; the
-	// highest candidate is 0.5 MHz, halved down to 1/2^10 (datasim
-	// getSpecRes, with the accumulator reset per candidate - datasim's
-	// version keeps a sticky false and reports failure for any layout that
-	// is not 0.5 MHz clean)
+	// Spectrum resolution: datasim's getSpecRes walks 0.5 MHz down to
+	// 1/1024 MHz and takes the first candidate that every frequency difference
+	// and every bandwidth is a multiple of ("0.5 MHz is clean enough" being its
+	// upper bound).  Two differences here: the accumulator is reset per
+	// candidate (datasim keeps a sticky false and so rejects any layout that is
+	// not 0.5 MHz clean), and the walk continues *above* 0.5 MHz when the whole
+	// first half fails - see the frame condition below.
+	//
+	// Every band must also come out as a whole number of slices per frame.
+	// The frame structure is the real observation's, not ours to choose, and
+	// blksize = bandwidth / specres has to divide vpsamps, the band's complex
+	// samples per frame (signalgen.cpp rejects the layout otherwise).  t25362
+	// is why the second half is needed at all: vpsamps = 2000 = 16 x 125, whose
+	// largest power-of-two factor is 16, so every candidate at or below 0.5 MHz
+	// (blksize >= 64) fails and 2 MHz (blksize 16) is the only answer.
+	//
+	// Order is 0.5 MHz first (datasim's choice), then finer, then coarser: a
+	// finer grid only costs computation, while a coarser one starts merging
+	// channels - a specres wider than the per-channel bandwidth makes
+	// neighbouring channels share a grid point and come out perfectly
+	// correlated - so finer has to be tried before coarser.
 	double specres = 0.0;
-	for(int cnt = 1; cnt <= 10; cnt++)
+	for(int step = 0; step < 16 && specres == 0.0; step++)
 	{
-		double cand = 1.0 / pow(2.0, cnt);
+		double cand;
+		if(step < 10)
+			cand = 1.0 / pow(2.0, step + 1);	// 0.5 .. 1/1024 MHz
+		else
+			cand = pow(2.0, step - 10);		// 1, 2, 4, ... MHz
 		bool isgcd = true;
 		for(size_t i = 0; i < freqs.size() && isgcd; i++)
 			for(size_t j = i + 1; j < freqs.size(); j++)
 				isgcd = isgcd && isInteger(fabs(freqs[i] - freqs[j]) / cand);
 		for(size_t i = 0; i < bws.size() && isgcd; i++)
 			isgcd = isgcd && isInteger(bws[i] / cand);
-		if(isgcd)
+		// frame compatibility (blksize >= 4 is also the cut that ends the
+		// coarser half of the walk)
+		for(size_t i = 0; i < bws.size() && isgcd; i++)
 		{
-			specres = cand;
-			break;
+			double blksize = bws[i] / cand;
+			long long n = (long long)rint(blksize);
+			isgcd = isgcd && isInteger(blksize) && blksize >= 4.0 &&
+			        n <= vpsperband[i] && vpsperband[i] % n == 0;
 		}
+		if(isgcd)
+			specres = cand;
 	}
 	if(specres == 0.0)
 	{
-		cerr << "fxcorr-sim: cannot find a spectrum resolution (band frequencies "
-		        "and bandwidths are not on a 1/2^n MHz grid down to 1/1024 MHz)" << endl;
+		cerr << "fxcorr-sim: cannot find a spectrum resolution: band frequencies "
+		        "and bandwidths must be multiples of a 1/2^n MHz grid, and the "
+		        "resolution must split every band into whole slices per frame" << endl;
 		return false;
 	}
 
@@ -152,169 +175,80 @@ bool deriveGrid(Configuration &config, Grid *grid, int specresfac)
 }
 
 // ---------------------------------------------------------------------------
-// generation
+// slice generation
 
-static bool writeMeta(const Grid &grid, long long totalslices, unsigned long seed,
-                      const string &dir, const string &batchid, double startmjd,
-                      const LineSpec &line, const char *status)
+// Spectral line filter (datasim gengaussianfilter): amplitude sqrt(amp), the
+// line centred at (freq - grid origin) / specres grid points, rms in grid
+// points, re and im carrying the same value.
+static bool buildLineFilter(const Grid &grid, const LineSpec &line,
+                            vector<float> *linefilter)
 {
-	long long blockfloats = (long long)grid.numsamps * 2 * grid.slicesperblock;
-	long long nblocks = (totalslices + grid.slicesperblock - 1) / grid.slicesperblock;
-	ostringstream os;
-	os << setprecision(17);   // start_mjd needs full f64 precision
-	os << "{\n"
-	   << "\t\"version\": 1,\n"
-	   << "\t\"dtype\": \"float32\",\n"
-	   << "\t\"spec_res_mhz\": " << grid.specresmhz << ",\n"
-	   << "\t\"numsamps\": " << grid.numsamps << ",\n"
-	   << "\t\"min_start_freq_mhz\": " << grid.minstartfreqmhz << ",\n"
-	   << "\t\"block_bytes\": " << blockfloats * 4 << ",\n"
-	   << "\t\"slices_per_block\": " << grid.slicesperblock << ",\n"
-	   << "\t\"nblocks\": " << nblocks << ",\n"
-	   << "\t\"seed\": " << seed << ",\n"
-	   << "\t\"batch_id\": \"" << batchid << "\",\n"
-	   << "\t\"start_mjd\": " << startmjd << ",\n"
-	   << "\t\"line_freq_mhz\": " << line.freqmhz << ",\n"
-	   << "\t\"line_amp\": " << line.amp << ",\n"
-	   << "\t\"line_rms\": " << line.rms << ",\n"
-	   << "\t\"status\": \"" << status << "\"\n"
-	   << "}\n";
-	string path = dir + "/meta.json";
-	ofstream f(path.c_str());
-	if(!f.is_open())
+	linefilter->clear();
+	if(line.freqmhz <= 0.0)
+		return true;
+	double freqidx = (line.freqmhz - grid.minstartfreqmhz) / grid.specresmhz;
+	if(line.amp <= 0.0 || line.rms <= 0.0)
 	{
-		cerr << "fxcorr-sim: cannot write " << path << endl;
+		cerr << "fxcorr-sim: FXSIM_LINE amp and rms must be positive" << endl;
 		return false;
 	}
-	f << os.str();
-	f.close();
-	return true;
-}
-
-static bool writeBlockFile(const string &path, const float *data, long long nfloats)
-{
-	string tmppath = path + ".tmp";
-	FILE *f = fopen(tmppath.c_str(), "wb");
-	if(!f)
+	if(freqidx < 0.0 || freqidx >= (double)grid.numsamps)
 	{
-		cerr << "fxcorr-sim: cannot write " << tmppath << endl;
+		cerr << "fxcorr-sim: spectral line at " << line.freqmhz
+		     << " MHz is outside the common signal band ("
+		     << grid.minstartfreqmhz << " .. "
+		     << grid.minstartfreqmhz + (double)grid.numsamps * grid.specresmhz
+		     << " MHz)" << endl;
 		return false;
 	}
-	size_t written = fwrite(data, sizeof(float), (size_t)nfloats, f);
-	if(fclose(f) != 0 || written != (size_t)nfloats)
+	double amplitude = sqrt(line.amp);
+	linefilter->resize((size_t)grid.numsamps);
+	for(int i = 0; i < grid.numsamps; i++)
 	{
-		cerr << "fxcorr-sim: short write to " << tmppath << endl;
-		remove(tmppath.c_str());
-		return false;
-	}
-	if(rename(tmppath.c_str(), path.c_str()) != 0)
-	{
-		cerr << "fxcorr-sim: cannot rename " << tmppath << " to " << path << endl;
-		remove(tmppath.c_str());
-		return false;
+		double delta = (double)i - freqidx;
+		(*linefilter)[(size_t)i] = (float)(amplitude *
+			exp(-M_PI * M_PI * delta * delta / (2.0 * line.rms * line.rms)));
 	}
 	return true;
 }
 
-bool generate(const Grid &grid, long long totalslices, unsigned long seed,
-              const string &simcommonroot, const string &batchid, double startmjd,
-              const LineSpec &line)
+// One block of the common signal: gencplx semantics (independent real/imag
+// Gaussians, STDEV 1, slice-major order, frequency points ascending inside a
+// slice) followed by the optional per-slice line multiply.  The engine and the
+// distribution are passed in rather than built here on purpose: std::
+// normal_distribution caches the second value of each Box-Muller pair, so
+// rebuilding it per block would shift every later sample.  This is the only
+// place the PRNG advances -- which is what made the old file path and the
+// streaming path bit-identical, and is why the S2.5 acceptance test could be
+// "the raw output must match byte for byte".
+static void fillSliceBlock(const Grid &grid, long long slices,
+                           mt19937 &engine, normal_distribution<double> &gauss,
+                           const vector<float> &linefilter, float *block)
 {
-	string dir = simcommonroot + "/" + batchid;
-	string mkdircommand = "mkdir -p " + dir;
-	if(system(mkdircommand.c_str()) != 0)
+	long long nfloats = slices * 2LL * grid.numsamps;
+	for(long long i = 0; i < nfloats; i++)
+		block[(size_t)i] = (float)gauss(engine);
+	if(linefilter.empty())
+		return;
+	for(long long t = 0; t < slices; t++)
 	{
-		cerr << "fxcorr-sim: cannot create " << dir << endl;
-		return false;
-	}
-
-	// spectral line filter (datasim gengaussianfilter): amplitude sqrt(amp),
-	// centre at (freq - grid origin) / specres grid points, rms in grid
-	// points; re and im components share the value
-	vector<float> linefilter;
-	if(line.freqmhz > 0.0)
-	{
-		double freqidx = (line.freqmhz - grid.minstartfreqmhz) / grid.specresmhz;
-		if(line.amp <= 0.0 || line.rms <= 0.0)
-		{
-			cerr << "fxcorr-sim: FXSIM_LINE amp and rms must be positive" << endl;
-			return false;
-		}
-		if(freqidx < 0.0 || freqidx >= (double)grid.numsamps)
-		{
-			cerr << "fxcorr-sim: spectral line at " << line.freqmhz
-			     << " MHz is outside the common signal band ("
-			     << grid.minstartfreqmhz << " .. "
-			     << grid.minstartfreqmhz + (double)grid.numsamps * grid.specresmhz
-			     << " MHz)" << endl;
-			return false;
-		}
-		double amplitude = sqrt(line.amp);
-		linefilter.resize((size_t)grid.numsamps);
+		long long base = t * 2LL * grid.numsamps;
 		for(int i = 0; i < grid.numsamps; i++)
 		{
-			double delta = (double)i - freqidx;
-			linefilter[(size_t)i] = (float)(amplitude *
-				exp(-M_PI * M_PI * delta * delta / (2.0 * line.rms * line.rms)));
+			block[(size_t)(base + 2LL * i)] *= linefilter[(size_t)i];
+			block[(size_t)(base + 2LL * i + 1)] *= linefilter[(size_t)i];
 		}
 	}
-
-	// running first: a station seeing this meta knows the batch is not ready
-	if(!writeMeta(grid, totalslices, seed, dir, batchid, startmjd, line, "running"))
-		return false;
-
-	// deterministic per-run noise stream, reseeded once
-	mt19937 engine(seed);
-	normal_distribution<double> gauss(0.0, 1.0);
-
-	long long blockfloats = (long long)grid.numsamps * 2 * grid.slicesperblock;
-	long long nblocks = (totalslices + grid.slicesperblock - 1) / grid.slicesperblock;
-	vector<float> block((size_t)blockfloats);
-
-	for(long long n = 0; n < nblocks; n++)
-	{
-		long long slices = grid.slicesperblock;
-		if(n == nblocks - 1)
-			slices = totalslices - n * grid.slicesperblock;
-		long long nfloats = slices * 2LL * grid.numsamps;
-
-		// gencplx semantics: independent real/imag Gaussians, STDEV 1;
-		// slice-major order, frequency points ascending within a slice
-		for(long long i = 0; i < nfloats; i++)
-			block[(size_t)i] = (float)gauss(engine);
-
-		// spectral line: multiply the filter onto every slice
-		if(!linefilter.empty())
-		{
-			for(long long t = 0; t < slices; t++)
-			{
-				long long base = t * 2LL * grid.numsamps;
-				for(int i = 0; i < grid.numsamps; i++)
-				{
-					block[(size_t)(base + 2LL * i)] *= linefilter[(size_t)i];
-					block[(size_t)(base + 2LL * i + 1)] *= linefilter[(size_t)i];
-				}
-			}
-		}
-
-		// block visibility: write to <name>.tmp, then rename
-		char name[32];
-		snprintf(name, sizeof(name), "data_%02lld.bin", n);
-		if(!writeBlockFile(dir + "/" + name, &block[0], nfloats))
-			return false;
-	}
-
-	if(!writeMeta(grid, totalslices, seed, dir, batchid, startmjd, line, "done"))
-		return false;
-	cerr << "wrote " << dir << ": " << nblocks << " block(s), "
-	     << totalslices << " slices" << endl;
-	return true;
 }
 
 // ---------------------------------------------------------------------------
-// reader
+// small JSON text helpers
+//
+// These were Reader's static methods while there was a common/ signal to read;
+// after plan E the only JSON left to parse is batch.json, so they are plain
+// functions here (main.cpp calls them).
 
-bool Reader::extractJsonDouble(const string &json, const string &key, double *value)
+bool jsonDouble(const string &json, const string &key, double *value)
 {
 	size_t pos = json.find("\"" + key + "\"");
 	if(pos == string::npos)
@@ -327,16 +261,29 @@ bool Reader::extractJsonDouble(const string &json, const string &key, double *va
 	return (end != json.c_str() + pos + 1);
 }
 
-bool Reader::extractJsonInt(const string &json, const string &key, int *value)
+bool jsonInt(const string &json, const string &key, int *value)
 {
 	double d;
-	if(!extractJsonDouble(json, key, &d))
+	if(!jsonDouble(json, key, &d))
 		return false;
 	*value = (int)(d + 0.5);
 	return true;
 }
 
-bool Reader::extractJsonString(const string &json, const string &key, string *value)
+// 64-bit variant: block_bytes passed INT_MAX once the grid got wide -- t25362
+// at 2 MHz resolution asked for 512 points x 1e6 slices x 8 bytes per block.
+// Both variants go through the double parser, which is exact well past any
+// value a batch-level file holds.
+bool jsonInt(const string &json, const string &key, long long *value)
+{
+	double d;
+	if(!jsonDouble(json, key, &d))
+		return false;
+	*value = (long long)(d + 0.5);
+	return true;
+}
+
+bool jsonString(const string &json, const string &key, string *value)
 {
 	size_t pos = json.find("\"" + key + "\"");
 	if(pos == string::npos)
@@ -352,127 +299,42 @@ bool Reader::extractJsonString(const string &json, const string &key, string *va
 	return true;
 }
 
-Reader::Reader()
-	: ok(false), dir(""), nblocks_(0), blockfloats_(0), numsamps_(0), seed_(0)
+SliceStream::SliceStream()
+	: seed_(0), totalslices_(0), nblocks_(0), blockfloats_(0)
 {
 }
 
-Reader::~Reader()
+bool SliceStream::init(const Grid &grid, long long totalslices, unsigned long seed,
+                       const LineSpec &line)
 {
-}
-
-bool Reader::open(const string &commondir, const string &batchid,
-                  const Grid &expected)
-{
-	string path = commondir + "/meta.json";
-	string json = readAll(path);
-	if(json.empty())
+	if(totalslices <= 0 || grid.numsamps <= 0 || grid.slicesperblock <= 0)
 	{
-		cerr << "fxcorr-sim: common signal not ready: " << path
-		     << " missing or unreadable" << endl;
+		cerr << "fxcorr-sim: invalid common signal extent" << endl;
 		return false;
 	}
-	int version = 0;
-	string dtype, status, mbatch;
-	double specres = 0.0, minfreq = 0.0, seedsigned = 0.0;
-	int numsamps = 0, blockbytes = 0, slicesperblock = 0, nblocks = 0;
-	if(!extractJsonInt(json, "version", &version) ||
-	   !extractJsonString(json, "dtype", &dtype) ||
-	   !extractJsonString(json, "status", &status) ||
-	   !extractJsonString(json, "batch_id", &mbatch) ||
-	   !extractJsonDouble(json, "spec_res_mhz", &specres) ||
-	   !extractJsonDouble(json, "min_start_freq_mhz", &minfreq) ||
-	   !extractJsonDouble(json, "seed", &seedsigned) ||
-	   !extractJsonInt(json, "numsamps", &numsamps) ||
-	   !extractJsonInt(json, "block_bytes", &blockbytes) ||
-	   !extractJsonInt(json, "slices_per_block", &slicesperblock) ||
-	   !extractJsonInt(json, "nblocks", &nblocks))
-	{
-		cerr << "fxcorr-sim: meta.json missing required fields" << endl;
+	if(!buildLineFilter(grid, line, &linefilter_))
 		return false;
-	}
-	if(version != 1)
-	{
-		cerr << "fxcorr-sim: unsupported common signal version " << version << endl;
-		return false;
-	}
-	if(dtype != "float32")
-	{
-		cerr << "fxcorr-sim: unsupported common signal dtype " << dtype << endl;
-		return false;
-	}
-	if(status != "done")
-	{
-		cerr << "fxcorr-sim: common signal status is \"" << status
-		     << "\", not done - run fxcorr-sim common first" << endl;
-		return false;
-	}
-	if(mbatch != batchid)
-	{
-		cerr << "fxcorr-sim: common signal belongs to batch " << mbatch
-		     << ", not " << batchid << endl;
-		return false;
-	}
-	// the grid must agree with the whole-experiment layout this .input
-	// derives; a stale common/ from a different config is rejected here
-	if(specres != expected.specresmhz || numsamps != expected.numsamps ||
-	   minfreq != expected.minstartfreqmhz)
-	{
-		cerr << "fxcorr-sim: common signal grid (" << specres << " MHz res, "
-		     << numsamps << " points, " << minfreq << " MHz origin) does not "
-		     "match the .input band layout" << endl;
-		return false;
-	}
-	if((long long)blockbytes != (long long)numsamps * 2 * (long long)slicesperblock * 4)
-	{
-		cerr << "fxcorr-sim: meta.json block_bytes inconsistent" << endl;
-		return false;
-	}
-	dir = commondir;
-	nblocks_ = nblocks;
-	blockfloats_ = (long long)numsamps * 2 * (long long)slicesperblock;
-	numsamps_ = numsamps;
-	seed_ = (unsigned long)seedsigned;
-	ok = true;
+	grid_ = grid;
+	seed_ = seed;
+	totalslices_ = totalslices;
+	blockfloats_ = (long long)grid.numsamps * 2 * grid.slicesperblock;
+	nblocks_ = (totalslices + grid.slicesperblock - 1) / grid.slicesperblock;
+	// same reseed as generate(): mt19937::seed() and the mt19937(seed)
+	// constructor produce the same stream
+	engine_.seed(seed);
+	gauss_.reset();
 	return true;
 }
 
-long long Reader::readBlock(long long n, float *buf)
+long long SliceStream::fillBlock(long long n, float *buf)
 {
-	if(!ok || n < 0 || n >= nblocks_)
+	if(n < 0 || n >= nblocks_)
 		return -1;
-	char name[32];
-	snprintf(name, sizeof(name), "data_%02lld.bin", n);
-	string path = dir + "/" + name;
-	FILE *f = fopen(path.c_str(), "rb");
-	if(!f)
-	{
-		cerr << "fxcorr-sim: cannot open " << path << endl;
-		return -1;
-	}
-	size_t want = (size_t)blockfloats_;
+	long long slices = grid_.slicesperblock;
 	if(n == nblocks_ - 1)
-	{
-		// last block is truncated to the batch length; discover its size
-		fseek(f, 0, SEEK_END);
-		long long bytes = ftell(f);
-		fseek(f, 0, SEEK_SET);
-		if(bytes <= 0 || bytes % (4 * (long long)numsamps_) != 0)
-		{
-			cerr << "fxcorr-sim: corrupt last block " << path << endl;
-			fclose(f);
-			return -1;
-		}
-		want = (size_t)(bytes / 4);
-	}
-	size_t got = fread(buf, sizeof(float), want, f);
-	fclose(f);
-	if(got != want)
-	{
-		cerr << "fxcorr-sim: short read from " << path << endl;
-		return -1;
-	}
-	return (long long)got;
+		slices = totalslices_ - n * grid_.slicesperblock;
+	fillSliceBlock(grid_, slices, engine_, gauss_, linefilter_, buf);
+	return slices * 2LL * grid_.numsamps;
 }
 
 } // namespace CommonSignal

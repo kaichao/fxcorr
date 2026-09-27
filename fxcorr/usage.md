@@ -7,7 +7,7 @@
 ## 通用约定
 
 - 三工具均**无 MPI、串行**，通过目录接口衔接。
-- **目录根定位（V5 P5）**：五个可重定向的根 `FXCORR_{RAW,SIM_COMMON,FENGINE,VIS,PRODUCT}_ROOT`，
+- **目录根定位（V5 P5）**：四个可重定向的根 `FXCORR_{RAW,FENGINE,VIS,PRODUCT}_ROOT`，
   三档回退——该根已设置就用它，否则用 `<workdir>/<规范目录名>`；`workdir` 按
   "位置参数 > `FXCORR_WORKDIR` > 默认 `.`"解析并绝对化。`config/` `batches/` `meta/`
   `beam/` **没有独立根**，恒在 workdir 下。**规则权威见 `data-spec.md` 5.2.1**（各类相对
@@ -24,17 +24,16 @@
 
 ## fxcorr-sim
 
-架构：单二进制三入口（`common` 共享公共信号 / `station` 单站生成 / 无子命令本机串行），设计见 `fxcorr-sim-arch.md`。**实施状态（2026-09-14）**：新架构 P0-P4 全部完成并验证（下述即现行接口；验证记录见 applications/fxcorr-sim/VERIFICATION.md）；旧 4 参调用（`fxcorr-sim <batch_id> <station> [workdir] [tone_mhz...]`）已废止，报错提示改用 station 子命令。
+架构：单二进制两入口（`station` 单站生成 / 无子命令本机串行），设计见 `fxcorr-sim-arch.md`。**实施状态**：新架构 P0-P4 见于 2026-09-14 完成并验证；**V6 S2.5（2026-09-27）删除了 `common` 子命令**——公共信号不再落盘，改由每个 `station` 任务在本地合成（`data-spec` 5.8）。旧 4 参调用（`fxcorr-sim <batch_id> <station> [workdir] [tone_mhz...]`）已废止，报错提示改用 station 子命令。
 
 ```
-fxcorr-sim common  <batch_id> [workdir]                    # 只生成公共信号
-fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]  # 读公共信号，生成一个站的某个 datastream
-fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串行 common + 全站 station
+fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]  # 生成一个站的某个 datastream
+fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串行，跑 .input 里的全部站×全部 ds
 ```
 
 | 参数 | 说明 |
 |---|---|
-| `batch_id` | 批量标识（8 位顺序号，见「通用约定」与 data-spec 第 6 节），用于读 batch.json、sim-common/ 与输出命名 |
+| `batch_id` | 批量标识（8 位顺序号，见「通用约定」与 data-spec 第 6 节），用于读 `batches/<id>.json` 与输出命名 |
 | `station` | 站名（如 `T1`），输出目录 `raw/<station>/` 与文件名前缀（station 子命令） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
 | `ds_index` | **仅 station 子命令**：站内 datastream 序号（0-based，缺省 0），与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<st>/ds_<N>/` 四处同一口径（data-spec 5.2）。多 datastream 站每 ds 一次调用、每 ds 一个文件。**它的位置固定在 `workdir` 之后**，所以 legacy 的 tone 参数要写在它后面：`station <bid> <st> <workdir> 0 1.5`（缺了 ds_index 会把 1.5 当成 ds 序号报错） |
@@ -44,11 +43,11 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `FXSIM_SEED` | 固定值 | 公共信号种子（mt19937，common 与 station 共用）；新路径下公共信号只与 (seed, batch) 有关、与站无关（跨站相干来源），站噪声种子由 (seed, station, ds_index) 派生——**ds 维度必需**：dual-pol 站的 X/Y 两个 ds 覆盖同一频段，不带 ds 就会得到逐位相同的两份数据 |
+| `FXSIM_SEED` | 固定值 | 公共信号种子（mt19937）。**V6 S2.5 之后它随 `batches/<id>.json` 的 `seed` 字段走**，本变量只用于 `make_testdata.sh` 生成 batch.json 时选种子；一个 batch 的全部 station 任务必须读到同一个值，否则跨站相干静默消失。公共信号只与 (seed, batch) 有关、与站无关；站噪声种子由 (seed, station, ds_index) 派生——**ds 维度必需**：dual-pol 站的 X/Y 两个 ds 覆盖同一频段，不带 ds 就会得到逐位相同的两份数据 |
 | `FXSIM_NOISE` | `0.02` | station 端高斯噪声 σ；`0` 关闭（两站同参数全关闭 = 输出逐位一致，跨站相干校验） |
 | `FXSIM_ADAPTIVE` | 关 | station 端自适应量化门限（`1` 开启；datasim d_tmul 语义：量化前按数据 rms 缩放、每帧更新、1M 样本封顶），默认关 |
 | `FXSIM_SPECRES` | 1 | specRes 缩放因子（正整数）：公共信号频谱分辨率 ÷N、样本数 ×N（datasim --specres 语义）；网格缩放后的一致性检查照跑，station 须用同一值（meta.json 网格不匹配即报错） |
-| `FXSIM_LINE` | 关 | 谱线 `freq,amp,rms`：freq = 绝对 MHz（须落在公共信号带内，越界报错），amp = 幅度（滤波器乘 √amp），rms = 网格点数（datasim gengaussianfilter 语义，re=im 分量同乘）；common 端 gencplx 后逐 slice 频域注入、跨站相干；meta.json 记录三个参数 |
+| `FXSIM_LINE` | 关 | 谱线 `freq,amp,rms`：freq = 绝对 MHz（须落在公共信号带内，越界报错），amp = 幅度（滤波器乘 √amp），rms = 网格点数（datasim gengaussianfilter 语义，re=im 分量同乘）；站端合成公共信号时 gencplx 后逐 slice 频域注入、跨站相干（每站用同一 seed 与同一顺序，注入结果逐位相同） |
 | `FXSIM_DELAY` | 开（`0` 关） | **新路径**：完整延迟链（datasim updatevalues + processdata 语义）——每帧 .im 模型求 delay/rate（order=1）、fracsamperror 累积超半复样本整样本移位（滚动基带缓冲）、频域亚样本校正（e^{j·2π·bandwidth·idx/vpsamps·fracerr}）、时域条纹旋转（band 起始频率，fraction_of = x−rint(x−0.5) 小数相位）；`0` = 延迟无关恒等链（字节回归）。**legacy**：`1` = 把 .calc 几何延迟注入 tone 相位（+2π·f_RF·τ(t)，每帧 order=1 求值、帧内线性；pcal 不注入） |
 | `FXSIM_FLUX` / `FXSIM_SEFD` | 关 / 1000 | **新路径**：flux > 0 启用 datasim fabricatedata 定标链（×√F → +√SEFD 站噪声 → ÷√(F+SEFD) 归一），替代 FXSIM_NOISE 路径（显式设 NOISE 时报错）；SEFD = 单值全站共用或逗号列表按 .input datastream 序逐站取值（datasim -s 语义），flux 设了而 SEFD 没设时用默认 1000。**legacy**：源流量 / 站 SEFD（Jy），**两者都设**才启用 SNR 定标（tone 幅度 = 0.5·√(2F/(F+SEFD))、噪声 σ = 0.5·√(SEFD/(F+SEFD))，覆盖 FXSIM_NOISE） |
 | `FXSIM_PCAL` | 关 | **新路径**：datasim `-p` 梳齿间隔（MHz）——基带 k·interval MHz（k < 复带宽/interval，datasim 循环边界）各注入一根梳齿，幅度 1/500（datasim applyphasecal），相位从 batch 起点连续累积（datasim 的 mod 周期 = 2·带宽个样本 = 恰 1 秒 = 整数梳齿周期，等价），并做帧边 taper（首 3 样本 0/×½/×⅘、末 3 样本 ×⅘/×½/×0，datasim applyphasecal 尾部）；注入点在延迟校正链之后（pcal 不随几何延迟移动，datasim/legacy 同构）。与 .input PHASE CAL 网格 tone 独立叠加 |
@@ -58,31 +57,29 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 
 输入输出：
 
-- 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
-- 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；common 的 specRes/numSamps 网格由**全站** band 布局推导（GCD 二分，找不到报错）。
-- `common` 输出 `workdir/sim-common/<batch_id>/`：meta.json（版本/dtype/specRes/numSamps/minStartFreq/块表/seed/谱线参数 line_freq_mhz/line_amp/line_rms（0 = 无）/status）+ data_XX.bin（每 0.5s 块一个，float32 频域 slice 顺序；先临时名再 rename，meta status=done 后 station 才可启动）。格式见 data-spec 5.8。
-- `station` 输出 `workdir/raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（2bit VDIF，多 band 帧内样本 band 交织）；公共未就绪报错退出；延迟注入默认开（FXSIM_DELAY=0 关）。**`_ds<N>` 后缀只在多 datastream 站出现**（N = 站内序号 = `ds_index`），单 datastream 站的文件名与加多 ds 支持之前逐字相同——树里的测试资产全是单 ds 配置。
-- 默认模式 = 本机串行 `common` + 对 `.input` 全部 datastream（每站每 ds 一个文件）逐个 `station`；仅限单机，多节点须编排分别调用两入口。
+- 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file / **seed**）。
+- 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；公共信号的 specRes/numSamps 网格由**全站** band 布局推导（候选两段：0.5 → 1/1024 MHz 优先，全不适配时放宽到 1、2、4… MHz；候选还要让每帧占整数个 slice，见下面"程序内校验"）。
+- **公共信号不再落盘**（V6 S2.5）：每个 station 任务在本地合成整条 slice 流、只取自己 band 的那一段，不写也不读任何公共文件——原来那个 `sim-common/` 目录、它的 `meta.json` 与 `data_XX.bin` 全部取消。规范见 data-spec 5.8。
+- `station` 输出 `workdir/raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（2bit VDIF，多 band 帧内样本 band 交织）；延迟注入默认开（FXSIM_DELAY=0 关）。**`_ds<N>` 后缀只在多 datastream 站出现**（N = 站内序号 = `ds_index`），单 datastream 站的文件名与加多 ds 支持之前逐字相同——树里的测试资产全是单 ds 配置。
+- 默认模式 = 对 `.input` 全部 datastream（每站每 ds 一个文件）逐个 `station`，本机串行；仅限单机，多节点时编排层分别调用 `station`。
 
 程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；单 scan；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界；batch 时长非帧整数倍时文件生成到下一个帧边界取整（fxcorr-f 只读 batch 段）；common 的 band 频率须落在 specRes 网格（(freq−minStartFreq)/specRes 整数）；帧须为整数 slice（vpsamps % blksize == 0，即 1e6×specRes/fps 整数）、块总复样本须为帧复样本整数倍（nslices×blksize % vpsamps == 0，含末块）。
 
 示例：
 
 ```bash
-# 新路径：本机一键（common + 全站 station）
+# 本机一键（.input 里全部站 × 全部 ds）
 fxcorr-sim 00000001
 
-# 新路径：分布式两段（编排调用；station 可多节点并行）
-fxcorr-sim common 00000001 /data/proj
+# 分布式（编排调用；每个 station 任务可在不同节点，公共信号各自本地合成）
 fxcorr-sim station 00000001 T1 /data/proj
 
-# 跨站相干校验：两站噪声全关 → 输出逐位一致（单源公共信号）
-FXSIM_NOISE=0 fxcorr-sim common 00000001
+# 跨站相干校验：两站噪声全关 → 输出逐位一致（同一 seed、同一合成顺序）
 FXSIM_NOISE=0 fxcorr-sim station 00000001 T1
 FXSIM_NOISE=0 fxcorr-sim station 00000001 T2
 
 # P2：谱线（201.5 MHz，幅度 10，rms 3 网格点）+ 4 倍频谱分辨率
-FXSIM_LINE=201.5,10,3 FXSIM_SPECRES=4 fxcorr-sim common 00000001
+FXSIM_LINE=201.5,10,3 FXSIM_SPECRES=4 fxcorr-sim station 00000001 T1
 
 # P2：datasim 定标链（源 100 Jy；T1 SEFD 100、T2 SEFD 10000 按 datastream 序）
 FXSIM_FLUX=100 FXSIM_SEFD=100,10000 fxcorr-sim station 00000001 T1

@@ -20,6 +20,12 @@
 ## P0（新架构基础，测试机 /root/fxcortest/simp0/）
 
 - **legacy 字节对拍回归**：CLI 改三入口后 `FXSIM_NOISE=0 fxcorr-sim station simcmp T1 . 1.5` vs `gen_test_vdif.py /tmp/ref.vdif 4.096 1.5 8`，1024 帧 8,224,768 字节 **BYTE-IDENTICAL**（对拍配置 test-sim-**nopcal**.input——test-sim.input 带 PHASE CAL INT 1 会注入 pcal，参考文件无 pcal）。
+> **⚠ 本文件记的是 V6 S2.5（2026-09-27）之前的事。** 那时公共信号还要落盘（`fxcorr-sim common`
+> 子命令 + `sim-common/` 目录 + `FXCORR_SIM_COMMON_ROOT` 根），下面提到的 `common 生成`、
+> `common 产物`、`并发读 common` 等描述**都已不适用**——现在每个 `station` 任务在本地合成，
+> 没有公共中间文件。本文件按"验证记录、写完不再更新、重跑回归以脚本为准"的约定**保持原样**，
+> 作为当时实现的档案；现行规范见 `fxcorr/data-spec.md` 5.8，改造见 `fxcorr/v6-plan.md` S2.5。
+
 - **common 生成**：`fxcorr-sim common simcmp .` → common/simcmp/ 9 块（8×16MB + 末块 3,072,000B 截断）、meta.json status=done、specRes=0.5MHz/numsamps=8/minStartFreq=200 与手算一致；.tmp+rename 完成可见性生效。
 - **跨站相干**：两站 `FXSIM_NOISE=0 fxcorr-sim station simcmp T1/T2 .` 输出 1024 帧**逐位一致**（单源公共信号天然保证）；`FXSIM_NOISE=0.02` 两站数据自 byte 34 起不同（站噪声独立注入、帧头一致）。
 - **相干成分定量**：σ=1.0 两站 VDIF 解码后零滞后相关系数 0.444（理论 1/(1+σ²)=0.5，2bit 量化 + Ormsby 边缘损失，方向量级吻合）；量化健康（输出功率 1.24、无饱和）。

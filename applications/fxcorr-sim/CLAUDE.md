@@ -2,7 +2,9 @@
 
 **最后更新**：2026-09-27（**多 datastream 生成落地**：`station` 增 `ds_index` 参数、噪声种子加 ds 维度、输出名 `[_ds<N>]`——见"关键实现要点"的「多 datastream」条；2026-09-19）
 
-仿真 VDIF 数据生成器：无 MPI 串行程序，单二进制三入口（`common` 生成共享公共信号 / `station` 生成单站 VDIF / 无子命令本机串行）。datasim 的替身（上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建）。新架构 P0-P4 全部完成并验证（2026-09-14）。
+仿真 VDIF 数据生成器：无 MPI 串行程序，单二进制两入口（`station` 生成单站 VDIF / 无子命令本机串行）。datasim 的替身（上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建）。新架构 P0-P4 完成并验证（2026-09-14）。
+
+**2026-09-27 V6 S2.5 取消 D15**：公共信号不再落盘，改由每个 `station` 任务在本地合成（**算全部、只留自己 band 那段**）。`common` 子命令、`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根**都已删除**；公共参数只剩 `seed`，随 `batch.json` 走。判据是 raw 与原落盘路径**逐字节相同**（32/32 通过）。规范见 `data-spec` 5.8，决策与量化依据见 `fxcorr/v6-plan.md` S2.5。
 
 本文是该目录的操作说明（源文件地图、关键实现要点、构建注册）。命令行与环境变量见 `fxcorr/usage.md`（fxcorr-sim 段），架构设计（分布式形态、公共信号模型、datasim 特性差距、阶段 P0-P4）见 `fxcorr/fxcorr-sim-arch.md`，验证记录见本目录 `VERIFICATION.md`，测试资产与对拍流程见 `fxcorr/CLAUDE.md` 与 `fxcorr/test/`。
 
@@ -10,8 +12,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| main.cpp | 三入口分派（common/station/默认串行）、批处理上下文与站校验（setupStation，两路径共用）、FXSIM_* 解析（SPECRES/LINE 两入口共用、FLUX/SEFD 列表按 dsindex 取值、DELAY 开关、PCAL 梳齿）、旧 4 参调用报错提示 |
-| commonsignal.{h,cpp} | 公共信号生成与文件读写：deriveGrid（specRes/numSamps 网格，datasim getSpecRes 移植+修 bug，FXSIM_SPECRES 缩放因子）、generate（gencplx 语义确定性频谱流 + FXSIM_LINE 谱线逐 slice 乘、0.5s 块 .tmp+rename 写盘、meta.json running→done 含谱线参数）、Reader（meta 校验 + 按块流式读） |
+| main.cpp | 入口分派（station/默认串行）、批处理上下文与站校验（setupStation，两路径共用）、**deriveTotalslices**（batch 的 slice 总数，`.input` 的纯函数，station 端就地重算）、FXSIM_* 解析（SPECRES/LINE、FLUX/SEFD 列表按 dsindex 取值、DELAY 开关、PCAL 梳齿）、旧 4 参调用报错提示 |
+| commonsignal.{h,cpp} | 公共信号**内存生成**（S2.5 后无文件 I/O）：deriveGrid（specRes/numSamps 网格，datasim getSpecRes 移植+修 bug，FXSIM_SPECRES 缩放因子；候选序列分两段——0.5→1/1024 MHz 优先，全不适配时放宽到 1/2/4… MHz，并加**帧兼容**条件 `blksize` 整除每帧复样本数，t25362 由此取 2 MHz）、**SliceStream**（流式 slice 生成器：`fillSliceBlock` 是**唯一**推进 PRNG 的地方，engine 与 `normal_distribution` 必须跨块保持同一对——后者缓存 Box-Muller 的第二个值）、jsonDouble/jsonInt/jsonString（batch.json 解析） |
 | signalgen.{h,cpp} | 两层：SignalGen（legacy 时域合成，原样保留，字节对拍路径）；FreqStationGen（station 新路径频域链：切频段→站噪声/SEFD 定标→归一化→Ormsby→块 IDFT（滚动缓冲）→帧 DFT/DC 置零/fracsample 校正/条纹旋转/扩展/2N IDFT 复转实→pcal 注入→量化打包；datasim updatevalues 延迟吸收；站噪声种子 = FNV-1a(station, ds_index) 派生） |
 | vdifwriter.{h,cpp} | VDIF 帧封装：帧头 8 字（**vdifio/mark5access 字布局，2026-09-13 修正**）、帧时间戳/帧号按 batch 起点换算逐帧自增、2^n band 数校验（不动） |
 | VERIFICATION.md | 验证档案（legacy 路径 + P0-P4 全部验证记录与坑） |

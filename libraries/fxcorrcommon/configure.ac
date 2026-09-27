@@ -38,12 +38,30 @@ dnl **********************************************************
 dnl **** Set path for Intel Performance Primitive library ****
 dnl **********************************************************
 
-ipp_enabled=1
-AC_ARG_ENABLE(ipp, [AS_HELP_STRING([--disable-ipp],[disables IPP acceleration])])
-if test "x$enable_ipp" = xno; then
-	ipp_enabled=0
+dnl Off by default (upstream had it on).  None of the fxcorr tools need IPP --
+dnl fxcorr-sim does its FFTs with fftw3f, fxcorr-f/x likewise -- while an IPP
+dnl build actively hurts: architecture.h then maps vectorAlloc_f64 to
+dnl ippsMalloc_64f, and the Model arrays allocated that way come out subtly
+dnl wrong.  The visible effect is fxcorr-sim generating simulated data whose
+dnl delays are off by about a sample, i.e. a few 2-bit quantiser levels
+dnl flipping, silently.  Build it back in with --enable-ipp if something
+dnl genuinely needs IPP acceleration.
+ipp_enabled=0
+AC_ARG_ENABLE(ipp, [AS_HELP_STRING([--enable-ipp],[enables IPP acceleration (off by default, see configure.ac)])])
+if test "x$enable_ipp" = xyes; then
+	ipp_enabled=1
 fi
-PKG_CHECK_MODULES(IPP, ipp, [AC_DEFINE([HAVE_IPP], 1, [1=has IPP])], ipp_enabled=0)
+dnl The option has to gate the probe itself, not just ipp_enabled: the
+dnl AC_DEFINE sits in PKG_CHECK_MODULES' success branch, so an unguarded
+dnl probe defined HAVE_IPP even under --disable-ipp.  That mattered enough to
+dnl fix here: in an IPP build architecture.h maps vectorAlloc_f64 to
+dnl ippsMalloc_64f, and the Model arrays allocated that way come out subtly
+dnl wrong, which makes fxcorr-sim's simulated delays wrong by a sample or so
+dnl (found in the V6 S2.5 investigation; the symptom is a handful of 2-bit
+dnl quantiser levels flipping, with no error anywhere).
+if test ${ipp_enabled} = 1; then
+	PKG_CHECK_MODULES(IPP, ipp, [AC_DEFINE([HAVE_IPP], 1, [1=has IPP])], ipp_enabled=0)
+fi
 AC_SUBST(ipp_enabled)
 dnl IPP headers are not on the default include path and libfxcorrcommon.a
 dnl contains IPP calls: both the header path and the link flags must travel

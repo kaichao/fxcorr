@@ -132,8 +132,13 @@ Model::~Model()
           delete [] scantable[i].elgeom[j][k];
           delete [] scantable[i].parang[j][k];
         }
+        // clock[j][k] comes from vectorAlloc_f64 (model.cpp's allocation
+        // loop), which is ippsMalloc_64f in an IPP build -- delete[] on that
+        // is a mismatch that corrupts the heap, and the neighbouring delay
+        // model data with it.  Every other allocation in this destructor is
+        // paired correctly; this one was the exception (upstream bug).
         for(int k=0;k<numstations;k++)
-          delete [] scantable[i].clock[j][k];
+          vectorFree(scantable[i].clock[j][k]);
         delete [] scantable[i].u[j];
         delete [] scantable[i].v[j];
         delete [] scantable[i].w[j];

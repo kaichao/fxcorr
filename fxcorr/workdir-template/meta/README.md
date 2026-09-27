@@ -51,7 +51,6 @@ meta/
 {
   "workdir": "/data/scalebox/s0run",
   "raw": "/data/scalebox/s0run/raw",
-  "sim_common": "/data/scalebox/s0run/sim-common",
   "fengine": "/dev/shm/fengine",
   "vis": "/data/scalebox/s0run/vis",
   "product": "/data/scalebox/s0run/product"

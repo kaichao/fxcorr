@@ -44,7 +44,6 @@ const char *FxcorrPath::envname(Root r)
 	switch(r)
 	{
 	case ROOT_RAW:		return "FXCORR_RAW_ROOT";
-	case ROOT_SIM_COMMON:	return "FXCORR_SIM_COMMON_ROOT";
 	case ROOT_FENGINE:	return "FXCORR_FENGINE_ROOT";
 	case ROOT_VIS:		return "FXCORR_VIS_ROOT";
 	case ROOT_PRODUCT:	return "FXCORR_PRODUCT_ROOT";
@@ -57,7 +56,6 @@ const char *FxcorrPath::canonname(Root r)
 	switch(r)
 	{
 	case ROOT_RAW:		return "raw";
-	case ROOT_SIM_COMMON:	return "sim-common";
 	case ROOT_FENGINE:	return "fengine";
 	case ROOT_VIS:		return "vis";
 	case ROOT_PRODUCT:	return "product";
@@ -118,7 +116,6 @@ const char *FxcorrPath::jsonname(Root r)
 	switch(r)
 	{
 	case ROOT_RAW:		return "raw";
-	case ROOT_SIM_COMMON:	return "sim_common";
 	case ROOT_FENGINE:	return "fengine";
 	case ROOT_VIS:		return "vis";
 	case ROOT_PRODUCT:	return "product";

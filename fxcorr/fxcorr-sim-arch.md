@@ -15,64 +15,54 @@
 
 分布式由编排层（V2 scalebox）驱动 `common` / `station` 两个入口，程序内不引入 MPI。datasim（MPI 一体式）与本设计的关系：公共信号 Bcast 换成共享存储单份落盘、全站一次生成换成逐站任务、MPI 并行换成 (batch, station) 任务分片——信号合成算法（频域公共信号 + 分层注入）照 datasim 移植。
 
-## 2. 单一入口，三种用法
+## 2. 单一入口，两种用法
 
 ```text
-fxcorr-sim common  <batch_id> [workdir]
-fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]
+fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]
 fxcorr-sim         <batch_id> [workdir]
 ```
 
 | 调用 | 行为 |
 |------|------|
-| **`common`** | 只生成公共信号 → `common/<batch_id>/`（meta.json + 数据文件） |
-| **`station`** | 只读公共信号，生成**一个站的一个 datastream** → `raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（`ds_index` 位置参数，缺省 0）；tone_mhz 位置参数 = **legacy 模式**触发器（旧时域合成路径，字节对拍回归专用） |
-| **无子命令（默认）** | **本机串行**：先 `common`，再对 `.input` 全部站依次 `station`（一键多站；tone 参数不允许出现在此入口） |
+| **`station`** | 生成**一个站的一个 datastream** → `raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（`ds_index` 位置参数，缺省 0）。**公共信号在这个任务内部合成**（V6 S2.5：算全部、只留自己 band 那段，不读也不写任何公共文件）；tone_mhz 位置参数 = **legacy 模式**触发器（旧时域合成路径，字节对拍回归专用，不经公共信号） |
+| **无子命令（默认）** | **本机串行**：对 `.input` 全部站依次 `station`（一键多站；tone 参数不允许出现在此入口） |
 
-实现上两个模块：`run_common()`、`run_station()`；默认模式 = 二者顺序调用。旧 4 参调用 `fxcorr-sim <batch> <station> [workdir]` 废止（改 station 子命令），编排脚本同步迁移。
+**`common` 子命令、`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根已在 V6 S2.5（2026-09-27）删除**——理由与量化依据见第 6 节开头的改正注。实现上只剩 `run_station()`。旧 4 参调用 `fxcorr-sim <batch> <station> [workdir]` 废止（改 station 子命令），编排脚本同步迁移。
 
 ## 3. 数据流
 
-### 3.1 分布式（推荐）
-
 ```
 共享存储 workdir/
-  config/  batches/<batch_id>.json
+  config/  batches/<batch_id>.json      ← seed 在这里（唯一的公共参数）
 
-[任务 1 — 仅一次]
-  fxcorr-sim common B W
+[每个 (batch, station, ds) 一任务，可多节点并行]
+  fxcorr-sim station B S W <ds>
         │
+        │  公共信号在此进程内生成（SliceStream，不落盘）
         ▼
-  common/B/  + 完成标记（meta.json status=done）
-        │
-        ├─────────────────┬──────────────────┐
-        ▼                 ▼                  ▼
-fxcorr-sim station  station             station
-  B STA1 W           B STA2 W            B STAk W
-        │                 │                  │
-        ▼                 ▼                  ▼
-  raw/STA1/...       raw/STA2/...       raw/STAk/...
+  raw/<station>/<station>_B[_ds<N>].vdif
 ```
 
-### 3.2 单机默认
-
-```
-fxcorr-sim B W
-  → 内部: run_common(); for s in stations: run_station(s);
-```
+单机默认模式 = 对 `.input` 全部站 × 全部 ds 顺序跑同一件事。
 
 ## 4. 一致性与部署
 
 | 规则 | 说明 |
 |------|------|
-| 权威公共数据 | 仅**一次**成功的 `common` 写入共享存储；`common/<batch_id>/` 为共享资产 |
-| 站级 | 只读 `common/<batch_id>/`，不改写公共文件 |
-| 完成可见性 | 数据文件先写临时名再 `rename`；meta.json 的 `status=done` 写全后 station 才可启动 |
-| 禁止 | 多节点同时跑**默认多站**（会重复 common、竞争写站数据）；common 由编排保证单实例 |
-| 站噪声种子 | `f(global_seed, station_id, ds_index)`，与公共种子分离（ds 维度 2026-09-27 加，见 usage.md 的 `ds_index`） |
-| 消费后清理 | batch 的全部 station 完成后 common/<batch_id>/ 可删（同 fengine/ 生命周期管理，data-spec 12 节） |
+| 公共参数 | **只剩 `seed`**，随 `batches/<batch_id>.json` 走；网格与 batch 的 slice 总数都是 `.input` 的纯函数，各站就地重算、必然逐位相同 |
+| 站级 | 各站独立合成公共信号，**互不通信**；跨站相干靠"同一 seed + 同一 PRNG 顺序"保证 |
+| 数据一致性 | 判据是 raw 与原落盘路径**逐字节相同**（S2.5 验收：32/32） |
+| 禁止 | 同 batch 的各 station 任务**必须读到同一个 seed**；不一致则跨站相干**静默消失**，事后无法检测 |
+| 站噪声种子 | `f(seed, station_id, ds_index)`，与公共种子分离（ds 维度 2026-09-27 加，见 usage.md 的 `ds_index`） |
+| 消费后清理 | 无公共中间产物可清——`raw/` 是唯一产出（`data-spec` 12 节） |
 
 **优先：** 单任务 `common` + 多任务 `station`。**退路：** 单机默认串行。**不优先：** 每节点各自重算 common（见第 8 节成本分析；同架构节点确定性复现在科学上等价，但失去"权威单份"的单源一致性，且重复计算无收益）。
+
+> **⚠ 2026-09-27 改正（V6 S2.5）：下面这条判断已作废，`common` 子命令与 `sim-common/` 目录都已删除。**
+>
+> 那条"重复计算无收益"建立在 `test 配置`（1×4 MHz、8 Ms/s）的成本估算上；换成 t25362 的真实参数后结论反转——公共信号要按**覆盖跨度**生成 7072 MHz，而各站只读其中 1024 MHz，**85% 是白做的**：写 57.93 GB/batch、读侧跳读放大 221×、单 ds 从 2 分钟涨到 **34 分钟**。现在公共信号由每个 `station` 任务在本地合成（**算全部、只留自己 band 那段**），**算力换 I/O，wall time 不增**（各组并行）。公共参数只剩 `seed`，随 `batch.json` 走。
+>
+> **注意"只生成自己 band 那段"为什么做不到**：公共信号是流式顺序 PRNG 且跨 slice 连续，取 slice 内第 k 个点必须先算前 k 个；改成可寻址 PRNG 会改变全部数值、作废所有对拍基准。详见 `fxcorr/v6-plan.md` S2.5、`data-spec` 5.8。
 
 选"权威单份"而非"确定性复现"的核由：单源读取使跨站一致性与节点架构解耦——确定性复现的逐位一致只在同架构节点成立（fftw 不同 SIMD 路径可能有末位浮点差异），共享存储单份没有此限制。
 
@@ -108,7 +98,7 @@ V_i = g_i · S(t − τ_i) · e^{jφ_i} + n_i
 | 异带多站（8 站各 4MHz 分布 40MHz 跨度） | 320 MB/s | 2 MB/s/站 | common = 全站总量（16 MB/s）的 20 倍，共享存储持续读写需评估 |
 
 - 缓解手段（预留，不实现）：dtype 降 int16（比值 8 倍，96dB 动态范围对噪声信号无碍）；覆盖范围按 batch 实际用到的频段裁剪。**起步 float32，meta.json 带 dtype 字段留降级口。**
-- 结论：common 落盘量 ≥16× 单站数据，但 batch 粒度下绝对量可控、消费后可删；与"每节点各自重算 common（省 I/O、每站多算 ~10% 计算，见第 8 节）"相比，权威单份的一致性收益压倒 I/O 代价，定为唯一形态。
+- 结论：common 落盘量 ≥16× 单站数据，但 batch 粒度下绝对量可控、消费后可删；与"每节点各自重算 common（省 I/O、每站多算 ~10% 计算，见第 8 节）"相比，权威单份的一致性收益压倒 I/O 代价，定为唯一形态。**（⚠ 该结论已作废，改正见本节开头的 2026-09-27 注："绝对量可控"只在 test 配置成立，t25362 参数下是 57.93 GB/batch。）**
 - **代入真实观测参数后的体量核算见 `data-volume.md`**（2026-09-21 起）：t25362 那种宽跨度实测下 common 可达 57.9 GB/(1.024 s batch)，与站数无关——本节只给模型与比值。
 
 ## 6. 目录约定
@@ -124,7 +114,7 @@ workdir/
     └── <station>_<batch_id>.vdif
 ```
 
-数据文件布局与 meta.json 字段以 `workdir-template/sim-common/README.md` 为准（2026-09-27 起；格式版本随文件格式变更递增，改格式要同步那份 README 与 `data-spec` 5.8 的改版要求）。
+公共信号**不再有落盘格式**（V6 S2.5）：它只在 `station` 进程内存在，`SliceStream` 的块布局是内部实现细节，没有跨进程契约，因此既不需要格式版本、也不需要 README。规范只剩"参数"那一层——`seed` 随 `batch.json` 走，见 `data-spec` 5.8。
 
 ## 7. CLI 要点
 
@@ -139,7 +129,7 @@ workdir/
 
 | 项 | 设计 |
 |----|------|
-| common : station 计算比 | common 段（公共噪声生成 + 切频段 + IDFT + normalize）≈ 单站总量的 **10%**（test 配置估算：~200M flops/s vs 站总 ~2G flops/s，大头在站级帧校正链）；specRes 变细（多站频率差 GCD 小或 FXSIM_SPECRES 缩放）时公共段占比上升（specRes 减半 → 占比翻倍），这是"每节点各自重算 common 不优先"的量化依据 |
+| common : station 计算比 | common 段（公共噪声生成 + 切频段 + IDFT + normalize）≈ 单站总量的 **10%**（test 配置估算：~200M flops/s vs 站总 ~2G flops/s，大头在站级帧校正链）；specRes 变细（多站频率差 GCD 小或 FXSIM_SPECRES 缩放）时公共段占比上升（specRes 减半 → 占比翻倍），这是"每节点各自重算 common 不优先"的量化依据 **（⚠ 前提已作废：那是 test 配置的估算；t25362 参数下 common 要覆盖 7072 MHz 而实际只读 1024 MHz，"每站多算 10%"变成"多算 6.9 倍的白数据"，见本节开头的 2026-09-27 注）** |
 | 并行 | 多进程/多节点跑 **`station`**（任务粒度 = (batch, station)，与 fxcorr-f 同构）；V1 程序内单线程 |
 | OpenMP | V1 不需要；P3 已评估（2026-09-14）结论不实施，见阶段表 |
 

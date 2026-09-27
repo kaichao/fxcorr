@@ -24,7 +24,7 @@
 set -euo pipefail
 
 # 五个可重定向的根（V5 P5）：容器/ssh 透传与解析共用一份清单
-FXCORR_ROOT_VARS=(FXCORR_RAW_ROOT FXCORR_SIM_COMMON_ROOT FXCORR_FENGINE_ROOT FXCORR_VIS_ROOT FXCORR_PRODUCT_ROOT)
+FXCORR_ROOT_VARS=(FXCORR_RAW_ROOT FXCORR_FENGINE_ROOT FXCORR_VIS_ROOT FXCORR_PRODUCT_ROOT)
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
 FXCORR_RUN_MODE="${FXCORR_RUN_MODE:-host}"
@@ -34,7 +34,11 @@ CONTAINER_IMG=fxcorr/fxcorr
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # 目录根解析（V5 P5）：与 fxcorr-f/x/sim 内的 FxcorrPath 同规则，一处定义两处用
 . "$SCRIPTDIR/roots.sh"
-if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v vex2difx >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
+# 判据用 fxcorr 自己的工具，不用 vex2difx：有的机器已经把另一份 difx 的 bin 放进
+# 了 PATH（测试机即如此——BASH_ENV=/etc/profile.d/difx.sh 注入 /opt/difx/2.9.0），
+# 那里有 vex2difx 却没有 fxcorr 三工具，用 vex2difx 判据会跳过 source：后续
+# fxcorr-sim 找不到，前处理还会静默落到那份 difx 的 vex2difx/difxcalc 上。
+if [ "$FXCORR_RUN_MODE" != "container" ] && ! command -v fxcorr-sim >/dev/null 2>&1 && [ -f "$SCRIPTDIR/../setup.bash" ]; then
 	# setup.bash 的 PurgePath 引用可能未设置的变量（PERL5LIB 等），
 	# 与 set -u 冲突，source 时临时放开
 	set +u
@@ -137,7 +141,7 @@ fxcorr_mkroots	# Q19：五个根由编排层建齐，程序遇根不存在只报
 
 # ---- ① 前处理（幂等） ----
 # config 资产缺才复制。
-# 单 batch（对拍场景）直接用 difxcalc 原产物 test.input（SUBINT 0.524288s、
+# 单 batch（对拍场景）直接用 difxcalc 原产物（SUBINT 0.524288s、
 # INT TIME 1.048576，6/6 对拍同配置）；帧对齐的 128ms SUBINT 变体只用于
 # -n 多 batch（连续切分起点须帧边界，0.524288s 与帧网格公倍数 65.5s 不可用）。
 # 128ms 变体会触发 mpifxcorr vdifmux 帧号 bit7 错读（~每 256 帧坏 0.5s，
@@ -147,17 +151,44 @@ fxcorr_mkroots	# Q19：五个根由编排层建齐，程序遇根不存在只报
 # 前处理走各自的规范适配封装（V5 P5 Q15）：cwd 的处理与"绝对路径改回相对"的
 # 规范化都在那两个脚本里，本脚本只负责幂等与输出约定。
 # 前处理工具的进度/警告输出重定向 stderr，脚本 stdout 只留 batch_id（规格⑥）
-[ -f "$CFG/test.input" ] || "$SCRIPTDIR/wrap_vex2difx.sh" "$WORKDIR" test.v2d >&2
-[ -f "$CFG/test.im" ] || "$SCRIPTDIR/wrap_difxcalc.sh" "$WORKDIR" test.calc >&2
+#
+# 产物名不写死：vex2difx 按 .v2d 的 startSeries 命名（0 → test.input、
+# 1 → test_1.input），真实观测的 v2d 多为 1，而两个 wrap 脚本都按 glob 处理
+# ——此处同口径。*-sim.input 是本脚本自己派生出来的，不参与判定。
+pre_input()
+{
+	local p
+	for p in "$CFG"/*.input; do
+		[ -e "$p" ] || continue
+		case "$p" in *-sim.input) continue ;; esac
+		printf '%s\n' "$p"
+		return 0
+	done
+	return 1
+}
+
+INPUTFILE=$(pre_input) || INPUTFILE=""
+if [ -z "$INPUTFILE" ]; then
+	"$SCRIPTDIR/wrap_vex2difx.sh" "$WORKDIR" test.v2d >&2
+	INPUTFILE=$(pre_input)
+fi
+if ! ls "$CFG"/*.im >/dev/null 2>&1; then
+	# .calc 名同样由 startSeries 决定，glob 取（wrap_difxcalc.sh 接受多个）
+	CALCS=$(cd "$CFG" && ls *.calc 2>/dev/null) || CALCS=""
+	if [ -n "$CALCS" ]; then
+		# shellcheck disable=SC2086  # 有意分词：可能是多个 .calc
+		"$SCRIPTDIR/wrap_difxcalc.sh" "$WORKDIR" $CALCS >&2
+	fi
+fi
 if [ "$NBATCH" -gt 1 ]; then
 	if [ ! -f "$CFG/test-sim.input" ]; then
 		sed -e 's/^INT TIME (SEC):[[:space:]]*[0-9.]*$/INT TIME (SEC):     0.256/' \
 		    -e 's/^SUBINT NANOSECONDS:[[:space:]]*[0-9]*$/SUBINT NANOSECONDS: 128000000/' \
-		    "$CFG/test.input" > "$CFG/test-sim.input"
+		    "$INPUTFILE" > "$CFG/test-sim.input"
 	fi
 	INPUT="$CFG/test-sim.input"
 else
-	INPUT="$CFG/test.input"
+	INPUT="$INPUTFILE"
 fi
 
 # ---- ②③ 解析 .input、推导 batch 参数、写 batches/<batch_id>.json ----
@@ -256,7 +287,7 @@ if nsub < 1:
 # 的最大值 +1。编号不承载时间信息，所以重跑要另外保证幂等——已有 batch 的
 # (start_mjd, n_subints, subint_ns) 与本次规划一致时复用它的编号，否则整批
 # 数据会被重新生成一遍（测试机上每 batch 几十 GB）。三个分量都要比：单 batch
-# 用 test.input（0.524288s subint）、-n 多 batch 用 test-sim.input（128ms），
+# 用 difxcalc 原产物（0.524288s subint）、-n 多 batch 用 test-sim.input（128ms），
 # 起止时刻可能相同而粒度和时长不同。
 batchdir = os.path.join(workdir, 'batches')
 existing = []          # [(start_mjd, n_subints, subint_ns, bid)]
@@ -291,6 +322,11 @@ if not os.path.isabs(calcfull):
 calcrel = os.path.relpath(calcfull, workdir)
 imrel = calcrel[:-len('.calc')] + '.im' if calcrel.endswith('.calc') else calcrel + '.im'
 
+# 公共信号种子（V6 S2.5）：各站的 station 任务在本地各自合成公共信号，种子
+# 必须一致，否则跨站相干就没了——所以它随 batch.json 走，而不是落在某个
+# common/ 目录里。默认值与 fxcorr-sim 的默认值一致。
+seed = int(os.environ.get('FXSIM_SEED') or '20260912')
+
 epo = datetime(1858, 11, 17)
 created = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 for i in range(nbatch):
@@ -319,6 +355,8 @@ for i in range(nbatch):
         # 本字段只作记录——没有任何程序把它当路径读
         'difx_dir': one('OUTPUT FILENAME'),
         'created_at': created,
+        # 公共信号的 PRNG 种子：本 batch 的全部 station 任务必须读到同一个值
+        'seed': seed,
         'status': 'running',
         'fxcorr_f_version': '0.1.0',
         'fxcorr_x_version': '0.1.0',
@@ -423,9 +461,6 @@ stationcmd()
 
 TASKS=$(mktemp)
 for bid in "${BATCHES[@]}"; do
-	if [ "${#TONES[@]}" -eq 0 ]; then
-		fxc fxcorr-sim common "$bid" "$WORKDIR"
-	fi
 	for i in "${!DSTATION[@]}"; do
 		st=${DSTATION[$i]}
 		rel=$(vdifrel "$st" "${DSDI[$i]}" "${DSNDS[$i]}" "$bid")

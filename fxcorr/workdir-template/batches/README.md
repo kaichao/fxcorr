@@ -38,6 +38,7 @@ batches/
   "config_file": "config/test.input",
   "calc_file": "config/test.calc",
   "im_file": "config/test.im",
+  "seed": 20260912,
   "n_subints": 200,
   "subint_ns": 5120000,
   "integration_sec": 1.024,
@@ -61,6 +62,15 @@ batches/
   （t25362 是 16 / 16；4 站配置是 32 / 96）。手工构造的 batch.json（如
   `t25362work` 里那份）常写成**去重**形态，`fxcorr/run_batch.sh` 用 `set()` 比较，
   **两种都被接受**——但读的人要知道它未必去重；
+- **`seed`（2026-09-27 V6 S2.5 新增）**：公共信号的 PRNG 种子，**同一 batch 的全部 station
+  任务必须读到同一个值**——否则各站合成出的公共信号不同，**跨站相干静默消失**，事后没有
+  程序能检测出来。它是 D15 取消后唯一遗留的"公共参数"：网格（`specRes` / `numSamps` /
+  `minStartFreq`）与 batch 的 slice 总数都是 `.input` 的纯函数，各站就地重算、必然逐位相同，
+  所以不存也不传。`fxcorr/make_testdata.sh` 从环境变量 `FXSIM_SEED` 取（缺省 `20260912`），
+  规范见 `fxcorr/data-spec.md` 5.8；
+  **旧的 batch.json 没有这个字段**（S2.5 之前生成的），`fxcorr-sim` 会以
+  `batch.json missing required fields` 报错退出——补一行即可（值取生成该批数据时用的
+  `FXSIM_SEED`，缺省 `20260912`），不必重跑 `make_testdata.sh`；
 - `n_subints` × `subint_ns` = batch 时长，须是 `integration_sec` 的整数倍
   （`.input` 的 `INT TIME`），`fxcorr/run_batch.sh` 开跑前校验；
 - `polarizations` 逐条 baseline 推导（A 侧 band 极化 × B 侧 band 极化），

@@ -8,18 +8,21 @@
 
 class Configuration;
 
-// Common frequency-domain signal (D15, fxcorr/data-spec.md 5.8): grid
-// derivation, generation and file I/O.  The common signal is the cross-station
-// coherence source: one authoritative copy per batch on shared storage,
-// generated once by "fxcorr-sim common" and read (never written) by each
-// "fxcorr-sim station" task.
+// Common frequency-domain signal: grid derivation and slice-stream generation.
+//
+// The signal is the cross-station coherence source: every station of a batch
+// runs the same PRNG stream (same seed, same order) and cuts its own band out
+// of it, which is what makes the stations mutually coherent.  Nothing about it
+// is stored any more (V6 S2.5, plan E) - see SliceStream.  The one parameter
+// that has to be shared is the seed, and it travels in batches/<id>.json; the
+// grid and the batch extent are pure functions of .input, recomputed on the
+// spot by whoever needs them.
 //
 // Signal semantics (datasim gencplx port): a stream of complex spectra, one
 // slice of numsamps points every stime = 1/specres us, each point an
 // independent real/imag Gaussian pair with STDEV 1.  The slice covers the
 // whole-experiment band span [minstartfreq, minstartfreq + numsamps*specres)
-// so every station band is a contiguous cut of it; a station's cut is
-// bit-identical for every station reading it.
+// so every station band is a contiguous cut of it.
 namespace CommonSignal
 {
 
@@ -55,54 +58,58 @@ struct LineSpec
 // positive integer; every consistency check runs on the scaled grid.
 bool deriveGrid(Configuration &config, Grid *grid, int specresfac = 1);
 
-// Generate the common signal for one batch:
-//   simcommonroot/<batchid>/meta.json  +  data_XX.bin (one file per 0.5 s
-//   block, XX zero-padded).  Block files are written to <name>.tmp and
-//   renamed; meta.json starts with status "running" and flips to "done"
-//   after the last block, which is what makes the batch visible to stations.
-//   Deterministic in (seed, totalslices, grid, line) only - no station input.
-//   With a line configured the Gaussian filter is applied per slice right
-//   after gencplx (datasim.cpp generation loop); a line frequency outside
-//   the grid span is rejected.
-bool generate(const Grid &grid, long long totalslices, unsigned long seed,
-              const std::string &simcommonroot, const std::string &batchid,
-              double startmjd, const LineSpec &line = LineSpec());
-
-// Station-side reader.  open() parses meta.json and rejects it unless the
-// batch id matches and status is "done"; the grid fields must agree with the
-// expected grid (a stale common/ from a different .input must not be read).
-class Reader
+// Node-local streaming generator (V6 S2.5, plan E): the same slice stream
+// generate() would have written, produced block by block without touching the
+// filesystem.  The PRNG is reseeded the same way and every block goes through
+// the same slice-filling routine, so a station fed by this stream sees
+// bit-identical data - which is what the S2.5 acceptance test checks (the raw
+// output must match the file-fed path byte for byte).
+//
+// Why not just generate the band a station needs: the stream is a sequential
+// PRNG (slice-major, continuous across slices), so reaching slice s point k
+// means computing everything before it.  Generating the whole span and keeping
+// only one band's cut is the point of this class.
+class SliceStream
 {
 public:
-	Reader();
-	~Reader();
+	SliceStream();
 
-	bool open(const std::string &commondir, const std::string &batchid,
-	          const Grid &expected);
-	bool isOpen() const { return ok; }
-
-	// read block n (0-based) into buf; returns the number of floats actually
-	// read (the last block may be shorter), -1 on error
-	long long readBlock(long long n, float *buf);
+	// Same arguments as generate() minus the paths: a batch is described by
+	// (grid, totalslices, seed, line) alone.  A line outside the grid span is
+	// rejected the same way generate() rejects it.
+	bool init(const Grid &grid, long long totalslices, unsigned long seed,
+	          const LineSpec &line = LineSpec());
 
 	long long nblocks() const { return nblocks_; }
 	long long blockfloats() const { return blockfloats_; }
-	int numsamps() const { return numsamps_; }
+	int numsamps() const { return grid_.numsamps; }
 	unsigned long seed() const { return seed_; }
 
-	// static helpers shared with main.cpp's batch.json parsing
-	static bool extractJsonDouble(const std::string &json, const std::string &key, double *value);
-	static bool extractJsonInt(const std::string &json, const std::string &key, int *value);
-	static bool extractJsonString(const std::string &json, const std::string &key, std::string *value);
+	// Fill block n (0-based) into buf, which must hold blockfloats() floats
+	// (the last block may be shorter); returns the number of floats produced,
+	// or -1 if n is out of range.  Blocks are requested in order - the PRNG
+	// stream is continuous across them, exactly as in the file path.
+	long long fillBlock(long long n, float *buf);
 
 private:
-	bool ok;
-	std::string dir;
+	Grid grid_;
+	unsigned long seed_;
+	long long totalslices_;
 	long long nblocks_;
 	long long blockfloats_;
-	int numsamps_;
-	unsigned long seed_;
+	std::mt19937 engine_;
+	std::normal_distribution<double> gauss_;
+	std::vector<float> linefilter_;
 };
+
+// Small JSON text helpers.  After plan E the only JSON left to parse is
+// batches/<id>.json (main.cpp's loadBatchInfo); they stay in this header
+// because this is where the parsing lived when a common/ signal had to be
+// read back.
+bool jsonDouble(const std::string &json, const std::string &key, double *value);
+bool jsonInt(const std::string &json, const std::string &key, int *value);
+bool jsonInt(const std::string &json, const std::string &key, long long *value);
+bool jsonString(const std::string &json, const std::string &key, std::string *value);
 
 } // namespace CommonSignal
 
