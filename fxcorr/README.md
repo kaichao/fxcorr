@@ -189,7 +189,8 @@ V1–V4 均已完成，V5 进行中；各阶段的定案、实施与验收分别
 | V3 | 模块级 OpenMP（P3）；按需 GPU；期间收尾 P12 真实观测病态数据 | ✅ |
 | V4 | 读取路径改进（读模型）：A/B/C/D 四类缺陷修完、窗口语义（E4 净损失）归零、reader 三层重构、三层判据与诊断契约固化 | ✅ 见 `v4-plan.md` 开头的结论 |
 | V5 | 读模型收尾：补两个合成盲区（多组相邻的缺口+filler、`FILL_PATTERN`）、invalid 位定案；顺带修掉补盲区时抓出的 B7 | ✅ 见 `v5-plan.md`（只差"要真实数据"那条） |
-| V5 | 另立三项：**容器单镜像**（P4，已完成、验收 5/5）、目录路径环境变量化 + `common/` 改名 `sim-common/`（P5）、fxcorr-sim 造数能力（P6） | 进行中，见 `v5-plan.md` |
+| V5 | 另立三项：**容器单镜像**（P4，验收 5/5）、目录路径环境变量化 + `common/` 改名 `sim-common/`（P5，验收 11/11）、fxcorr-sim 造数能力（P6：**多 datastream 生成已完成**，处方文件与压测轻量模式待做） | P4/P5 ✅；P6 部分，见 `v5-plan.md` |
+| V5 | **分片架构**（2026-09-26/27 定）：batch_id 8 位顺序号、多 datastream 生成、x 按 **ds 组**的分片（D16 `vis-parts/`）+ `merge` 归并、SWIN 混跑检查 | ✅ 前三项 2026-09-27 完成（判据见 `test/multids/README.md`，含与 mpifxcorr 的多 ds 对拍）；SQLite 索引待做 |
 | 可选 | 输出与 difx2fits 更好衔接 | 未做 |
 
 ---

@@ -66,10 +66,13 @@ import glob, json, math, os, re, sys
 workdir = sys.argv[1]
 batchdir = os.path.join(workdir, 'batches')
 
-# ① batch 定位：优先从 DATA TABLE 软链 target（<station>_<batch_id>.vdif）解析，
-#    与数据精确对应（-n 多 batch 时软链指向最后 batch）；无软链（手工布局）时
-#    用 batches/ 下 mtime 最新的 json
+# ① batch 定位：优先从 DATA TABLE 软链 target 解析，与数据精确对应（-n 多 batch
+#    时软链指向最后 batch）；无软链（手工布局）时用 batches/ 下 mtime 最新的 json。
+#    target 是 make_testdata.sh 布局的 raw/<station>/<station>_<batch_id>[_ds<N>].vdif：
+#    站名从 target 的父目录取、不解析文件名——站名可能含下划线，多 datastream
+#    还有 _ds 后缀，按 "_" 切分的解析会错。反过来与各 batch.json 的编号比对。
 def softlink_bid():
+    target = None
     for j in glob.glob(os.path.join(batchdir, '*.json')):
         b = json.load(open(j))
         cfg = os.path.join(workdir, b['config_file'])
@@ -79,13 +82,16 @@ def softlink_bid():
         if not m:
             continue
         lnk = os.path.join(workdir, m.group(1))
-        if not os.path.islink(lnk):
-            continue
-        base = os.path.basename(os.readlink(lnk))
-        if base.endswith('.vdif'):
-            base = base[:-len('.vdif')]
-        bid = base.split('_', 1)[1] if '_' in base else base
-        if os.path.exists(os.path.join(batchdir, bid + '.json')):
+        if os.path.islink(lnk):
+            target = os.readlink(lnk)
+            break
+    if target is None:
+        return None
+    st = os.path.basename(os.path.dirname(target))
+    base = os.path.basename(target)
+    for j in glob.glob(os.path.join(batchdir, '*.json')):
+        bid = os.path.basename(j)[:-len('.json')]
+        if base == '%s_%s.vdif' % (st, bid) or base.startswith('%s_%s_ds' % (st, bid)):
             return bid
     return None
 

@@ -18,6 +18,7 @@
 #define VISIBILITY_H
 
 #include <string>
+#include <vector>
 #include "architecture.h"
 #include "configuration.h"
 
@@ -193,6 +194,39 @@ private:
  void flushBuffersToDisk(bool multifile);
 
 public:
+ /**
+  * Restrict every baseline loop to the baselines whose flag is 1 (fxcorr-x
+  * sharding, v5-plan.md P6): a shard holds only part of the datastreams, so
+  * only the baselines those datastreams form may be accumulated and written.
+  * Unset (default, empty vector) = all baselines, i.e. the pre-sharding
+  * behaviour - every loop then runs exactly as before.
+  */
+  void setActiveBaselines(const std::vector<char> &active);
+
+ /**
+  * Restrict the autocorrelation section to the datastreams whose flag is 1
+  * (autocorrelations are written one datastream at a time, so a shard must
+  * only write its own - otherwise two shards would each write duplicates).
+  */
+  void setActiveDatastreams(const std::vector<char> &active);
+
+ /**
+  * Send the SWIN records to an explicit file instead of
+  * <OUTPUT FILENAME>/DIFX_<mjd>_<sec>.s<SSSS>.b<BBBB> (a shard writes
+  * vis-parts/<batch_id>/ds<G>.part; the record stream is byte-identical to
+  * what a single-phase-centre, no-binning SWIN file would hold).
+  */
+  void setOutputPath(const std::string &path);
+
+  /// 1 when baseline i takes part in this Visibility (all of them by default)
+  bool baselineActive(int i) const
+  { return activebaselines.empty() || activebaselines[i] != 0; }
+
+  /// 1 when datastream i takes part in this Visibility (all of them by default)
+  bool datastreamActive(int i) const
+  { return activedatastreams.empty() || activedatastreams[i] != 0; }
+
+public:
   Configuration * config;
   int visID, expermjd, experseconds, currentscan, currentstartseconds, currentstartns, offsetns, offsetnsperintegration, subintsthisintegration, subintns, numvisibilities, numdatastreams, numbaselines, currentsubints, resultlength, currentconfigindex, maxproducts, executeseconds, autocorrwidth, todiskbufferlength, maxfiles, maxbinloop;
   long long estimatedbytes;
@@ -217,6 +251,13 @@ public:
   int ** pulsarbins;
   Model * model;
   Polyco * polyco;
+  // fxcorr-x sharding (v5-plan.md P6): empty = no restriction, every loop
+  // then runs exactly as it did before sharding existed
+  std::vector<char> activebaselines;
+  std::vector<char> activedatastreams;
+  std::string outputpath;	// non-empty = write records here, not to DIFX_*
+  bool wroteoutputpath;	// the first write truncates, later ones append: a shard
+                        // re-run overwrites its own .part (data-spec 5.9)
 };
 
 #endif

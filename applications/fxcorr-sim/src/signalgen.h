@@ -151,7 +151,8 @@ public:
 	          int vpsamps_, bool adaptive, double flux = 0.0, double sefd = 0.0,
 	          const std::vector<std::vector<double> > &pcaltonehz =
 	              std::vector<std::vector<double> >(),
-	          double pcalcombmhz = 0.0, long long ratehz_ = 0);
+	          double pcalcombmhz = 0.0, long long ratehz_ = 0,
+	          int dsindex = 0);
 
 	// Geometric delay injection (P2, datasim updatevalues + processdata
 	// semantics): every frame the .im model delay is evaluated at the frame

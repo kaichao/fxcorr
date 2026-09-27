@@ -45,7 +45,7 @@
 //}
 
 Visibility::Visibility(Configuration * conf, int id, int numvis, char * dbuffer, int dbufferlen, int eseconds, int scan, int scanstartsec, int startns, const string * pnames)
-  : config(conf), visID(id), currentscan(scan), currentstartseconds(scanstartsec), currentstartns(startns), numvisibilities(numvis), executeseconds(eseconds), todiskbufferlength(dbufferlen), polnames(pnames), todiskbuffer(dbuffer)
+  : config(conf), visID(id), currentscan(scan), currentstartseconds(scanstartsec), currentstartns(startns), numvisibilities(numvis), executeseconds(eseconds), todiskbufferlength(dbufferlen), polnames(pnames), todiskbuffer(dbuffer), wroteoutputpath(false)
 {
   int binloop, status;
 
@@ -186,6 +186,26 @@ Visibility::~Visibility()
     delete [] binscales;
     vectorFree(binweightdivisor);
   }
+}
+
+// --- fxcorr-x sharding (v5-plan.md P6) -------------------------------------
+// The masks are empty by default, and every loop below tests them through
+// baselineActive()/datastreamActive() which read "empty = everything".  With
+// no mask set the behaviour is therefore exactly the pre-sharding one.
+
+void Visibility::setActiveBaselines(const std::vector<char> &active)
+{
+	activebaselines = active;
+}
+
+void Visibility::setActiveDatastreams(const std::vector<char> &active)
+{
+	activedatastreams = active;
+}
+
+void Visibility::setOutputPath(const std::string &path)
+{
+	outputpath = path;
 }
 
 bool Visibility::addData(cf32* subintresults)
@@ -750,6 +770,8 @@ void Visibility::writeASCII(int dumpmjd, double dumpseconds)
   {
     for(int i=0;i<numdatastreams;i++)
     {
+      if(!datastreamActive(i))
+        continue;
       resultindex = config->getCoreResultAutocorrOffset(currentconfigindex, i);
       for(int j=0;j<autocorrwidth;j++)
       {
@@ -907,6 +929,12 @@ void Visibility::writeSWIN(int dumpmjd, double dumpseconds)
     buvw[2] = 0.0;
     for(int i=0;i<numdatastreams;i++)
     {
+      // sharding: these records are written unconditionally (unlike the
+      // baselines above, which need a non-zero weight), so a shard must
+      // filter explicitly or every shard would write every datastream's
+      // autocorrelation and the merge would end up with duplicates
+      if(!datastreamActive(i))
+        continue;
       baselinenumber = 257*(config->getDTelescopeIndex(currentconfigindex, i)+1);
       resultindex = config->getCoreResultAutocorrOffset(currentconfigindex, i);
       for(int j=0;j<autocorrwidth;j++)
@@ -1056,6 +1084,26 @@ void Visibility::flushBuffersToDisk(bool multifile)
 {
   char filename[MAX_PATH];
   ofstream output;
+  if(!outputpath.empty())
+  {
+    // shard mode: one file for every record this Visibility produced.  The
+    // caller guarantees a single phase centre and no pulsar binning (so
+    // there is exactly one buffer), which is also what makes the shard file
+    // a plain SWIN record stream: baselines start, autocorrelations after.
+    //
+    // The FIRST write truncates, later ones append: writeSWIN runs once per
+    // integration, while a re-run of the shard must overwrite its own .part
+    // rather than double it (data-spec 5.9).
+    ios_base::openmode mode = ios::out|ios::binary;
+    mode |= wroteoutputpath ? ios::app : ios::trunc;
+    wroteoutputpath = true;
+    output.open(outputpath.c_str(), mode);
+    output.write(todiskbuffer, todiskmemptrs[0]);
+    output.close();
+    if(!output)
+      csevere << startl << "Error trying to write more data to " << outputpath << " : " << strerror(errno) << "!!" << endl;
+    return;
+  }
   if(multifile)
   {
     int filenr = 0, binloop = 1, numfiles = 1;

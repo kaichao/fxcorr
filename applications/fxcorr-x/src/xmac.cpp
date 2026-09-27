@@ -79,7 +79,7 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 					pulsaraccumspace[f][x] = new cf32****[numbaselines];
 					for(int i=0;i<numbaselines;i++)
 					{
-						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						int localfreqindex = localFreqIndex(i, f);
 						if(localfreqindex < 0)
 						{
 							pulsaraccumspace[f][x][i] = 0;
@@ -139,7 +139,7 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 			baselineweight[i][b] = new f32*[numbaselines];
 			for(int j=0;j<numbaselines;j++)
 			{
-				int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
+				int localfreqindex = localFreqIndex(j, i);
 				if(localfreqindex >= 0)
 					baselineweight[i][b][j] = new f32[config->getBNumPolProducts(configindex, j, localfreqindex)];
 				else
@@ -152,7 +152,7 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 			baselineshiftdecorr[i] = new f32*[numbaselines];
 			for(int j=0;j<numbaselines;j++)
 			{
-				int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
+				int localfreqindex = localFreqIndex(j, i);
 				if(localfreqindex >= 0)
 					baselineshiftdecorr[i][j] = vectorAlloc_f32(config->getMaxPhaseCentres(configindex));
 				else
@@ -162,6 +162,20 @@ XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 		else
 			baselineshiftdecorr[i] = 0;
 	}
+}
+
+// -1 for a baseline outside this shard, otherwise the normal lookup: every
+// caller already treats -1 as "this baseline has no data at this frequency"
+int XmacEngine::localFreqIndex(int baseline, int freq) const
+{
+	if(!activebaselines.empty() && activebaselines[baseline] == 0)
+		return -1;
+	return config->getBLocalFreqIndex(configindex, baseline, freq);
+}
+
+void XmacEngine::setActiveBaselines(const std::vector<char> &active)
+{
+	activebaselines = active;
 }
 
 XmacEngine::~XmacEngine()
@@ -207,7 +221,7 @@ XmacEngine::~XmacEngine()
 					{
 						if(!pulsaraccumspace[f][x][i])
 							continue;
-						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						int localfreqindex = localFreqIndex(i, f);
 						for(int j=0;j<config->getBNumPolProducts(configindex, i, localfreqindex);j++)
 						{
 							for(int k=0;k<numpulsarbins;k++)
@@ -256,7 +270,7 @@ void XmacEngine::zeroSubint()
 			{
 				for(int j=0;j<numbaselines;j++)
 				{
-					int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
+					int localfreqindex = localFreqIndex(j, i);
 					if(localfreqindex >= 0)
 						vectorZero_f32(baselineweight[i][b][j], config->getBNumPolProducts(configindex, j, localfreqindex));
 				}
@@ -266,7 +280,7 @@ void XmacEngine::zeroSubint()
 				// core.cpp:745-757
 				for(int j=0;j<numbaselines;j++)
 				{
-					int localfreqindex = config->getBLocalFreqIndex(configindex, j, i);
+					int localfreqindex = localFreqIndex(j, i);
 					if(localfreqindex >= 0)
 						vectorZero_f32(baselineshiftdecorr[i][j], numphasecentres);
 				}
@@ -322,6 +336,9 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 			fxpasses.push_back(pass);
 			for(int j=0;j<numbaselines;j++)
 			{
+				// the layout must be the full one even in shard mode: the
+				// offsets are a fixed function of the baseline number and
+				// uvshiftAndAverage below reads the array through them
 				int localfreqindex = config->getBLocalFreqIndex(configindex, j, f);
 				if(localfreqindex >= 0)
 				{
@@ -355,6 +372,20 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 			int localfreqindex = config->getBLocalFreqIndex(configindex, j, f);
 			if(localfreqindex >= 0)
 			{
+				if(!baselineActive(j))
+				{
+					// Shard mode: this baseline is not ours, but its slice of
+					// threadcrosscorrs must still be stepped over - the
+					// offsets are a fixed function of the baseline number, so
+					// skipping the step would shift every later baseline onto
+					// the wrong data (this is what made a shard's baselines
+					// come out as zeros)
+					if(pulsarbin && !scrunchoutput)
+						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*numpulsarbins*xmacstridelength;
+					else
+						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
+					continue;
+				}
 				int ds1index = config->getBOrderedDataStream1Index(configindex, j);
 				int ds2index = config->getBOrderedDataStream2Index(configindex, j);
 
@@ -464,7 +495,7 @@ void XmacEngine::accumulateWeights(int fftloop, const vector<vector<SpReader *> 
 			{
 				if(config->isFrequencyUsed(configindex, f))
 				{
-					int localfreqindex = config->getBLocalFreqIndex(configindex, j, f);
+					int localfreqindex = localFreqIndex(j, f);
 					if(localfreqindex >= 0)
 					{
 						int ds1index = config->getBOrderedDataStream1Index(configindex, j);
@@ -510,7 +541,7 @@ void XmacEngine::uvshiftAndAverage(double offsetsec, double nsoffset, double nsw
 					int xmacstrideremain = min(freqchannels-x*xmacstridelength, xmacstridelength);
 					for(int i=0;i<numbaselines;i++)
 					{
-						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						int localfreqindex = localFreqIndex(i, f);
 						if(localfreqindex >= 0)
 						{
 							for(int s=0;s<1;s++) //forced to single pulsar ephemeris for now
@@ -564,7 +595,7 @@ void XmacEngine::uvshiftAndAverage(double offsetsec, double nsoffset, double nsw
 					int xmacstrideremain = min(freqchannels-x*xmacstridelength, xmacstridelength);
 					for(int i=0;i<numbaselines;i++)
 					{
-						int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+						int localfreqindex = localFreqIndex(i, f);
 						if(localfreqindex >= 0)
 						{
 							for(int s=0;s<1;s++) //forced to single pulsar ephemeris for now
@@ -607,7 +638,7 @@ void XmacEngine::uvshiftAndAverageBaselineFreq(double offsetsec, double nsoffset
 
 	applieddelay = 0.0;
 	delaywindow = config->getFNumChannels(freqindex)/(config->getFreqTableBandwidth(freqindex)); //max lag (plus and minus)
-	localfreqindex = config->getBLocalFreqIndex(configindex, baseline, freqindex);
+	localfreqindex = localFreqIndex(baseline, freqindex);
 	rotatestridelen = config->getRotateStrideLength(configindex);
 
 	if(localfreqindex < 0)
@@ -873,7 +904,7 @@ void XmacEngine::copyBaselineWeights(f32 *floatresults)
 		{
 			for(int i=0;i<numbaselines;i++)
 			{
-				int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+				int localfreqindex = localFreqIndex(i, f);
 				if(localfreqindex >= 0)
 				{
 					int resultindex = config->getCoreResultBWeightOffset(configindex, f, i)*2;
@@ -892,7 +923,7 @@ void XmacEngine::copyBaselineWeights(f32 *floatresults)
 				// shift-decorr section (core.cpp:1090-1105), one f32 per phase centre
 				for(int i=0;i<numbaselines;i++)
 				{
-					int localfreqindex = config->getBLocalFreqIndex(configindex, i, f);
+					int localfreqindex = localFreqIndex(i, f);
 					if(localfreqindex >= 0)
 					{
 						int resultindex = config->getCoreResultBShiftDecorrOffset(configindex, f, i)*2;

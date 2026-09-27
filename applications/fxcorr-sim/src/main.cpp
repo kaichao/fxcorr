@@ -37,7 +37,9 @@ struct BatchInfo
 struct StationSetup
 {
 	string station;
-	int dsindex;
+	int dsindex;                    // .input datastream index (global)
+	int dslocal;                    // station-local index (fxcorr-f's ds_index)
+	int ndsinstation;               // datastreams this station has in .input
 	int nbands;
 	vector<double> bandfreqmhz;     // band start frequencies, MHz (FREQ table)
 	vector<double> bandbwmhz;       // band bandwidths, MHz
@@ -64,13 +66,18 @@ static void usage()
 	     << "  fxcorr-sim common  <batch_id> [workdir]\n"
 	     << "      generate the shared common signal only (sim-common/<batch_id>/,\n"
 	     << "      FXCORR_SIM_COMMON_ROOT)\n"
-	     << "  fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]\n"
-	     << "      read the common signal, generate one station's VDIF;\n"
+	     << "  fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]\n"
+	     << "      read the common signal, generate one datastream of one station\n"
+	     << "      (ds_index = station-local 0-based datastream number, default 0,\n"
+	     << "      same numbering as fxcorr-f's ds_index; the file is\n"
+	     << "      raw/<station>/<station>_<batch_id>[_ds<N>].vdif, the _ds suffix\n"
+	     << "      appearing only when the station has several datastreams);\n"
 	     << "      one tone value applies to all bands, nbands values apply band\n"
 	     << "      by band; any tone argument switches to the legacy time-domain\n"
 	     << "      synthesis path (byte-comparison regression only)\n"
 	     << "  fxcorr-sim         <batch_id> [workdir]\n"
-	     << "      serial: common + every station in .input (single machine only)\n"
+	     << "      serial: common + every datastream of every station in .input\n"
+	     << "      (single machine only)\n"
 	     << "  env (new path): FXSIM_NOISE (default 0.02, 0 disables), FXSIM_SEED,\n"
 	     << "      FXSIM_ADAPTIVE (1 = running-rms quantiser), FXSIM_SPECRES\n"
 	     << "      (grid scaling factor, positive integer), FXSIM_LINE (spectral\n"
@@ -152,26 +159,50 @@ static bool deriveFrame(Configuration &config, int dsindex, int *bytesperbandfra
 	return true;
 }
 
+// data-spec 5.2: raw/<station>/<station>_<batch_id>[_ds<N>].vdif.  The _ds
+// suffix appears only for multi-datastream stations, so every
+// single-datastream layout (all of the tree's test assets) keeps the name it
+// had before multi-datastream generation existed.
+static string stationOutPath(const StationSetup &st, const BatchInfo &bi)
+{
+	string name = st.station + "_" + bi.batchid;
+	if(st.ndsinstation > 1)
+		name += "_ds" + to_string(st.dslocal);
+	return FxcorrPath::root(FxcorrPath::ROOT_RAW) + "/" + st.station + "/" + name + ".vdif";
+}
+
 // All per-station checks (sampling mode, band count, 2-bit, frame structure,
 // subint/frame-aligned batch start) plus the legacy tone/pcal/delay extras.
 // Shared by both synthesis paths so the two produce identical VDIF framing.
 static bool setupStation(Configuration &config, Model *model, const BatchInfo &bi,
-                         const string &station, bool legacy,
+                         const string &station, int dslocal, bool legacy,
                          const vector<double> &tonemhzarg, StationSetup *st)
 {
+	// A station appears once per datastream in .input's DATASTREAM table;
+	// dslocal is the station-local 0-based index, the same numbering fxcorr-f
+	// takes and the raw/fengine filenames use (data-spec 5.2/5.3).  Locate
+	// that datastream, counting only this station's own entries.
 	st->station = station;
+	st->dslocal = dslocal;
+	st->ndsinstation = 0;
 	st->dsindex = -1;
 	for(int d = 0; d < config.getNumDataStreams(); d++)
 	{
-		if(config.getDStationName(0, d) == station)
-		{
+		if(config.getDStationName(0, d) != station)
+			continue;
+		if(st->ndsinstation == dslocal)
 			st->dsindex = d;
-			break;
-		}
+		st->ndsinstation++;
+	}
+	if(st->ndsinstation == 0)
+	{
+		cerr << "fxcorr-sim: station " << station << " not found in .input" << endl;
+		return false;
 	}
 	if(st->dsindex < 0)
 	{
-		cerr << "fxcorr-sim: station " << station << " not found in .input" << endl;
+		cerr << "fxcorr-sim: station " << station << " has " << st->ndsinstation
+		     << " datastream(s) in .input, ds_index " << dslocal << " is out of range" << endl;
 		return false;
 	}
 
@@ -657,7 +688,7 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	FreqStationGen gen;
 	if(!gen.init(st.bandfreqmhz, st.bandbwmhz, grid, noisesigma, seed,
 	             st.station, vpsamps, adaptive, flux, sefd, st.pcalhz,
-	             pcalcomb, st.ratehz))
+	             pcalcomb, st.ratehz, st.dslocal))
 		return EXIT_FAILURE;
 	if(dodgen)
 		gen.enableDelayInjection(model, 0, config.getDModelFileIndex(0, st.dsindex),
@@ -665,8 +696,8 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 		                         (double)st.framens / 1.0e9);
 
 	// output raw/<station>/<station>_<batch_id>.vdif (data-spec 5.2)
+	string outpath = stationOutPath(st, bi);
 	string outdir = FxcorrPath::root(FxcorrPath::ROOT_RAW) + "/" + st.station;
-	string outpath = outdir + "/" + st.station + "_" + bi.batchid + ".vdif";
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
 	{
@@ -774,8 +805,8 @@ static int doStationLegacy(Configuration &config, Model *model, const BatchInfo 
 	if(const char *adenv = getenv("FXSIM_ADAPTIVE"))
 		adaptive = (strcmp(adenv, "1") == 0);
 
+	string outpath = stationOutPath(st, bi);
 	string outdir = FxcorrPath::root(FxcorrPath::ROOT_RAW) + "/" + st.station;
-	string outpath = outdir + "/" + st.station + "_" + bi.batchid + ".vdif";
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
 	{
@@ -833,6 +864,7 @@ int main(int argc, char **argv)
 		workdir = wd;
 
 	string batchid, station;
+	int dslocal = 0;
 	vector<double> tonemhzarg;
 
 	if(cmd == "common" || cmd == "station")
@@ -848,7 +880,24 @@ int main(int argc, char **argv)
 			station = argv[3];
 			if(argc > 4)
 				workdir = argv[4];   // argument takes precedence over the environment
-			for(int a = 5; a < argc; a++)
+			if(argc > 5)
+			{
+				// station-local datastream index, same numbering as fxcorr-f's
+				// ds_index and the raw/fengine file names (data-spec 5.2/5.3).
+				// Its position is fixed, so the legacy tone list has to be
+				// preceded by it: "station <bid> <st> <workdir> 0 1.5"
+				char *end;
+				long v = strtol(argv[5], &end, 10);
+				if(end == argv[5] || *end != '\0' || v < 0)
+				{
+					cerr << "fxcorr-sim: bad ds_index '" << argv[5]
+					     << "' (a non-negative integer expected; tone_mhz values"
+					        " now come after it)" << endl;
+					return EXIT_FAILURE;
+				}
+				dslocal = (int)v;
+			}
+			for(int a = 6; a < argc; a++)
 				tonemhzarg.push_back(atof(argv[a]));
 		}
 		else
@@ -867,7 +916,7 @@ int main(int argc, char **argv)
 		{
 			cerr << "fxcorr-sim: the 4-argument form (batch station workdir "
 			        "tone...) is obsolete; use\n"
-			        "  fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]" << endl;
+			        "  fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]" << endl;
 			return EXIT_FAILURE;
 		}
 	}
@@ -912,21 +961,29 @@ int main(int argc, char **argv)
 	if(cmd == "station")
 	{
 		StationSetup st;
-		if(!setupStation(config, model, bi, station, legacy, tonemhzarg, &st))
+		if(!setupStation(config, model, bi, station, dslocal, legacy, tonemhzarg, &st))
 			return EXIT_FAILURE;
 		if(legacy)
 			return doStationLegacy(config, model, bi, st);
 		return doStationNew(config, model, bi, st);
 	}
 
-	// default: serial common, then one station task per datastream
+	// default: serial common, then every datastream of every station (a
+	// multi-datastream station gets one file per datastream, each with its
+	// own noise stream - see stationNoiseSeed)
 	if(doCommon(config, bi) != EXIT_SUCCESS)
 		return EXIT_FAILURE;
 	for(int d = 0; d < config.getNumDataStreams(); d++)
 	{
+		string stname = config.getDStationName(0, d);
+		int local = 0;
+		for(int e = 0; e < d; e++)
+		{
+			if(config.getDStationName(0, e) == stname)
+				local++;
+		}
 		StationSetup st;
-		if(!setupStation(config, model, bi, config.getDStationName(0, d), false,
-		                 tonemhzarg, &st))
+		if(!setupStation(config, model, bi, stname, local, false, tonemhzarg, &st))
 			return EXIT_FAILURE;
 		if(doStationNew(config, model, bi, st) != EXIT_SUCCESS)
 			return EXIT_FAILURE;

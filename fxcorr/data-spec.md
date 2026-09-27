@@ -1,7 +1,7 @@
 # fxcorr 数据规范文档（完整版）
 
-**版本**：1.1
-**最后更新**：2026-09-27（**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
+**版本**：1.2
+**最后更新**：2026-09-27（**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
 **上一版更新**：2026-09-21（**第 11 节的体积公式移入 `data-volume.md` §1.3**，本节只留速查；V5 P6 讨论：第 12 节补六条——**时间层级表**（FFT 块 / Core 短积分 /
 Manager 最终积分 ↔ fxcorr 的 `.sp` 块 / subint / intTime）、batch 时长与起点约束（`intTime`
 整数倍、下限随配置而变而非固定秒数、**起点须落在积分边界**——并记下当前三层校验都只覆盖
@@ -13,6 +13,13 @@ subint 对齐这一缺口）、SWIN 文件粒度（实验级一组文件、非�
 invalid 位帧的语义）
 **适用系统**：fxcorr-f / fxcorr-x 流水线（由 DiFX/mpifxcorr 重构）
 **处理模式**：非实时、按时间批量、串行可手工执行
+
+**v1.2 变更**（相对 v1.1）：
+- **新增 D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范——记录格式 2026-09-27 定稿为 **SWIN 记录流原样**（74 字节头 + cf32），`merge` 只做搬运；同节含分组依据、与 `vis/` 的隔离边界、缺片处理、**与全量模式互斥（已落成程序内检查）**
+- **batch_id 改为 8 位零填充顺序号**（第 6 节）——名字不再承载时间信息，"batch 时长 ≥ 1 s"随之取消；新增「任务标识（task_id）」规范
+- 5.2 的 raw 命名明确 **`_ds<N>` 后缀只在多 datastream 站出现**（单 ds 站的文件名与加多 ds 之前逐字相同）；生成侧已落地
+- 第 4 节模块 I/O 加 `fxcorr-x merge`、第 9 节数据流加分片分支、第 2 节目录表加 `vis-parts/`、第 12 节生命周期表加 D16
+- 5.7 新增「未来：SQLite 索引」（JSON 权威、sqlite 派生、单写者）
 
 **v1.1 变更**（相对 v1.0）：
 - 定义 `band_XX.sp` / `pcal.bin` / `autocorr.bin` 二进制格式（第 5.3 节）
@@ -98,7 +105,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 | D13 | 全局索引/日志 | `meta/` | 运行过程 | 文本/JSON | KB~MB | 批量索引、运行日志等 |
 | D14 | 波束数据 | `beam/<batch_id>/beam.bin` | fxcorr-x（相位阵） | 二进制（beam.bin） | MB 级 | 相位阵波束加权和频谱，按 acc 窗口记录（P8 2026-09-13；上游无对照格式，fxcorr 自定，见 5.5 节） |
 | D15 | 仿真公共信号 | `sim-common/<batch_id>/` | fxcorr-sim common | 二进制（float32 频域 slice）+ JSON | 较大 | 频域公共信号（量化前复基带频谱，权威一份，各站 station 只读切频段；≥16× 单站 2bit 数据量，见 `data-volume.md`）；格式见 5.8 节（2026-09-14 新增） |
-| D16 | 分片局部记录 | `vis-parts/<batch_id>/...` | fxcorr-x（分片任务） | 二进制（格式待定） | 极小（≈ D10 总量级） | 每个 x 分片任务产出的可见度记录，由 fxcorr-x 的 `merge` 子命令按时间归并写出正式 SWIN（D10）；**写入顺序非自由**，见 5.9 节（2026-09-26 新增） |
+| D16 | 分片局部记录 | `vis-parts/<batch_id>/...` | fxcorr-x（分片任务） | 二进制（**SWIN 记录流原样**，见 5.9） | 极小（≈ D10 总量级） | 每个 x 分片任务产出的可见度记录，由 fxcorr-x 的 `merge` 子命令按时间归并写出正式 SWIN（D10）；**写入顺序非自由**，见 5.9 节（2026-09-26 新增） |
 
 ---
 
@@ -112,7 +119,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 | **fxcorr-sim station** | 数据生成2 | D3、D9、D15 | D7（raw/ 单站 VDIF） | 每站一任务，多节点并行；只读公共信号，不改写 |
 | **fxcorr-f** | 核心（Station-based） | D3（.input）、D4（.calc）、D6（.im）、D7（raw）、D9（batch.json，只读） | D8（频域谱+自相关+pcal） | 按台站、按批量处理 |
 | **fxcorr-x** | 核心（Baseline-based） | D3（.input）、D4（.calc）、D6（.im）、D8（fengine）、D9（batch.json，只读） | D10（SWIN 可见度）；相位阵配置时改出 D14（beam.bin，无 SWIN） | 按批量处理多台站数据；UVW 由模型求值。**分片模式下改出 D16**（不再直接写 SWIN，见 5.9） |
-| **fxcorr-x `merge`** | 归并（子命令，**方案，待实施**） | D16（vis-parts 局部记录） | D10（SWIN 可见度） | 按整数纳秒时间戳归并；SWIN 的**唯一写入者**（`data-volume.md` §7.5）。与分片任务**同二进制、不同调用**，复用 fxcorr-x 已有的 SWIN 写入路径 |
+| **fxcorr-x `merge`** | 归并（子命令，**2026-09-27 已实施**） | D16（vis-parts 局部记录） | D10（SWIN 可见度） | 按整数纳秒时间戳归并；SWIN 的**唯一写入者**（`data-volume.md` §7.5）。与分片任务**同二进制、不同调用**，复用 fxcorr-x 已有的 SWIN 写入路径 |
 | **difx2fits** | 后处理1 | D3、D4、D6、D10、D5（可选） | D11（.FITS） | 生成 FITS-IDI，SWIN 零改造直读 |
 | **difx2mark4** | 后处理2 | D3、D4、D6、D10、D1 等 | D12（Mark4） | 生成 Mark4 格式 |
 
@@ -160,7 +167,7 @@ raw/
 
 - 编号：D7
 - 按台站组织
-- 命名建议：`<station>_<batch_id>.<suffix>` 或保持原始记录名。**多 datastream 站必须每 ds 一个文件、文件名含 ds 编号**（如 `<station>_<batch_id>_ds<N>.vdif`）——同站不同 ds 若同名会互相覆盖；每个 ds 的文件按 `.input` DATA TABLE 的对应行软链。**（fxcorr-sim 目前只生成第一个 ds；多 ds 生成与"mpifxcorr 与 fxcorr 各取所需"的对拍方案见 `v5-plan.md` P6「多 datastream 生成」，2026-09-27）**
+- 命名建议：`<station>_<batch_id>.<suffix>` 或保持原始记录名。**多 datastream 站必须每 ds 一个文件、文件名含 ds 编号**（如 `<station>_<batch_id>_ds<N>.vdif`）——同站不同 ds 若同名会互相覆盖；每个 ds 的文件按 `.input` DATA TABLE 的对应行软链。**`_ds<N>` 后缀只在多 datastream 站出现**（单 ds 站的 `<station>_<batch_id>.vdif` 不带后缀，与加多 ds 支持之前的命名逐字相同）；生成侧已落地（fxcorr-sim `ds_index` 参数 + make_testdata.sh 的逐 ds 任务与软链，2026-09-27，见 `v5-plan.md` P6「多 datastream 生成」与 `test/multids/`）。
 - **`_ds<N>` 的 N 是站内序号**（0-based，按 `.input` DATASTREAM 表里该站出现的次序）——**与 `fengine/<batch_id>/<station>/ds_<N>/` 的 N 同一口径**（fxcorr-x 定位 `ds_N/` 时算的就是这个站内序号），也与 `fxcorr-f` 的 `ds_index` 参数同一口径。**三处必须一致**，否则 f 会读错文件。
 - 数据量：TB 级
 - 约束：一个 raw 文件的时间范围须覆盖完整 batch；切批见第 12 节
@@ -533,12 +540,15 @@ vis-parts/
 - **分组依据（硬约束，2026-09-27 实测后定）**：`ds_group` 的成员必须从 **`.input` 的 BASELINE TABLE 推导**——即"覆盖同一频段组的那些 baseline 条目所涉及的 ds 集合"，**不是按 ds 序号猜**。每条 baseline 条目绑定一对具体的 ds、只出一个极化产品（极化展开进 baseline 编号，机理见第 8 节），所以只含单极化的分片会丢掉该频段的 RL/LR/LL。t25362 实测：每组 4 个 ds（两站 × 两极化），共 4 组。**同一 batch 内数据齐备**（f 本就覆盖该时段全部站的全部 ds），所以只要分组正确，该频段声明的 baseline 都能算出。
 - **为什么需要这一步**：SWIN 的追加顺序**不是自由的**。difx2fits 顺序读记录（`DifxVisRecordgetnext` 是唯一读取原语），并按天线检查时间单调（`fitsUV.c:1227` 的 `RecordIsOld`）；时间回退的记录被**静默丢弃**，只在结尾打印一行 `out-of-time-range records dropped`（`fitsUV.c:1868`），不报错。分片任务各自追加同一组文件必然时间回退，所以**写入必须集中在唯一一处**——`merge` 与分片任务是不同的进程调用，分片任务不再写 SWIN，唯一写入者仍然成立。分析与方案见 `data-volume.md` §7.5。
 - **与 `vis/` 的边界（硬约束）**：difx2fits 只 glob `OUTPUT FILENAME` 目录下**以 `DIFX` 开头**的文件（`fitsUV.c:82-98`，glob 模式为 `<job.outputFile>/DIFX*`）。因此 `.part` **既不放进 `vis/` 目录、也不使用 `DIFX` 前缀**——两重隔离，杜绝被误当正式 SWIN 读入。`ds<G>.part` 这个命名是 fxcorr 自定的：**DiFX 生态里不存在"可见度分片"这个概念**，没有既有约定要遵守，只需避免与 `DIFX*` 撞名。
-- **记录内容**：每条记录须自足到"能重建一条 D10 记录"——SWIN 记录头的全部字段（baseline 号、时间、config/source/freq 索引、极化对、pulsar bin、weight、UVW）+ 复频谱数据。（具体格式待定，定稿时递增 version 并回写本节。）
+- **记录内容与格式（2026-09-27 定稿）**：`.part` **就是 SWIN 记录流原样**——74 字节记录头（`visibility.cpp` 的 `appendSWINHeaderBuffered`：sync word / 版本 / baseline 号 / MJD / 秒（double）/ config 索引 / source 索引 / freq 索引 / 极化对两字节 / pulsar bin / weight（double）/ UVW 三分量）+ `nchan/chansToAverage` 个 `cf32` 复频谱，与 D10 逐字节同构。这样 `merge` 只做搬运、不需要理解语义。
+- **记录长度不在头里**：由 `freqindex` 查 `.input` 的 FREQ 表得到（`nchan / channelsToAverage × 8` 字节），所以 `merge` 必须读 `.input`——它本来就要读（输出文件名、根解析同源）。**分片模式下每条记录必属单相位中心、无 pulsar binning**（程序对这二者直接报错退出），所以 `flushBuffersToDisk` 的多文件分支不会出现，一个分片就是一个文件。
 - **归并 key**：用**整数纳秒时间戳**（由 scan 起点与 `offsetns` 推算），不是浮点 `sec`——浮点相等比较不可靠。
 - **生命周期**：实验的合并写出 SWIN 后即删（编排层清理，同 `fengine/` 第 12 节语义）；重跑分片时覆盖写自己的 `.part`。
 - **等待策略**：全量（整个实验的分片到齐后一次合并）或增量（按积分窗口滚动）；分片迟到时的行为必须在编排层显式定义（等 / 超时跳过留空洞 / 告警），见第 12 节。
 - **缺片处理（硬约束 + 逃生口）**：`merge` 启动时先核对本 batch 的 ds 组是否集齐，**缺则报错退出、不写任何东西**（stderr 列出缺哪几组）。设 `FXCORR_X_MERGE_FORCE=1` 可强制写出已到齐的部分——缺失组对应的频段在该 batch 的时间段内**没有记录**，difx2fits 不会因此报错，只是静默缺段（只在 `merge` 的 stderr 日志里留痕）。默认严格是刻意的：分片缺失通常意味着任务失败或未调度，静默缺段比报错危险得多。
 - **与"全 band 模式"互斥（硬约束，2026-09-27）**：同一 batch 的 fxcorr-x 只能选一种模式——**不分片**（一次处理全部 ds，直写 SWIN）或**分片**（按 `ds_group` 多次写 `.part`，再由 `merge` 写 SWIN）。**两者不能对同一 batch 混跑**：分片任务不写 SWIN，而 `merge` 会为该 batch 的时间范围追加记录，混跑会产生重复记录、破坏 SWIN 的时间单调（§7.5）。**f 侧不受影响**——f 天然是每 ds 一个任务，两种模式下产出**完全相同**的 `fengine/`；选哪种只决定 x 的一次跑还是多次跑。
+- **互斥已落成程序内检查**（2026-09-27）：三种模式启动时都读目标 SWIN 的**记录头**（数据用 `seekg` 跳过，GB 级文件也是秒级），若本 batch 的时间范围内已有记录则报错退出，提示"这个 batch 已经被全量或 merge 写过"；`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续。分片任务自身不写 SWIN，所以**重跑分片不会被拦**。
+- **`.part` 的重复运行是覆盖写**：同一次运行里 `writeSWIN` 每个积分周期写一次（追加），但**一次运行的第一次写是截断**——重跑分片得到的是新内容，不会把上一次的翻倍。
 
 ---
 
@@ -551,7 +561,7 @@ vis-parts/
 | 形态 | `NNNNNNNN`，固定 8 位、零填充。**定宽是必需的**：不定宽时 `100` 会排在 `42` 前面，字符串排序就不再等于编号顺序 |
 | 作用域 | 同一 `workdir` 内**全局唯一、单调递增**（跨实验也不重复）。容量 10⁸ 个 batch——1.024 s 的 batch 可连续覆盖 **1185 天**，0.512 s 的覆盖 592 天，切到 5.12 ms（1 个 subint）也有 5.9 天。**位数为何取 8、以及"band 该不该进 batch"的取舍，见 `data-volume.md` §7.6** |
 | 时间语义 | **batch_id 不承载任何时间信息**。起点、时长、band 等全部在 `batches/<batch_id>.json`（D9）里，字段见 5.3 |
-| 分配 | 由**切批规划步骤单点分配**（现为 `make_testdata.sh`，未来是 scalebox）：取 `batches/` 下已有编号的最大值 +1。**计算节点不生成 batch_id** |
+| 分配 | 由**切批规划步骤单点分配**（现为 `make_testdata.sh`，未来是 scalebox）：取 `batches/` 下已有编号的最大值 +1。**计算节点不生成 batch_id**。`make_testdata.sh` 另做一层复用以保证重跑幂等：已有 batch 的 `(start_mjd, n_subints, subint_ns)` 与本次规划一致时沿用它的编号（否则每次重跑都分配新号、把整批数据重新生成一遍）。三个分量缺一不可——单 batch 用 `test.input`（0.524288 s subint）、`-n` 多 batch 用 `test-sim.input`（128 ms），起止时刻可能相同而粒度与时长不同 |
 | 排序 | 字符串排序 = 编号顺序 = **时间顺序**（由分配时的单调性保证，与 batch 的**处理**顺序无关——乱序补跑不影响） |
 | 一致性 | 同一 batch 在 `fengine/`、`sim-common/`、`vis-parts/` 下使用同一 `batch_id` |
 | 格式校验 | **三工具不做格式校验**——`batch_id` 一律当不透明字符串用于路径拼接（`batches/<id>.json`、`fengine/<id>/…`）。因此**旧的时间编码格式（`60512_45000` / `20260908_123000`）仍然可用**，历史测试资产无需迁移 |
@@ -662,7 +672,7 @@ D10 (vis/<experiment>.difx/ SWIN) + D9
 D11 (.FITS) 或 D12 (Mark4)
 ```
 
-分片模式（**方案，待实施**，见 `data-volume.md` §7 与 5.9 节）：fxcorr-x 按 datastream 切分后，分片任务**不直接写 SWIN**，而是产出 D16 局部记录，再由 `fxcorr-x merge` 归并写出 D10——SWIN 的追加顺序必须严格按时间，写入者只能有一个：
+分片模式（**2026-09-27 已实施**，见 `data-volume.md` §7 与 5.9 节）：fxcorr-x 按 datastream 切分后，分片任务**不直接写 SWIN**，而是产出 D16 局部记录，再由 `fxcorr-x merge` 归并写出 D10——SWIN 的追加顺序必须严格按时间，写入者只能有一个：
 
 ```
 D8 (fengine) + D9

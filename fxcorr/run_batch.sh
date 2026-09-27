@@ -14,6 +14,10 @@
 # 用法：./run_batch.sh <batch_id> [workdir]
 #   batch_id  批量标识（batches/<batch_id>.json 须已写好，可用 make_testdata.sh 生成）
 #   workdir   项目根目录（默认 .；环境变量 FXCORR_WORKDIR 亦可定义，位置参数优先）
+#   环境变量：FXCORR_X_SHARD=1 走分片路径——逐 ds 组跑 fxcorr-x（各写
+#             vis-parts/<bid>/ds<G>.part），再由 fxcorr-x merge 归并写出 SWIN。
+#             组数由本脚本从 .input 的 BASELINE TABLE 推导（与程序内
+#             deriveDsGroups 同规则，两处必须同改）。不设 = 现行行为。
 set -euo pipefail
 
 # 五个可重定向的根（V5 P5）：容器透传与解析共用一份清单
@@ -169,15 +173,35 @@ for st, fn in zip(stations, datafiles):
 
 # OUTPUT FILENAME resolves against the vis root (Q20); an absolute value wins,
 # os.path.join drops the prefix for it - same rule as the programs
+# ds 组推导（分片模式用）：与 fxcorr-x 的 deriveDsGroups **同规则**——每条
+# baseline 绑定一对 ds，把全部条目并查集合并，连通分量就是一组（覆盖同一频段
+# 组的那些 ds）。两处实现没有编译器兜底，改一处要改两处（data-spec 5.9）。
+blka = re.findall(r'^D/STREAM A INDEX \d+:\s*(\d+)\s*$', text, re.M)
+blkb = re.findall(r'^D/STREAM B INDEX \d+:\s*(\d+)\s*$', text, re.M)
+parent = list(range(len(stations)))
+def _find(x):
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+for xa, xb in zip(blka, blkb):
+    ra, rb = _find(int(xa)), _find(int(xb))
+    if ra < rb:
+        parent[rb] = ra
+    elif rb < ra:
+        parent[ra] = rb
+ngroups = len({_find(i) for i in range(len(stations))})
+
 outdir = os.path.join(visroot, one('OUTPUT FILENAME').rstrip('/'))
 print('CFGIN=%s' % cfgrel)
+print('NGRP=%d' % ngroups)
 print('OUTDIR=%s' % outdir)
 print('--')
 for st, di, fn in zip(stations, dsidx, datafiles):
     print('%s %s %s' % (st, di, fn))
 PYEOF
 
-CFGIN= OUTDIR=
+CFGIN= OUTDIR= NGRP=1
 while IFS= read -r line && [ "$line" != "--" ]; do
 	[ -n "$line" ] || continue
 	k=${line%%=*}
@@ -185,6 +209,7 @@ while IFS= read -r line && [ "$line" != "--" ]; do
 	case "$k" in
 		CFGIN) CFGIN=$v ;;
 		OUTDIR) OUTDIR=$v ;;
+		NGRP) NGRP=$v ;;
 	esac
 done < "$OUT"
 [ -n "$CFGIN" ] || { echo "run_batch.sh: failed to parse batch $BID" >&2; exit 2; }
@@ -234,7 +259,27 @@ for entry in "${DSTATION[@]}"; do
 done
 
 mkdir -p "$OUTDIR"    # 规格⑤（fxcorr-x 自身也会建，先建无害）
-if ! fxc fxcorr-x "$BID" "$WORKDIR"; then
+# FXCORR_X_SHARD=1：按 ds 组分片（每片一个 x 任务），再由 merge 归并写出 SWIN。
+# 分片任务不写 SWIN（D16 落 vis-parts/），**merge 是 SWIN 的唯一写入者**——写出
+# 顺序必须时间单调，而分片各自追加必然时间回退（data-spec 5.9）。组数由上面
+# 的 python 段从 .input 推导（与程序内同一规则）。
+if [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
+	echo "run_batch.sh: shard mode, $NGRP ds group(s)" >&2
+	g=0
+	while [ "$g" -lt "$NGRP" ]; do
+		if ! fxc fxcorr-x "$BID" "$WORKDIR" "$g"; then
+			echo "run_batch.sh: fxcorr-x shard $g failed for batch $BID" >&2
+			mark_status failed
+			exit 1
+		fi
+		g=$((g + 1))
+	done
+	if ! fxc fxcorr-x merge "$BID" "$WORKDIR"; then
+		echo "run_batch.sh: fxcorr-x merge failed for batch $BID" >&2
+		mark_status failed
+		exit 1
+	fi
+elif ! fxc fxcorr-x "$BID" "$WORKDIR"; then
 	echo "run_batch.sh: fxcorr-x failed for batch $BID" >&2
 	mark_status failed
 	exit 1

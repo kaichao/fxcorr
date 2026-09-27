@@ -1,6 +1,6 @@
 # fxcorr-x 目录说明
 
-**最后更新**：2026-09-27（调用方式一节补分片模式与 `merge` 子命令的**待实施**接口；2026-09-17 主体）
+**最后更新**：2026-09-27（**分片模式与 `merge` 子命令已实施**：`ds_group` 分片、D16 `vis-parts/`、按时间归并写出 SWIN——见调用方式一节与"分片实现要点"；2026-09-17 主体）
 
 baseline-based 相关器后端（X-Engine）：无 MPI 串行程序，读 fxcorr-f 的 .sp / autocorr.bin 产物，做 XMAC 与长期积分，可见度直出 SWIN（`vis/<experiment>.difx/`）。算法照 mpifxcorr 的 `Core::processdata()` 切分移植，写盘复用 fxcorrcommon 的 Visibility（零改造）。
 
@@ -8,17 +8,33 @@ baseline-based 相关器后端（X-Engine）：无 MPI 串行程序，读 fxcorr
 
 ```
 fxcorr-x <batch_id> [workdir]              # 现行：整 batch 全 ds，直写 SWIN
-fxcorr-x <batch_id> [workdir] <ds_group>   # 分片模式（**待实施**）
-fxcorr-x merge <batch_id> [workdir]        # 归并（**待实施**）
+fxcorr-x <batch_id> [workdir] <ds_group>   # 分片模式：只算一个 ds 组，写 vis-parts/
+fxcorr-x merge <batch_id> [workdir]        # 归并分片，写出 SWIN（唯一写入者）
 ```
 
-> **分片模式（2026-09-27 定，未实施）**：目标计算节点装不下一个 batch 的 `fengine`，故 x 要能按 **ds 组**分片——每组 = **跨站、含全部极化**的若干 datastream，覆盖同一频段组（**互相关**的要求：两站同一 freq 必须同时在场，且要算全极化组合）。**分组成员从 `.input` 的 BASELINE TABLE 推导，不是按 ds 序号**——每条 baseline 条目绑定一对具体的 ds、只出一个极化产品；实测映射见 `data-volume.md` §7.3，机理见 `data-spec` 第 8 节。分片任务写 `vis-parts/<batch_id>/ds<G>.part`（D16）而**不写 SWIN**，由 `merge` 子命令按时间归并写出。规范见 `data-spec` 5.9 与第 6 节「任务标识」；改造清单见 `v5-plan.md` 末节第 6 条。
+> **分片模式（2026-09-27 定并实施）**：目标计算节点装不下一个 batch 的 `fengine`，故 x 要能按 **ds 组**分片——每组 = **跨站、含全部极化**的若干 datastream，覆盖同一频段组（**互相关**的要求：两站同一 freq 必须同时在场，且要算全极化组合）。**分组成员从 `.input` 的 BASELINE TABLE 推导，不是按 ds 序号**——每条 baseline 条目绑定一对具体的 ds、只出一个极化产品；实测映射见 `data-volume.md` §7.3，机理见 `data-spec` 第 8 节。分片任务写 `vis-parts/<batch_id>/ds<G>.part`（D16）而**不写 SWIN**，由 `merge` 子命令按时间归并写出。规范见 `data-spec` 5.9 与第 6 节「任务标识」；改造清单见 `v5-plan.md` 末节第 6 条。
 
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。
 - 数据源 `workdir/fengine/<batch_id>/<station>/ds_<N>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream；N = 站内 datastream 序号（按 .input datastream 序累计，多 datastream 站每记录线程一个 f 任务，见 fxcorr-f 的 ds_index）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘沿用 config 语义，difx2fits 零改造），batch.json 的 difx_dir 仅为元数据。
 - **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = 0（manager 角色），identifier = .input basename。节奏：Starting → 每积分写盘一条 Running（Integrator::sendRunning，writedata 后、increment 前——increment 清零 floatresults，时序同上游 fxmanager loopwrite；weight 照抄 visibility.cpp:1100-1146，f32 截断点一致，对拍逐位一致）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>.xml`（构造时截断，重跑幂等）。
+
+## 分片实现要点（2026-09-27 实施，改 baseline/datastream 循环前必读）
+
+分片的单位是 **ds 组**（跨站、含全部极化的一批 datastream，覆盖同一频段组），不是单个 ds。要点：
+
+- **ds 组用并查集从 BASELINE TABLE 推导**（`deriveDsGroups`）：每条 baseline 绑定一对具体的 ds，连通分量就是一组；合并时小的根胜出，于是代表元 = 组内最小 ds 序 = 组序。**不能按 ds 序号或 freq 条目配对**——同频段的 X/Y 是两条不同的 freq 条目，而 t25362 的第 2 条 baseline 是 (ds1,ds8) 而非 (ds1,ds9)。
+- **`threadcrosscorrs` 的布局回放必须保持全局**，屏蔽只决定"算不算"。`xmacBatch` 的 `fxpasses` 预计算与主循环按 `resultindex += ...` 复现数组偏移，而 `uvshiftAndAverageBaselineFreq` 用 `getThreadResultBaselineOffset` 这类**固定函数**取偏移——两者必须一致。若屏蔽时连 `resultindex` 的推进也跳过，后续 baseline 全部错位，症状是**分片的基线记录全 0**（autocorr 正常，它不走这条路）。实现上是"组外的 baseline 只推进 `resultindex` 再 `continue`"。
+- **`localFreqIndex()` 只用于"是否相乘"**（`xmacBatch` 的主循环与 `accumulateWeights`）；任何**布局回放**处都要用未屏蔽的 `config->getBLocalFreqIndex`。
+- **autocorr 段要按 ds 过滤**（`Visibility::setActiveDatastreams`）：这些记录无条件写（不像基线记录要 `weight > 0`），不过滤则每个分片都会写全部 ds 的自相关，merge 后重复。
+- **`.part` 就是 SWIN 记录流原样**：`Visibility::setOutputPath()` 把 `flushBuffersToDisk` 重定向到一个显式文件；单相位中心 + 无 pulsar binning（分片模式报错挡掉这两种）保证只有一个缓冲区。
+- **`merge` 是 SWIN 的唯一写入者**：按整数纳秒分组 + `stable_sort`（键 `(key, autocorr, baseline, freqindex, pulsarbin)`，**刻意不含极化对**——头里只有 polpair 没有 k，字典序不等于写盘顺序，靠 stable_sort 保原序）。autocorr 判据是"非零且能被 257 整除"，只在撞号时影响周期内顺序，不影响集合。
+- **互斥检查（`swinHasBatchRange`）**：三种模式启动时读目标 SWIN 的记录头，本 batch 时间范围内已有记录即报错（`FXCORR_X_SWIN_CONFLICT=allow` 绕过）。只读 74 字节头、数据 `seekg` 跳过。
+- **`.part` 的第一次写截断、后续追加**（`Visibility::wroteoutputpath`）：`writeSWIN` 每积分周期调一次，同一次运行内是追加；而重跑分片必须覆盖自己的 `.part`（data-spec 5.9），所以由第一次写负责截断。
+- **`readPart` 必须读 `.input`**：记录长度不在头里，由 `freqindex` 查 FREQ 表得到。sync word 与长度不符即报错退出（宁可停，也不要写出看着正常实则残缺的 SWIN）。
+
+**判据**（`fxcorr/test/multids/README.md` 有可复现步骤）：单组分片与不分片逐字节相同；多组分片 + merge 与不分片逐字节相同；缺片默认不写、`FXCORR_X_MERGE_FORCE=1` 强制并告警。
 
 ## 文件与 mpifxcorr 对照
 

@@ -8,7 +8,7 @@
 
 用一个可执行文件 `fxcorr-sim` 生成对接 fxcorr 流水线的多站基带数据，支持单机一键与多节点分布式：
 
-- 输出：`raw/<station>/<station>_<batch_id>.vdif`（file-per-batch，不变）。**多 datastream 站要扩展成每 ds 一个文件**（`_ds<N>` 后缀）——目前只生成该站第一个 ds；`stationNoiseSeed` 也需加 ds 索引（否则同站覆盖相同频段的两个 ds 噪声完全相同）。改造清单与对拍方案见 `v5-plan.md` P6「多 datastream 生成」（2026-09-27）
+- 输出：`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（file-per-batch；**多 datastream 站每 ds 一个文件**，后缀只在多 ds 站出现）。**已实施（2026-09-27）**：`station` 子命令带 `ds_index` 位置参数、站噪声种子含 ds 索引（ds=0 的种子与改前相同）、默认模式遍历全部站的全部 ds。改造记录与验证见 `v5-plan.md` P6「多 datastream 生成」与 `test/multids/README.md`
 - 配置与时间：`batches/<batch_id>.json`、`config/`（`.input`、按需 `.im`）
 - 中间：`common/<batch_id>/`（公共信号，权威一份）
 - V1：单线程；加速靠多任务/多节点跑站级，不用 OpenMP
@@ -26,7 +26,7 @@ fxcorr-sim         <batch_id> [workdir]
 | 调用 | 行为 |
 |------|------|
 | **`common`** | 只生成公共信号 → `common/<batch_id>/`（meta.json + 数据文件） |
-| **`station`** | 只读公共信号，生成**一个**站 → `raw/<station>/`；tone_mhz 位置参数 = **legacy 模式**触发器（旧时域合成路径，字节对拍回归专用） |
+| **`station`** | 只读公共信号，生成**一个站的一个 datastream** → `raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（`ds_index` 位置参数，缺省 0）；tone_mhz 位置参数 = **legacy 模式**触发器（旧时域合成路径，字节对拍回归专用） |
 | **无子命令（默认）** | **本机串行**：先 `common`，再对 `.input` 全部站依次 `station`（一键多站；tone 参数不允许出现在此入口） |
 
 实现上两个模块：`run_common()`、`run_station()`；默认模式 = 二者顺序调用。旧 4 参调用 `fxcorr-sim <batch> <station> [workdir]` 废止（改 station 子命令），编排脚本同步迁移。
@@ -69,7 +69,7 @@ fxcorr-sim B W
 | 站级 | 只读 `common/<batch_id>/`，不改写公共文件 |
 | 完成可见性 | 数据文件先写临时名再 `rename`；meta.json 的 `status=done` 写全后 station 才可启动 |
 | 禁止 | 多节点同时跑**默认多站**（会重复 common、竞争写站数据）；common 由编排保证单实例 |
-| 站噪声种子 | `f(global_seed, station_id)`，与公共种子分离 |
+| 站噪声种子 | `f(global_seed, station_id, ds_index)`，与公共种子分离（ds 维度 2026-09-27 加，见 usage.md 的 `ds_index`） |
 | 消费后清理 | batch 的全部 station 完成后 common/<batch_id>/ 可删（同 fengine/ 生命周期管理，data-spec 12 节） |
 
 **优先：** 单任务 `common` + 多任务 `station`。**退路：** 单机默认串行。**不优先：** 每节点各自重算 common（见第 8 节成本分析；同架构节点确定性复现在科学上等价，但失去"权威单份"的单源一致性，且重复计算无收益）。

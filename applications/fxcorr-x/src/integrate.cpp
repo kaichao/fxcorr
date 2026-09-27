@@ -156,6 +156,11 @@ void Integrator::addAutocorrs(int subint, const vector<string> &autocorrFiles, c
 
 	for(int ds=0;ds<numdatastreams;ds++)
 	{
+		// shard mode: a datastream outside this shard has no autocorr file
+		// (fxcorr-x's main passes an empty path); skip it silently - the
+		// records it would have produced belong to another shard
+		if(autocorrFiles[ds].empty())
+			continue;
 		FILE *file = fopen(autocorrFiles[ds].c_str(), "rb");
 		if(file == NULL)
 		{

@@ -1,6 +1,6 @@
 # fxcorr-sim 目录说明
 
-**最后更新**：2026-09-19
+**最后更新**：2026-09-27（**多 datastream 生成落地**：`station` 增 `ds_index` 参数、噪声种子加 ds 维度、输出名 `[_ds<N>]`——见"关键实现要点"的「多 datastream」条；2026-09-19）
 
 仿真 VDIF 数据生成器：无 MPI 串行程序，单二进制三入口（`common` 生成共享公共信号 / `station` 生成单站 VDIF / 无子命令本机串行）。datasim 的替身（上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建）。新架构 P0-P4 全部完成并验证（2026-09-14）。
 
@@ -12,7 +12,7 @@
 |---|---|
 | main.cpp | 三入口分派（common/station/默认串行）、批处理上下文与站校验（setupStation，两路径共用）、FXSIM_* 解析（SPECRES/LINE 两入口共用、FLUX/SEFD 列表按 dsindex 取值、DELAY 开关、PCAL 梳齿）、旧 4 参调用报错提示 |
 | commonsignal.{h,cpp} | 公共信号生成与文件读写：deriveGrid（specRes/numSamps 网格，datasim getSpecRes 移植+修 bug，FXSIM_SPECRES 缩放因子）、generate（gencplx 语义确定性频谱流 + FXSIM_LINE 谱线逐 slice 乘、0.5s 块 .tmp+rename 写盘、meta.json running→done 含谱线参数）、Reader（meta 校验 + 按块流式读） |
-| signalgen.{h,cpp} | 两层：SignalGen（legacy 时域合成，原样保留，字节对拍路径）；FreqStationGen（station 新路径频域链：切频段→站噪声/SEFD 定标→归一化→Ormsby→块 IDFT（滚动缓冲）→帧 DFT/DC 置零/fracsample 校正/条纹旋转/扩展/2N IDFT 复转实→pcal 注入→量化打包；datasim updatevalues 延迟吸收；站噪声种子 = FNV-1a(station) 派生） |
+| signalgen.{h,cpp} | 两层：SignalGen（legacy 时域合成，原样保留，字节对拍路径）；FreqStationGen（station 新路径频域链：切频段→站噪声/SEFD 定标→归一化→Ormsby→块 IDFT（滚动缓冲）→帧 DFT/DC 置零/fracsample 校正/条纹旋转/扩展/2N IDFT 复转实→pcal 注入→量化打包；datasim updatevalues 延迟吸收；站噪声种子 = FNV-1a(station, ds_index) 派生） |
 | vdifwriter.{h,cpp} | VDIF 帧封装：帧头 8 字（**vdifio/mark5access 字布局，2026-09-13 修正**）、帧时间戳/帧号按 batch 起点换算逐帧自增、2^n band 数校验（不动） |
 | VERIFICATION.md | 验证档案（legacy 路径 + P0-P4 全部验证记录与坑） |
 
@@ -30,10 +30,17 @@
 - **多 band 帧布局**：帧内样本 band 交织（字节内 4 样本跨 band，band = 样本序 % nbands），对齐 mark5access `vdif_decode_2channel_2bit` 泛化；word3 的 nchan 字段 = log2(nbands)；payload = 8000×nbands。
 - **nbands = band 数非频率数（2026-09-13 修复，P7 暴露）**：main.cpp 的 nbands 原用 `getDNumRecordedFreqs`（不同频率数）——dual-pol 同频率（R/L 同 200MHz）时 freq 数=1 而 band 数=2，2bit 校验与 tone/pcal 网格全部按 band 语义使用 → 校验误报。已改 `getDNumRecordedBands`。
 
+多 datastream（2026-09-27 加，分片架构的前置）：
+
+- **定位**：`setupStation(..., station, dslocal, ...)` 的 `dslocal` 是**站内**序号——遍历 .input 的全部 datastream、只数同站的那些，第 dslocal 个即该 ds（与 fxcorr-f 的 `ds_index`、`raw` 的 `_ds<N>`、`fengine/<st>/ds_<N>/` 同一口径）。`StationSetup` 同时记下 `ndsinstation`（该站有几个 ds）供输出命名用。
+- **输出名**：`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`——**后缀只在多 ds 站出现**（`ndsinstation > 1`），单 ds 站的文件名与加多 ds 之前逐字相同。`make_testdata.sh` 的 `vdifrel()` 是同一规则的两处实现，改一处要改两处。
+- **命令行**：`station <bid> <st> [workdir] [ds_index] [tone_mhz ...]`——`ds_index` 缺省 0，位置固定在 workdir 之后，legacy tone 要写在它后面（`station <bid> <st> . 0 1.5`）。默认模式（无子命令）遍历**全部** datastream，每站每 ds 一个文件。
+- **验证（2026-09-27，测试机）**：① 单 ds 配置产物**逐字节不变**（T1/T2 的 00000001/00000003 与改前 md5 相同）；② 两 ds 配置下同站 ds0/ds1 有噪时 md5 不同、`FXSIM_NOISE=0` 时**逐字节相同**（差异只来自噪声，帧头/时间轴/延迟链完全一致）；③ 多 ds 配置生成的 ds0 与**单 ds 配置**生成的文件**逐字节相同**（`18dea81e…` 两边一致）——即"单 ds 生成与全 ds 生成在同一 ds 上逐位相同"。测试资产与用法见 `fxcorr/test/multids/`。
+
 频域链要点（新路径，照 datasim 移植时）：
 
 - **specRes 网格**：全站 band 频率差/带宽的 GCD，0.5MHz 起二分到 1/2^10，找不到报错退出（datasim getSpecRes）；`numSamps = (maxStartFreq+maxBW − minStartFreq)/specRes`（全站 band 实际跨度，**band 间有间隙也覆盖**——datasim 的 band0带宽×band数 假设连续、间隙布局会静默越界读公共信号，2026-09-14 修正不照抄）、`stime = 1/specRes` µs；station 端 startIdx = (band 频率 − minStartFreq)/specRes、blksize = bw/specRes（非整数报错）。
-- **确定性分层**：公共信号只与 (seed, batch) 有关、与站无关；站噪声种子 = f(seed, station) 派生，与公共种子分离——混用会让站噪声破坏跨站相干。
+- **确定性分层**：公共信号只与 (seed, batch) 有关、与站无关；站噪声种子 = f(seed, station, ds_index) 派生，与公共种子分离——混用会让站噪声破坏跨站相干。**ds 维度是 2026-09-27 加的**：dual-pol 站的两个 ds 覆盖同一频段，只按 (seed, station) 派生会让它们逐位相同；`ds_index != 0` 时才把 ds 项混进 FNV 哈希，因此**站内第 0 个 ds 的种子与加多 ds 之前逐位相同**（树里的资产全是单 ds 配置，逐字节回归不受影响）。
 - **DC/Nyquist 置零**（datasim 语义）：fabricatedata 后 DC 须为 0（assert）；帧校正链里 procbuffreq[0] 置零；Hermitian 扩展时 DC 与 Nyquist 置零。
 - **DFT 规格映射**：IPP `IPP_FFT_DIV_INV_BY_N`（正变换除 N）+ `ippsDFTInv`（逆变换不除）→ fftwf 正变换后手动 ×1/N、逆变换不缩放，保证 DFT→IDFT 恒等；块生成的小 blksize IDFT 与帧级三趟 FFT（vpsamps/vpsamps/2·vpsamps）共用 plan 复用。
 - **复转实**：Hermitian 扩展 2N 点 IDFT 后虚部须 ≈0（assert < EPSILON），取实部出实数样本——复数基带（vpsamps 样本/帧）到实数（2·vpsamps 样本/帧）的 2 倍过采样即在此。

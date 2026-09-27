@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # make_testdata.sh —— 构建 data-spec 布局的标准测试数据（规格见 fxcorr/v1-plan.md 2.4）
 #
-# 步骤：① config/ 前处理（vex2difx + difxcalc，幂等）→ ② 从 .input 推导 batch 参数
+# 步骤：① config/ 前处理（vex2difx + difxcalc，幂等）→ ② 从 .input 推导 batch 参数、
+# 分配 batch_id（8 位顺序号，已有同参数的 batch 则复用，见 data-spec 第 6 节）
 # → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ fxcorr-sim 两段式生成 raw VDIF
-# （无 tone：每 batch 先 common 一次、station 任务并行分发；带 tone：legacy 逐站）
+# （无 tone：每 batch 先 common 一次、(batch, station, ds) 任务并行分发；带 tone：legacy 逐站）
 # → ⑤ 软链 <DATA TABLE 文件名> 到最后 batch 的 VDIF → ⑥ stdout 打印 batch_id。
 #
 # 用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]
 #
-#   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）；
-#                 多 batch 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）
+#   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）
 #   -p P          station 任务本地并行度（默认 1 = 串行，P1：common 一次后
 #                 (batch,station) 任务 xargs 并行分发）
 #   --nodes MAP   ssh 节点映射（P1）：把站分发到远程节点跑 station（共享存储假设，
@@ -166,7 +166,7 @@ OUT=$(mktemp)
 trap 'rm -f "${OUT:-}" "${TASKS:-}"' EXIT
 export NBATCH INPUT
 python3 - "$WORKDIR" <<'PYEOF' > "$OUT"
-import json, math, os, re, sys
+import json, os, re, sys
 from datetime import datetime, timedelta
 
 workdir = sys.argv[1]
@@ -195,6 +195,14 @@ datafiles = re.findall(r'^FILE \d+/\d+:\s*(\S+)\s*$', text, re.M)
 if len(stations) != len(datafiles):
     sys.exit('make_testdata.sh: station/file count mismatch in %s' % os.environ['INPUT'])
 
+# 站内 datastream 序号（0-based）与该站的 ds 总数：多 datastream 站每 ds 一个
+# 文件、一个 station 任务，序号口径与 fxcorr-f 的 ds_index 一致（data-spec 5.2）
+dsidx = []
+nds_of = {}
+for st in stations:
+    dsidx.append(nds_of.get(st, 0))
+    nds_of[st] = dsidx[-1] + 1
+
 # BASELINE TABLE 的 D/STREAM A/B INDEX → 站名对
 a = re.findall(r'^D/STREAM A INDEX \d+:\s*(\d+)\s*$', text, re.M)
 b = re.findall(r'^D/STREAM B INDEX \d+:\s*(\d+)\s*$', text, re.M)
@@ -206,12 +214,37 @@ except ValueError:
     sys.exit('make_testdata.sh: BATCH_NSUBINTS must be an integer')
 if nsub < 1:
     sys.exit('make_testdata.sh: BATCH_NSUBINTS must be positive')
-if nbatch > 1:
-    # batch_id 秒 = floor(batch 起点秒)，每 batch 时长 ≥ 1s 才保证 batch_id 唯一
-    minn = (10**9 + subintns - 1) // subintns
-    if nsub < minn:
-        print('make_testdata.sh: -n %d raises n_subints to %d (batch duration >= 1s for unique batch_id)' % (nbatch, minn), file=sys.stderr)
-        nsub = minn
+
+# batch_id 分配（data-spec 第 6 节）：8 位零填充顺序号，取 batches/ 下已有编号
+# 的最大值 +1。编号不承载时间信息，所以重跑要另外保证幂等——已有 batch 的
+# (start_mjd, n_subints, subint_ns) 与本次规划一致时复用它的编号，否则整批
+# 数据会被重新生成一遍（测试机上每 batch 几十 GB）。三个分量都要比：单 batch
+# 用 test.input（0.524288s subint）、-n 多 batch 用 test-sim.input（128ms），
+# 起止时刻可能相同而粒度和时长不同。
+batchdir = os.path.join(workdir, 'batches')
+existing = []          # [(start_mjd, n_subints, subint_ns, bid)]
+maxnum = 0
+for name in (os.listdir(batchdir) if os.path.isdir(batchdir) else []):
+    if not name.endswith('.json'):
+        continue
+    stem = name[:-len('.json')]
+    if stem.isdigit():
+        maxnum = max(maxnum, int(stem))
+    try:
+        bj = json.load(open(os.path.join(batchdir, name)))
+    except (ValueError, IOError):
+        continue
+    if bj.get('start_mjd') is not None and bj.get('n_subints') and bj.get('subint_ns'):
+        existing.append((bj['start_mjd'], int(bj['n_subints']), int(bj['subint_ns']), stem))
+nextnum = maxnum + 1
+
+def allocate_bid(startmjd):
+    for smjd, sns, ssub, sbid in existing:
+        # 1 µs 容差，与 fxcorr-f/x 的 batch 起点校验同口径（f64 表示误差）
+        if sns == nsub and ssub == subintns and abs(smjd - startmjd) * 86400.0 < 1e-6:
+            print('make_testdata.sh: reusing batch_id %s for start_mjd %r' % (sbid, startmjd), file=sys.stderr)
+            return sbid
+    return None
 
 # calc/im 路径取自 .input 的 CALC FILENAME；wrap_vex2difx.sh 规范化后通常是
 # 相对 config/ 的裸名，绝对路径也接受（Q20：只对相对路径拼根）
@@ -225,10 +258,14 @@ epo = datetime(1858, 11, 17)
 created = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 for i in range(nbatch):
     startsec_i = startsec + i * nsub * subintns / 1.0e9
-    bid = '%d_%d' % (mjd, math.floor(startsec_i))
+    startmjd_i = mjd + startsec_i / 86400.0   # json.dump 用 repr()，f64 往返精确
+    bid = allocate_bid(startmjd_i)
+    if bid is None:
+        bid = '%08d' % nextnum
+        nextnum += 1
     batch = {
         'batch_id': bid,
-        'start_mjd': mjd + startsec_i / 86400.0,   # json.dump 用 repr()，f64 往返精确
+        'start_mjd': startmjd_i,
         'start_time': (epo + timedelta(days=mjd, seconds=startsec_i)).strftime('%Y-%m-%dT%H:%M:%S'),
         'duration_sec': nsub * subintns / 1.0e9,
         'stations': stations,
@@ -254,8 +291,8 @@ for i in range(nbatch):
         f.write('\n')
     print(bid)
 print('--')
-for st, fn in zip(stations, datafiles):
-    print('%s %s' % (st, fn))
+for st, di, fn in zip(stations, dsidx, datafiles):
+    print('%s %s %d %s' % (st, di, nds_of[st], fn))
 PYEOF
 
 # ---- ④ fxcorr-sim 两段式（新路径）：每 batch 先 common（一次），station 任务并行分发 ----
@@ -268,11 +305,24 @@ BATCHES=()
 while IFS= read -r line && [ "$line" != "--" ]; do
 	BATCHES+=("$line")
 done < "$OUT"
-declare -a DSTATION DSFILE
-while read -r st fn; do
+declare -a DSTATION DSDI DSNDS DSFILE
+while read -r st di nds fn; do
 	DSTATION+=("$st")
+	DSDI+=("$di")
+	DSNDS+=("$nds")
 	DSFILE+=("$fn")
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
+
+# raw/<station>/<station>_<batch_id>[_ds<N>].vdif（相对 raw 根）——后缀只在多
+# datastream 站出现，与 fxcorr-sim 的 stationOutPath 同规则；单 ds 站的文件名
+# 与加多 ds 支持之前逐字相同
+vdifrel()
+{
+	local st=$1 di=$2 nds=$3 bid=$4
+	local base="${st}_${bid}"
+	[ "$nds" -gt 1 ] && base="${base}_ds${di}"
+	printf '%s/%s.vdif' "$st" "$base"
+}
 
 # ---- ③b 根记录与实验级一致性检查（Q18、Q4）：造数前先挡不一致，再记下本 batch 的根 ----
 # 检查先于写入：两者的 roots.json 都在 meta/roots/ 下，写过的不能再当"已有记录"
@@ -316,9 +366,9 @@ done
 # 本地在容器模式下经 docker run（与 fxc 同前缀；--nodes 与容器模式互斥，前面已挡）
 stationcmd()
 {
-	local bid=$1 st=$2
+	local bid=$1 st=$2 ds=$3
 	local host=${NODE_OF[$st]:-}
-	local args="station '$bid' '$st' '$WORKDIR' ${TONES[*]}"
+	local args="station '$bid' '$st' '$WORKDIR' '$ds' ${TONES[*]}"
 	if [ -n "$host" ]; then
 		printf 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new %q %q\n' \
 			"$host" "cd '$WORKDIR' && env ${ENVS[*]} LD_LIBRARY_PATH=${DIFXROOT:-/usr/local/difx}/lib:\"\$LD_LIBRARY_PATH\" '$FXCSIM' $args"
@@ -341,11 +391,11 @@ for bid in "${BATCHES[@]}"; do
 	fi
 	for i in "${!DSTATION[@]}"; do
 		st=${DSTATION[$i]}
-		out="raw/$st/${st}_${bid}.vdif"
-		if [ -s "$FXCORR_ROOT_RAW/$st/${st}_${bid}.vdif" ]; then
-			echo "make_testdata.sh: skip existing $out" >&2
+		rel=$(vdifrel "$st" "${DSDI[$i]}" "${DSNDS[$i]}" "$bid")
+		if [ -s "$FXCORR_ROOT_RAW/$rel" ]; then
+			echo "make_testdata.sh: skip existing raw/$rel" >&2
 		else
-			stationcmd "$bid" "$st" >> "$TASKS"
+			stationcmd "$bid" "$st" "${DSDI[$i]}" >> "$TASKS"
 		fi
 	done
 done
@@ -361,9 +411,10 @@ fi
 last=${BATCHES[-1]}
 for i in "${!DSTATION[@]}"; do
 	# 软链落在 raw 根下（Q2）：workdir 里不再散落软链，raw 区整体可在大盘上；
-	# 目标用绝对路径——相对目标跨文件系统会断
-	ln -sf "$FXCORR_ROOT_RAW/${DSTATION[$i]}/${DSTATION[$i]}_${last}.vdif" \
-	       "$FXCORR_ROOT_RAW/${DSFILE[$i]}"
+	# 目标用绝对路径——相对目标跨文件系统会断。多 datastream 站的 DATA TABLE
+	# 每 ds 一行，各链到本 ds 的文件（data-spec 5.2）
+	rel=$(vdifrel "${DSTATION[$i]}" "${DSDI[$i]}" "${DSNDS[$i]}" "$last")
+	ln -sf "$FXCORR_ROOT_RAW/$rel" "$FXCORR_ROOT_RAW/${DSFILE[$i]}"
 done
 if [ "${#BATCHES[@]}" -gt 1 ]; then
 	echo "make_testdata.sh: DATA TABLE links point at batch $last (last of ${#BATCHES[@]})" >&2

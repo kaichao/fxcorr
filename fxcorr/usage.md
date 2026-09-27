@@ -1,6 +1,6 @@
 # fxcorr 工具命令行手册
 
-**最后更新**：2026-09-27（`fxcorr-x` 增 `merge` 子命令与分片模式接口形态，见该节——**方案，待实施**）
+**最后更新**：2026-09-27（**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
 
 覆盖三个改造应用的命令行接口：`fxcorr-sim`（仿真数据生成器）、`fxcorr-f`（Station-based）、`fxcorr-x`（Baseline-based，含 `merge` 子命令）。目录布局、batch.json 格式与 D16 `vis-parts/` 规范见 `data-spec.md`，容量与分片方案的论证见 `data-volume.md` §7。
 
@@ -16,7 +16,7 @@
 - 只对**相对**路径拼根，**绝对路径一律原样**——真实观测的 `FILE` 行就是绝对路径，不受根变量影响。
 - **`batch_id`（2026-09-27 修订）**：**8 位零填充顺序号**（`00000001`）——定宽、单调递增、`workdir` 内全局唯一，由切批规划步骤单点分配，规范见 data-spec 第 6 节。**名字不承载时间信息**（起点/时长/band 全在 batch.json 里）。**三工具不校验格式**：`batch_id` 只当不透明字符串用于路径拼接，旧的时间编码格式（`60512_45000`）照常可用——本手册的示例沿用旧格式，只为读起来能对上时间段。
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
-- 任务粒度：f 任务 = (batch_id, station, ds_index)（fxcorr-f 的 station/ds_index 参数即该两维；多 datastream 站每记录线程一个 f 任务）；x 任务 = (batch_id) 全站全基线（fxcorr-x 无站参数，站列表由 .input 枚举）。**分片模式（待实施）下 x 任务细化为 (batch_id, ds_group)**——`ds_group` 是**一组 ds（跨站、含全部极化）**，不是单个 ds，见 fxcorr-x 节。**任务 ID 规范**（`<batch>-<station>-<ds>` / `<batch>-<g>` / `<batch>-merge`）见 data-spec 第 6 节。并行模型见 data-spec 第 12 节。
+- 任务粒度：f 任务 = (batch_id, station, ds_index)（fxcorr-f 的 station/ds_index 参数即该两维；多 datastream 站每记录线程一个 f 任务）；x 任务 = (batch_id) 全站全基线（fxcorr-x 无站参数，站列表由 .input 枚举）。**分片模式下 x 任务细化为 (batch_id, ds_group)**——`ds_group` 是**一组 ds（跨站、含全部极化）**，不是单个 ds，见 fxcorr-x 节。**任务 ID 规范**（`<batch>-<station>-<ds>` / `<batch>-<g>` / `<batch>-merge`）见 data-spec 第 6 节。并行模型见 data-spec 第 12 节。
 - 错误行为：参数不足或校验失败时打印原因到 stderr 并以非 0 退出；成功退出 0。
 - 前置安装：各工具与 `fxcorrcommon` 库，构建见 `build.md`。
 
@@ -28,7 +28,7 @@
 
 ```
 fxcorr-sim common  <batch_id> [workdir]                    # 只生成公共信号
-fxcorr-sim station <batch_id> <station> [workdir] [tone_mhz ...]   # 读公共信号，生成一个站
+fxcorr-sim station <batch_id> <station> [workdir] [ds_index] [tone_mhz ...]  # 读公共信号，生成一个站的某个 datastream
 fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串行 common + 全站 station
 ```
 
@@ -37,13 +37,14 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 | `batch_id` | 批量标识（8 位顺序号，见「通用约定」与 data-spec 第 6 节），用于读 batch.json、sim-common/ 与输出命名 |
 | `station` | 站名（如 `T1`），输出目录 `raw/<station>/` 与文件名前缀（station 子命令） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
+| `ds_index` | **仅 station 子命令**：站内 datastream 序号（0-based，缺省 0），与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<st>/ds_<N>/` 四处同一口径（data-spec 5.2）。多 datastream 站每 ds 一次调用、每 ds 一个文件。**它的位置固定在 `workdir` 之后**，所以 legacy 的 tone 参数要写在它后面：`station <bid> <st> <workdir> 0 1.5`（缺了 ds_index 会把 1.5 当成 ds 序号报错） |
 | `tone_mhz ...` | **仅 station 子命令**，0 个 = 新路径；出现即 legacy 模式（旧时域合成路径，字节对拍回归专用）：0 值 = 无 tone；1 值 = 所有 band 同频；nbands 值 = 逐 band |
 
 环境变量：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `FXSIM_SEED` | 固定值 | 公共信号种子（mt19937，common 与 station 共用）；新路径下公共信号只与 (seed, batch) 有关、与站无关（跨站相干来源），站噪声种子由 (seed, station) 派生 |
+| `FXSIM_SEED` | 固定值 | 公共信号种子（mt19937，common 与 station 共用）；新路径下公共信号只与 (seed, batch) 有关、与站无关（跨站相干来源），站噪声种子由 (seed, station, ds_index) 派生——**ds 维度必需**：dual-pol 站的 X/Y 两个 ds 覆盖同一频段，不带 ds 就会得到逐位相同的两份数据 |
 | `FXSIM_NOISE` | `0.02` | station 端高斯噪声 σ；`0` 关闭（两站同参数全关闭 = 输出逐位一致，跨站相干校验） |
 | `FXSIM_ADAPTIVE` | 关 | station 端自适应量化门限（`1` 开启；datasim d_tmul 语义：量化前按数据 rms 缩放、每帧更新、1M 样本封顶），默认关 |
 | `FXSIM_SPECRES` | 1 | specRes 缩放因子（正整数）：公共信号频谱分辨率 ÷N、样本数 ×N（datasim --specres 语义）；网格缩放后的一致性检查照跑，station 须用同一值（meta.json 网格不匹配即报错） |
@@ -59,9 +60,9 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），band 结构/采样率/PHASE CAL 网格全部来自 .input；common 的 specRes/numSamps 网格由**全站** band 布局推导（GCD 二分，找不到报错）。
-- `common` 输出 `workdir/common/<batch_id>/`：meta.json（版本/dtype/specRes/numSamps/minStartFreq/块表/seed/谱线参数 line_freq_mhz/line_amp/line_rms（0 = 无）/status）+ data_XX.bin（每 0.5s 块一个，float32 频域 slice 顺序；先临时名再 rename，meta status=done 后 station 才可启动）。格式见 data-spec 5.8。
-- `station` 输出 `workdir/raw/<station>/<station>_<batch_id>.vdif`（2bit VDIF，多 band 帧内样本 band 交织）；公共未就绪报错退出；延迟注入默认开（FXSIM_DELAY=0 关）。
-- 默认模式 = 本机串行 `common` + 对 `.input` 全部 datastream 逐个 `station`；仅限单机，多节点须编排分别调用两入口。
+- `common` 输出 `workdir/sim-common/<batch_id>/`：meta.json（版本/dtype/specRes/numSamps/minStartFreq/块表/seed/谱线参数 line_freq_mhz/line_amp/line_rms（0 = 无）/status）+ data_XX.bin（每 0.5s 块一个，float32 频域 slice 顺序；先临时名再 rename，meta status=done 后 station 才可启动）。格式见 data-spec 5.8。
+- `station` 输出 `workdir/raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（2bit VDIF，多 band 帧内样本 band 交织）；公共未就绪报错退出；延迟注入默认开（FXSIM_DELAY=0 关）。**`_ds<N>` 后缀只在多 datastream 站出现**（N = 站内序号 = `ds_index`），单 datastream 站的文件名与加多 ds 支持之前逐字相同——树里的测试资产全是单 ds 配置。
+- 默认模式 = 本机串行 `common` + 对 `.input` 全部 datastream（每站每 ds 一个文件）逐个 `station`；仅限单机，多节点须编排分别调用两入口。
 
 程序内校验（不满足即报错退出）：实采样（complex 拒绝）、2bit（bytespersample 校验）、band 数 ∈ {1,2,4,8,16,32}；单 scan；batch 起点 subint 边界（1µs 容差）→ 整秒 snap → 帧边界；batch 时长非帧整数倍时文件生成到下一个帧边界取整（fxcorr-f 只读 batch 段）；common 的 band 频率须落在 specRes 网格（(freq−minStartFreq)/specRes 整数）；帧须为整数 slice（vpsamps % blksize == 0，即 1e6×specRes/fps 整数）、块总复样本须为帧复样本整数倍（nslices×blksize % vpsamps == 0，含末块）。
 
@@ -93,13 +94,18 @@ FXSIM_DELAY=0 fxcorr-sim station 60512_45000 T1
 FXSIM_PCAL=1 fxcorr-sim station 60512_45000 T1
 
 # legacy 模式（字节对拍回归）：与 gen_test_vdif.py 逐字节一致
-FXSIM_NOISE=0 fxcorr-sim station simcmp T1 . 1.5
+FXSIM_NOISE=0 fxcorr-sim station simcmp T1 . 0 1.5
 
 # legacy：几何延迟注入（delay≠0 的 VLBI 观测仿真，tone 纯相位版）
-FXSIM_DELAY=1 fxcorr-sim station 60512_45000 T1 . 1.5
+FXSIM_DELAY=1 fxcorr-sim station 60512_45000 T1 . 0 1.5
 
 # legacy：SNR 定标（源 100 Jy、站 SEFD 1000 Jy）
-FXSIM_FLUX=100 FXSIM_SEFD=1000 fxcorr-sim station 60512_45000 T1 . 1.5
+FXSIM_FLUX=100 FXSIM_SEFD=1000 fxcorr-sim station 60512_45000 T1 . 0 1.5
+
+# 多 datastream 站（.input 每站 2 个 ds）：逐 ds 调用，各出一个文件
+fxcorr-sim station 60512_45000 T1 . 0     # -> raw/T1/T1_60512_45000_ds0.vdif
+fxcorr-sim station 60512_45000 T1 . 1     # -> raw/T1/T1_60512_45000_ds1.vdif
+fxcorr-sim 60512_45000                    # 或默认模式一次生成全部站的全部 ds
 ```
 
 ---
@@ -157,15 +163,15 @@ FXCORR_WORKDIR=/data/proj fxcorr-f 60512_45000 T1  # 环境变量定义（位置
 
 ```
 fxcorr-x       <batch_id> [workdir]              # 处理一个 batch，直接写 SWIN（现行行为）
-fxcorr-x       <batch_id> [workdir] <ds_group>   # 分片模式：只处理一个 ds 组 → vis-parts/<batch_id>/ds<G>.part（待实施）
-fxcorr-x merge <batch_id> [workdir]              # 归并：读全部分片，按时间归并写出 SWIN（待实施）
+fxcorr-x       <batch_id> [workdir] <ds_group>   # 分片模式：只处理一个 ds 组 → vis-parts/<batch_id>/ds<G>.part
+fxcorr-x merge <batch_id> [workdir]              # 归并：读全部分片，按时间归并写出 SWIN
 ```
 
 | 参数 | 说明 |
 |---|---|
 | `batch_id` | 批量标识 |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
-| `ds_group` | **分片模式（待实施）**，位置在 `workdir` 之后（要指定它必须先给 `workdir`，同 fxcorr-f 的 `ds_index`）：只处理指定的 **ds 组**（0-based，按频段升序）——一组 = **跨站、含全部极化**的若干 datastream，它们覆盖同一个频段组（互相关要求两站同一 freq 同时在场，且要算全极化组合；t25362 实测为 4 组，每组 2 站 × 2 极化 = 4 个 ds）。**给出该参数即进入分片模式，不写 SWIN**，改出 `vis-parts/<batch_id>/ds<G>.part`；**省略 = 现行行为**（整 batch 全部 ds，直接写 SWIN，逐位不变） |
+| `ds_group` | **分片模式**，位置在 `workdir` 之后（要指定它必须先给 `workdir`，同 fxcorr-f 的 `ds_index`）：只处理指定的 **ds 组**（0-based，按频段升序）——一组 = **跨站、含全部极化**的若干 datastream，它们覆盖同一个频段组（互相关要求两站同一 freq 同时在场，且要算全极化组合；t25362 实测为 4 组，每组 2 站 × 2 极化 = 4 个 ds）。**给出该参数即进入分片模式，不写 SWIN**，改出 `vis-parts/<batch_id>/ds<G>.part`；**省略 = 现行行为**（整 batch 全部 ds，直接写 SWIN，逐位不变） |
 
 环境变量（DifxMessage 状态发送，algo-plan P1）：
 
@@ -174,7 +180,8 @@ fxcorr-x merge <batch_id> [workdir]              # 归并：读全部分片，�
 | `DIFX_MESSAGE_GROUP` / `DIFX_MESSAGE_PORT` | 未设（静默） | host 模式组播目标（setup.bash 默认 224.2.2.1:50201）；未设时不发状态消息 |
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
 | `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：基线循环并行线程数（scratch 按线程私有化，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
-| `FXCORR_X_MERGE_FORCE` | 未设（严格） | **仅 `merge` 子命令（待实施）**：分片不齐时仍强制写出已到齐的部分（缺失组留空洞 + stderr 列明），未设 = 报错退出不写 |
+| `FXCORR_X_MERGE_FORCE` | 未设（严格） | **仅 `merge` 子命令**：分片不齐时仍强制写出已到齐的部分（缺失组留空洞 + stderr 列明），未设 = 报错退出不写 |
+| `FXCORR_X_SWIN_CONFLICT` | 未设（严格） | **三种模式共用**：目标 SWIN 里若已有**本 batch 时间范围内**的记录（说明这个 batch 已经被另一次运行写过），默认报错退出——再写会追加重复记录、破坏 SWIN 的时间单调（difx2fits 顺序读、时间回退的记录被静默丢弃）。设 `allow` 强制继续。**重跑分片不受影响**（分片不写 SWIN），被拦的是"`merge` 之后又跑全量、或又 `merge`" |
 
 输入输出：
 
@@ -187,7 +194,7 @@ fxcorr-x merge <batch_id> [workdir]              # 归并：读全部分片，�
 
 程序内校验：单 scan、单相位中心（脉冲星 binning 时多源免检）、intTime 为 subintNS 整数倍（相位阵时跳过）、batch 起点 subint 边界（1µs 容差，同 fxcorr-f）。
 
-### 分片模式与 `merge` 子命令（**方案，待实施**）
+### 分片模式与 `merge` 子命令（2026-09-27 已实施）
 
 **动因**：目标计算节点为 30 核 / 120 GB SATA SSD / 60 GB tmpfs，而 t25362 参数下一个**最小** batch（1 个 intTime = 1.024 s）的 `fengine` 就是 67.4 GB——占 SSD 56%、tmpfs 装不下。整 batch 处理在这台机器上不可行。量化与三条路线的对比见 `data-volume.md` §7。
 
@@ -207,7 +214,9 @@ fxcorr-x merge <batch_id> [workdir]              # 归并：读全部分片，�
 
 `vis-parts/` 的目录规范（与 `vis/` 的隔离边界、生命周期）见 data-spec 5.9。
 
-待定项（实施时定案）：ds 组的分组映射（与 `.input` DATASTREAM 表对齐）；`vis-parts/` 的清理时机（编排层掌握）；相位阵配置（`beam.bin`）是否参与分片。
+**实现要点（2026-09-27 落地）**：ds 组由 `fxcorr-x` 从 `.input` 的 BASELINE TABLE 用并查集推导（连通分量 = 一组，组序 = 组内最小 ds 序）；`run_batch.sh` 的 `FXCORR_X_SHARD=1` 走分片路径（逐组 + 一次 `merge`），它自己也算一遍组数——**两处实现必须同改**（同 `roots.sh` 与 `FxcorrPath` 的关系）。
+
+**当前限制（程序内明确报错退出，不是静默降级）**：分片模式只支持**单相位中心**、**无 pulsar binning**，且不适用于相位阵配置。
 
 V1 边界：仅 fxcorr-f 的 .sp 输入；zoom band（P4a）、多相位中心（P4b）、脉冲星 binning（P4c）、交叉极化自相关（P7）、相位阵波束形成（P8）均已支持；PCAL/STA 文件生成不做。
 
@@ -218,7 +227,7 @@ mkdir -p vis/experiment.difx    # OUTPUT FILENAME 所在目录（自动创建亦
 fxcorr-x 60512_45000
 ```
 
-分片模式与归并（**待实施**）：
+分片模式与归并：
 
 ```bash
 # ① 分片：每个 ds 组一个任务，可并行、可跨节点
@@ -252,7 +261,7 @@ fxcorr-f <batch_id> T1                        # 逐站
 fxcorr-x <batch_id>                           # SWIN 落 $FXCORR_VIS_ROOT/<OUTPUT FILENAME>
 ```
 
-分片模式（**待实施**）下，最后一行改为"逐 ds 组跑分片 + 一次 `merge`"（各组可并行，`merge` 须等本 batch 全部组到齐、且同实验跨 batch 按时间序串行），见 fxcorr-x 节。
+分片模式（`run_batch.sh` 的 `FXCORR_X_SHARD=1`）下，最后一行改为"逐 ds 组跑分片 + 一次 `merge`"（各组可并行，`merge` 须等本 batch 全部组到齐、且同实验跨 batch 按时间序串行），见 fxcorr-x 节。
 
 以上手工步骤由编排脚本自动化（`make_testdata.sh` / `run_bench.sh` / `run_batch.sh`，
 规格见 v1-plan 2.4；**前处理与后处理的原 difx 程序请走 `wrap_*.sh` 封装**——它们不认识根

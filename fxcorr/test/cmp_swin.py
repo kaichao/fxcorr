@@ -4,7 +4,12 @@
 解析两个 SWIN 文件（74 字节二进制头 + nchan*8 数据/记录，见
 visibility.cpp appendSWINHeaderBuffered），逐记录比较头字段与可见度复数。
 
-用法: cmp_swin.py <file_a> <file_b> <nchan> [maxrecords]
+用法: cmp_swin.py <file_a> <file_b> <nchan> [maxrecords] [--by-key]
+
+默认按记录序号逐条比。多 datastream / 分片合并的场景下两侧的记录**顺序**不再
+一一对应（各自按自己的 baseline 集合写），要加 --by-key：按
+(基线号, freq 索引, 极化对, 整数纳秒时间) 配对，比的是"记录集合相同"，顺序
+不参与。时间用整数纳秒作 key，不用浮点秒——浮点相等比较不可靠。
 """
 import struct
 import sys
@@ -61,12 +66,18 @@ def cmp_record(ra, rb, tol=1e-6):
     return diffs
 
 
+def keyof(r):
+    return (r['bl'], r['frq'], r['pol'], r['mjd'], int(round(r['sec'] * 1e9)))
+
+
 if __name__ == '__main__':
-    if len(sys.argv) < 4:
+    argv = [a for a in sys.argv[1:] if a != '--by-key']
+    bykey = '--by-key' in sys.argv
+    if len(argv) < 3:
         print(__doc__)
         sys.exit(2)
-    patha, pathb, nchan = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    maxrec = int(sys.argv[4]) if len(sys.argv) > 4 else None
+    patha, pathb, nchan = argv[0], argv[1], int(argv[2])
+    maxrec = int(argv[3]) if len(argv) > 3 else None
 
     ra = parse(patha, nchan)
     rb = parse(pathb, nchan)
@@ -76,6 +87,38 @@ if __name__ == '__main__':
         ra, rb = ra[:maxrec], rb[:maxrec]
 
     nbad = 0
+    if bykey:
+        da, db = {}, {}
+        for r in ra:
+            da.setdefault(keyof(r), []).append(r)
+        for r in rb:
+            db.setdefault(keyof(r), []).append(r)
+        only_a = sorted(set(da) - set(db))
+        only_b = sorted(set(db) - set(da))
+        dup = [k for k in list(da) + list(db) if len(da.get(k, [])) > 1 or len(db.get(k, [])) > 1]
+        if only_a:
+            print(f"{len(only_a)} record key(s) only in {patha}: {only_a[:5]}")
+            nbad += len(only_a)
+        if only_b:
+            print(f"{len(only_b)} record key(s) only in {pathb}: {only_b[:5]}")
+            nbad += len(only_b)
+        if dup:
+            print(f"{len(set(dup))} duplicated record key(s): {sorted(set(dup))[:5]}")
+            nbad += len(set(dup))
+        for k in sorted(set(da) & set(db)):
+            diffs = cmp_record(da[k][0], db[k][0])
+            if diffs:
+                nbad += 1
+                print(f"record (bl {k[0]} frq {k[1]} pol {k[2].decode()} ns {k[4]}):")
+                for d in diffs:
+                    print(f"  {d}")
+        if nbad == 0:
+            print("OK: all compared records match (matched by key)")
+        else:
+            print(f"{nbad} problem(s)")
+            sys.exit(1)
+        sys.exit(0)
+
     for i, (a, b) in enumerate(zip(ra, rb)):
         diffs = cmp_record(a, b)
         if diffs:

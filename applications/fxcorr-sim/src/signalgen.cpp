@@ -172,10 +172,14 @@ void SignalGen::fillFramePayload(unsigned char *payload, int payloadbytes, int n
 // FreqStationGen: frequency-domain station synthesis (new path)
 
 // deterministic seed mixer for the per-station noise streams: FNV-1a over
-// the station name, mixed with the common seed and the band index so that
-// (a) different stations never share a noise stream and (b) the noise does
-// not depend on unrelated details of the batch
-static unsigned long stationNoiseSeed(unsigned long seed, const string &station, int band)
+// the station name, mixed with the common seed, the station-local datastream
+// index and the band index so that (a) different stations never share a noise
+// stream, (b) two datastreams of the same station never share one either -
+// a dual-polarisation station records X and Y at the SAME frequencies, so
+// without the datastream index those two streams would be bit-identical, and
+// (c) the noise does not depend on unrelated details of the batch.
+static unsigned long stationNoiseSeed(unsigned long seed, const string &station,
+                                      int dsindex, int band)
 {
 	uint64_t h = 1469598103934665603ULL;   // FNV-1a 64-bit basis
 	for(size_t i = 0; i < station.size(); i++)
@@ -184,6 +188,12 @@ static unsigned long stationNoiseSeed(unsigned long seed, const string &station,
 		h *= 1099511628211ULL;
 	}
 	h ^= (uint64_t)seed;
+	// the datastream term is folded in only for ds > 0, so that a station's
+	// first datastream keeps the exact seed (and therefore the exact bytes)
+	// it had before multi-datastream generation existed - every test asset
+	// in the tree is a single-datastream configuration
+	if(dsindex != 0)
+		h ^= 0xBF58476D1CE4E5B9ULL * (uint64_t)dsindex;
 	h ^= 0x9E3779B97F4A7C15ULL * (uint64_t)(band + 1);
 	return (unsigned long)(h & 0xFFFFFFFFUL);
 }
@@ -250,7 +260,8 @@ bool FreqStationGen::init(const vector<double> &bandfreqmhz,
                           const string &station, int vpsamps_, bool adaptive_,
                           double flux, double sefd,
                           const vector<vector<double> > &pcaltonehz,
-                          double pcalcombmhz, long long ratehz_)
+                          double pcalcombmhz, long long ratehz_,
+                          int dsindex)
 {
 	ready = false;
 	noisesigma = noisesigma_;
@@ -354,7 +365,7 @@ bool FreqStationGen::init(const vector<double> &bandfreqmhz,
 			cerr << "fxcorr-sim: cannot create fftw plans" << endl;
 			return false;
 		}
-		bd.engine.seed((unsigned)stationNoiseSeed(seed, station, (int)b));
+		bd.engine.seed((unsigned)stationNoiseSeed(seed, station, dsindex, (int)b));
 		bd.sampcount = 0;
 		bd.square = 0.0;
 		bd.thresh = 1.0;   // datasim d_tmul initial value

@@ -57,7 +57,29 @@ public:
 	/** Copy accumulated baseline weights (and shift decorrs) into the floatresults section (core.cpp:1070-1107, no locks). */
 	void copyBaselineWeights(f32 *floatresults);
 
+	/**
+	 * Restrict every baseline loop to the flagged baselines (fxcorr-x
+	 * sharding, v5-plan.md P6): a shard holds only part of the datastreams,
+	 * so only the baselines they form may be cross-multiplied.  Unset
+	 * (default, empty vector) = all baselines, and every loop then runs
+	 * exactly as it did before sharding existed.
+	 */
+	void setActiveBaselines(const std::vector<char> &active);
+
 private:
+	/**
+	 * getBLocalFreqIndex, but -1 for a baseline outside this shard.  All
+	 * baseline loops test ">= 0" to decide whether the baseline has data at
+	 * this frequency, so masking here makes them skip shard-outsiders
+	 * everywhere at once - including the index advancement that keeps the
+	 * parallel pass above and the accumulation pass below in step.
+	 */
+	int localFreqIndex(int baseline, int freq) const;
+
+	/// 1 when baseline j takes part in this shard (all of them by default)
+	bool baselineActive(int j) const
+	{ return activebaselines.empty() || activebaselines[j] != 0; }
+
 	void uvshiftAndAverageBaselineFreq(double offsetsec, double nsoffset, double nswidth, Polyco *currentpolyco, int freqindex, int baseline, cf32 *subintresults);
 
 	Configuration *config;
@@ -71,6 +93,8 @@ private:
 	int corebinloop;		// pulsarbin && !scrunch ? numpulsarbins : 1 (core.cpp:1630-1631)
 	int freqtablelength, numbaselines, numdatastreams;
 	int numBufferedFFTs, blockspersend;
+	// fxcorr-x sharding: empty = no restriction (see setActiveBaselines)
+	std::vector<char> activebaselines;
 	int xmacstridelength;
 	double blockns;			// subintNS / blocksPerSend
 	long long threadresultlength;
