@@ -1,14 +1,18 @@
 # fxcorr-x 目录说明
 
-**最后更新**：2026-09-17
+**最后更新**：2026-09-27（调用方式一节补分片模式与 `merge` 子命令的**待实施**接口；2026-09-17 主体）
 
 baseline-based 相关器后端（X-Engine）：无 MPI 串行程序，读 fxcorr-f 的 .sp / autocorr.bin 产物，做 XMAC 与长期积分，可见度直出 SWIN（`vis/<experiment>.difx/`）。算法照 mpifxcorr 的 `Core::processdata()` 切分移植，写盘复用 fxcorrcommon 的 Visibility（零改造）。
 
 ## 调用方式
 
 ```
-fxcorr-x <batch_id> [workdir]
+fxcorr-x <batch_id> [workdir]              # 现行：整 batch 全 ds，直写 SWIN
+fxcorr-x <batch_id> [workdir] <ds_group>   # 分片模式（**待实施**）
+fxcorr-x merge <batch_id> [workdir]        # 归并（**待实施**）
 ```
+
+> **分片模式（2026-09-27 定，未实施）**：目标计算节点装不下一个 batch 的 `fengine`，故 x 要能按 **ds 组**分片——每组 = **跨站、含全部极化**的若干 datastream，覆盖同一频段组（**互相关**的要求：两站同一 freq 必须同时在场，且要算全极化组合）。**分组成员从 `.input` 的 BASELINE TABLE 推导，不是按 ds 序号**——每条 baseline 条目绑定一对具体的 ds、只出一个极化产品；实测映射见 `data-volume.md` §7.3，机理见 `data-spec` 第 8 节。分片任务写 `vis-parts/<batch_id>/ds<G>.part`（D16）而**不写 SWIN**，由 `merge` 子命令按时间归并写出。规范见 `data-spec` 5.9 与第 6 节「任务标识」；改造清单见 `v5-plan.md` 末节第 6 条。
 
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。

@@ -1,6 +1,6 @@
 # fxcorr 改造工作区
 
-**最后更新**：2026-09-20（V5 P4 单镜像完成，验收 5/5）
+**最后更新**：2026-09-27（**任务 ID 规范入 data-spec 第 6 节**——`<batch>-<station>-<ds>` / `<batch>-<g>` / `<batch>-merge`，其中 **`ds_group` = 跨站含全极化的"一组 ds"**（实测 `.input` 后修正，t25362 是 4 组、f 任务 16 个）；**全文目录与状态核对**：`sim-common/` 改名、`work/` 删除、补 `vis-parts/`、`beam/` 与 fengine 的 `ds_<N>/` 层；**`batch_id` 改为 8 位零填充顺序号**——名字不再承载时间信息，取消"batch 时长 ≥ 1 s"约束；位数依据、以及"band 该不该进 batch 定义"（**结论：batch 只回答"哪段时间"，频段切分在任务层**）见 `data-volume.md` §7.6，代码改造待做。09-26：`data-volume.md` 新增 §7「计算单元的分片」——目标机约束（30 核 / 120 GB SATA SSD / 60 GB tmpfs）与按 ds 分片 + SWIN 合并方案（合并为 **fxcorr-x 的 `merge` 子命令**）；`data-spec.md` 新增 D16 `vis-parts/`（5.9 节）。09-21：V5 P5 目录根变量化完成，验收 11/11）
 
 本目录是 fxcorr 改造的工作区：文档 + bash 编排脚本（**脚本直接放本目录，与 README / data-spec 平级，不再设 scripts/ 子目录**）+ test/ 测试资产。算法实现见 `applications/fxcorr-f`（已建成，见其 CLAUDE.md）、`applications/fxcorr-x`（已建成，见其 CLAUDE.md），仿真数据生成器见 `applications/fxcorr-sim`（已建成，见其 CLAUDE.md；验证档案见其 VERIFICATION.md），共享代码见 `libraries/fxcorrcommon`（已建成）。
 
@@ -13,11 +13,12 @@
 - **v2-plan.md**：V2 计划——定位（scalebox 编排外置）、镜像体系（fxcorr-builder/base/f/x/sim/difx-tools）、容器构建链、算法改进清单、验收标准。**已冻结**（2026-09-18）。
 - **v3-plan.md**：V3 计划——定案决策（时间片 batch 并行、路线 B 串行、P3 实施、P5 不做）、P3 实施步骤与验收标准。**已冻结**（2026-09-19）。
 - **v4-plan.md**：V4 计划——读取路径改进路线（阶段 A 资产补齐 / B 修 E4 窗口语义 / C 分层重构 / D 判据固化，每节点一个 commit）、验收线、规划条件评估、真实数据获取策略。**开头是「V4 结论」**（四阶段完成情况、三层判据的代价表、**读模型未解决的 5 条**与后续方向按性价比排序）。**已冻结**（2026-09-19）；末节的后续方向由 v5-plan.md 接手。
-- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效，三件均完成），另有验收与回归总表、未完成清单。后半是 2026-09-19/20 新立的三项：**P4 单镜像**（已完成，验收 5/5）、**P5 目录路径环境变量化 + `sim-common/` 改名**（2026-09-20 已实施，验收 11/11）、**P6 fxcorr-sim 造数能力**（待实施）。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
+- **v5-plan.md**：V5 计划（**当前版本，进行中**）——读模型收尾三件：补合成盲区（P1 `run_mixed.sh`，据它修掉 **B7**；P2 `run_pattern.sh`，FILL_PATTERN 按整帧认）、invalid 位定案（P3 `run_invalid.sh`，占槽 + 数据标无效，三件均完成），另有验收与回归总表、未完成清单。后半是 2026-09-19/20 新立的三项：**P4 单镜像**（已完成，验收 5/5）、**P5 目录路径环境变量化 + `sim-common/` 改名**（2026-09-20 已实施，验收 11/11）、**P6 fxcorr-sim 造数能力**（待实施；2026-09-27 补「多 datastream 生成」一节 + 验收第 7 条）。**V5 末节"未完成第 6 条"汇总了 09-26/27 定的四项改造**（batch_id 8 位顺序号 / 按 ds 分片 + `merge` 子命令 / 多 ds 生成 / SQLite 索引）——**文档已改、代码未动**，动手前先看那张表。**接手 reader 工作时先读它**；根因与判据仍在 reader-model.md（4.10–4.12），本文件不重复。
 - **algo-plan.md**：V2 算法改进需求与设计——每项动机分类（功能未迁移/串行环境新变化）、要解决的问题、预期效果、设计要点、优先级（P0-P5）。改改进范围或设计时改它。
 - **fxcorr-sim-arch.md**：fxcorr-sim 分布式架构——单二进制三入口（common/station/默认串行）、频域公共信号模型与数据量依据、一致性规则、datasim 特性差距、P0-P4 阶段。改 fxcorr-sim 架构或公共信号模型时改它。
 - **usage.md**：三工具（fxcorr-sim / fxcorr-f / fxcorr-x）命令行手册——参数、环境变量、输入输出、程序内校验、示例。改工具命令行接口时改它。
 - **build.md**：构建手册——集成构建（install-difx）与独立构建（单包 autotools）两条路径、依赖、测试机工作流。改构建体系时改它。
+- **data-volume.md**：**数据量与容量分析**（2026-09-21 建，活文档）——时间/频率两个维度的算法级粒度、流水线各步的**落盘数据总表**、配置参数表、场景对照、瓶颈排序、优化杠杆矩阵、未验证项，以及 **§7 计算单元的分片**（2026-09-26 新增：目标机约束、按 datastream 分片、`vis-parts/` 与合并方案——合并实现为 fxcorr-x 的 `merge` 子命令）。**体积公式的权威位置已从 `data-spec.md` 11 节移入本文档 §1.3**（2026-09-21）；做部署/容量/切批/分片决策时看它。
 
 ### 文档状态（防误读）
 
@@ -30,13 +31,14 @@
 | 文档 | 性质 | 最后更新 | 一句话 |
 |---|---|---|---|
 | `README.md` | 活 | 2026-09-19 | 需求与架构（R1–R7 的出处） |
-| `data-spec.md` | 活 | 2026-09-19 | 数据接口与文件格式；改接口**先**改它 |
+| `data-spec.md` | 活 | 2026-09-26 | 数据接口与文件格式；改接口**先**改它（体积公式已于 09-21 移入 data-volume.md §1.3；09-26 新增 D16 `vis-parts/`，见 5.9） |
 | `usage.md` | 活 | 2026-09-19 | 三工具命令行手册 |
 | `build.md` | 活 | 2026-09-20 | 构建手册（集成/独立两条路径 + 容器构建；V5 P4 起为单镜像） |
 | `reader-model.md` | 活 | 2026-09-19 | 读取路径的**单一权威分析**；改 datareader 先读它 |
 | `algo-plan.md` | 活 | 2026-09-19 | 算法改进的设计与实施记录（P0–P12） |
 | `fxcorr-sim-arch.md` | 活 | 2026-09-15 | fxcorr-sim 架构与公共信号模型 |
-| `v5-plan.md` | 活（进行中） | 2026-09-20 | **当前版本的路线与定案**（V5：P1 补盲区并修掉 B7、P2 FILL_PATTERN 按整帧认、P3 invalid 位占槽标无效——三件均完成；P4 单镜像已完成（验收 5/5）；P5、P6 已定案待实施；只差"要真实数据"） |
+| `data-volume.md` | 活 | 2026-09-27 | **数据量与容量分析**：体积公式（权威，§1.3）、算法级粒度、落盘数据表、瓶颈与优化杠杆、**§7 计算单元的分片方案**（§7.6 = 频段维度该不该进 batch，含编号位数依据） |
+| `v5-plan.md` | 活（进行中） | 2026-09-20 | **当前版本的路线与定案**（V5：P1 补盲区并修掉 B7、P2 FILL_PATTERN 按整帧认、P3 invalid 位占槽标无效——三件均完成；P4 单镜像已完成（验收 5/5）；P5 已实施（验收 11/11）；P6 待实施；只差"要真实数据"） |
 | `v4-plan.md` | 冻结 | 2026-09-19 | V4 定案与实施（三层判据、B2）；末节的三条后续方向由 V5 接手 |
 | `v3-plan.md` | 冻结 | 2026-09-19 | V3 定案与实施（P3 OpenMP、P12 病态数据） |
 | `v2-plan.md` | 冻结 | 2026-09-18 | V2 定案与实施（镜像体系、P0–P11） |
@@ -54,10 +56,10 @@
 
 ## 核心约定（源自 data-spec.md）
 
-- **batch_id**：`60512_45000`（MJD+秒，推荐）或 `20260908_123000`（紧凑日期时间）；全局唯一，字符串排序即时间顺序；同一 batch 在 fengine/ 与 vis/ 用相同 batch_id。
-- **目录**：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`common/<batch_id>/`（仿真公共信号 D15，fxcorr-sim common 一次生成、各站只读；≥16× 单站 2bit 数据量，batch 站任务全完成后可删）、`raw/<station>/`（TB 级原始基带）、`fengine/<batch_id>/<station>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，二进制布局见 data-spec 5.3）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`product/`、`meta/`、`work/`（临时）。均不进 git。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
+- **batch_id（2026-09-27 修订）**：**8 位零填充顺序号**（`00000001`）——定宽、单调递增、`workdir` 内全局唯一，由切批规划步骤单点分配；**名字不承载时间信息**（起点/时长/band 全在 batch.json 里）。旧的时间编码格式（`60512_45000`）**仍然可用**——三工具不校验格式，只当不透明字符串拼路径。规范见 data-spec 第 6 节。
+- **目录**（权威见 data-spec 第 2 节，2026-09-27 核对）：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`sim-common/<batch_id>/`（仿真公共信号 D15，fxcorr-sim common 一次生成、各站只读；≥16× 单站 2bit 数据量，batch 站任务全完成后可删）、`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（TB 级原始基带；**多 datastream 站每 ds 一个文件**，后缀见 data-spec 5.2）、`fengine/<batch_id>/<station>/ds_<N>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，二进制布局见 data-spec 5.3）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`vis-parts/<batch_id>/ds<G>.part`（D16 分片局部记录，**方案待实施**，见 data-spec 5.9）、`beam/<batch_id>/beam.bin`（D14 相位阵）、`product/`、`meta/`。均不进 git（**`work/` 已随 V5 P5 删除**）。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
 - **batch.json**（`batches/<batch_id>.json`，D9 全字段单文件）：batch_id / start_mjd / start_time / duration_sec / stations / baselines / config_file / calc_file / im_file / n_subints / subint_ns / integration_sec / n_channels / polarizations / difx_dir / status / 版本字段。编排脚本一次写全，三工具只读。
-- **数据流**：vex2difx + difxcalc（实验级一次）→ [仿真分支：fxcorr-sim common（D15 公共信号，每 batch 一次）→ fxcorr-sim station × 各站（D7 VDIF）] → fxcorr-f × 各站（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。fxcorr-sim 架构（三入口/公共信号模型）见 fxcorr-sim-arch.md。
+- **数据流**：vex2difx + difxcalc（实验级一次）→ [仿真分支：fxcorr-sim common（D15 公共信号，每 batch 一次）→ fxcorr-sim station × 各站（D7 VDIF）] → fxcorr-f × 各站每 ds（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。**分片模式（方案待实施）**：x 按 ds 组分片 → D16 `vis-parts/` → `fxcorr-x merge` 归并写出 D10（见 data-spec 5.9 与 `data-volume.md` §7.5）。fxcorr-sim 架构（三入口/公共信号模型）见 fxcorr-sim-arch.md。
 - **三个敲定决策**：UVW 由 fxcorr-x 读 .calc/.im 求值（D1）；可见度直出 SWIN、difx2fits 零改造（D2）；偏振是 band 属性、偏振组合在 x 侧按 BASELINE TABLE 选（D3）。V1 边界与实施步骤见 v1-plan.md。
 - **SWIN 输出目录**：由 .input 的 OUTPUT FILENAME 决定（Visibility 写盘语义，difx2fits 零改造的前提），batch.json 的 difx_dir 仅为元数据。
 
@@ -85,7 +87,7 @@
 
 **容器模式**（V2 建成；**V5 P4 起为单镜像，验收 5/5 已过**）：`FXCORR_RUN_MODE=container` 时两脚本内 `fxc` 封装加 `docker run --rm -v $WORKDIR:$WORKDIR -w $(pwd) fxcorr/fxcorr:latest` 前缀——链路上六个命令同在 `fxcorr/fxcorr`（原先按工具→镜像映射，P4 合并后映射取消），FXSIM_NOISE/SEED 与**五个根**透传（Q12：容器内程序仍要知道用哪个根；多根挂载由外部编排平台按"各根按宿主同路径可见"保证，脚本不实现）。P5 起四个编排脚本（`roots.sh` + 三个 `wrap_*.sh`）也打进镜像，可在容器内直接调用。默认 host = 宿主直跑。镜像定义与构建见 `docker/README.md`。
 
-make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（batch_id 秒唯一）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出；`--nodes` 与 container 模式互斥（`-p` 不互斥）。容器模式下 station 任务由 `stationcmd()` 输出 `docker run … fxcorr/fxcorr fxcorr-sim` 前缀（P4 验收时补，原先只有 common 走了容器）；详见 v1-plan 2.4 实施记录。
+make_testdata.sh 实现要点（实测）：config 资产缺才复制 fxcorr/test/ 的 test.vex/test.v2d；**单 batch 用 difxcalc 原产物 test.input（0.524288s subint，6/6 对拍同配置），仅 `-n N` 多 batch sed 出 128ms SUBINT 变体**（test-sim.input，多 batch 连续切分起点须帧边界；128ms 帧对齐会触发 mpifxcorr vdifmux 帧号 bit7 错读，多 batch 不与 mpifxcorr 对拍）；batch.json 全字段一次写全（start_mjd 精确 repr）；`-n N` 时 n_subints 自动提升到每 batch 时长 ≥ 1s（**batch_id 秒唯一——该强制逻辑随 2026-09-27 的顺序号规范作废，待改造**）；软链指向最后 batch。**对拍 mpifxcorr 须 `FXSIM_NOISE=0`**（带噪 2bit 数据触发 vdifmux 读端错乱，见 memory）。**并行分发（P1，实测 p1reg）**：`-p P` xargs 本地并行、`--nodes "host:st1,st2"` ssh 远程（全路径 + `LD_LIBRARY_PATH=$DIFXROOT/lib`、BatchMode/accept-new、FXSIM_* 透传）；远程/本地产物 BYTE-IDENTICAL、失败传播非零退出；`--nodes` 与 container 模式互斥（`-p` 不互斥）。容器模式下 station 任务由 `stationcmd()` 输出 `docker run … fxcorr/fxcorr fxcorr-sim` 前缀（P4 验收时补，原先只有 common 走了容器）；详见 v1-plan 2.4 实施记录。
 
 run_bench.sh 实现要点（实测）：batch 定位走 DATA TABLE 软链 target 的 batch_id（fallback batches/ 最新 json）；EXECUTE TIME 截断 = `floor(initsec + (N−1)×intTime) + 1`（mpifxcorr 停写判定按积分起点、整秒字段，N = batch 时长/intTime 不整除即报错）；OUTPUT FILENAME sed 指 `bench/<exp>.difx`；mpirun 在 workdir 内跑（DATA TABLE 相对路径）、root 加 --allow-run-as-root、`LD_LIBRARY_PATH=$DIFXROOT/lib`；mpifxcorr 拒绝覆盖已有 SWIN（脚本先 rm -rf）。batch 时长 < 1s 无整秒解（mpifxcorr 多写 weight-0 积分），默认配置 2.097s 无碍。
 
@@ -123,7 +125,7 @@ run_batch.sh 实现要点：前置校验在脚本端 python 做（batch 起点 s
 | `make_testdata.sh` | 数据构建脚本（已实现，见上方脚本表） |
 | `testdata-min/` | 最小数据集（规划）：对拍最小子集 + sha256 入仓库，待 2 秒配置对拍实测干净后定 |
 
-测试流程（测试机 /root/fxcortest/）：`vex2difx test.v2d` → `difxcalc test.calc`（出 .input/.calc/.im）→ 数据生成两种方式：**fxcorr-sim**（读 batch.json 生成 `raw/<station>/<station>_<batch_id>.vdif`，软链到 .input DATA TABLE 文件名）或 `gen_test_vdif.py TEST1.vdif 4 1.5 8`（对拍参照）→ 写 `batches/<batch_id>.json`（start_mjd 用精确 repr，否则 fxcorr-f 对齐校验报错）→ `fxcorr-f <batch_id> T1` / `T2` → `fxcorr-x <batch_id>` → `cmp_swin.py` 与 mpifxcorr 对拍。以上手工步骤已由 `make_testdata.sh` 自动化（tInt=0.25 变体 test-sim.input，SUBINT 128ms）。已验证（2026-09-12，fxcorr-sim 数据）：tone 峰落 1.5/1.0MHz 通道；SWIN 对拍 6/6 记录全等（可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS；pcal 链路 4 tones 检出；2 band（test2b）全链路跑通（mpifxcorr 读不了 2 band VDIF，2 band 对拍以物理验证为准，详见 applications/fxcorr-sim/CLAUDE.md）。对拍注意 mpifxcorr 的 mux 滞后（v1-plan 2.3 实施记录）；**对拍数据须 `FXSIM_NOISE=0` 生成**（带噪 2bit 数据触发 mpifxcorr vdifmux 读端错乱，0 积分输出）。
+测试流程（测试机 /root/fxcortest/）：`vex2difx test.v2d` → `difxcalc test.calc`（出 .input/.calc/.im）→ 数据生成两种方式：**fxcorr-sim**（读 batch.json 生成 `raw/<station>/<station>_<batch_id>.vdif`——**多 ds 站为 `_ds<N>` 每 ds 一个文件**，各软链到 .input DATA TABLE 对应行）或 `gen_test_vdif.py TEST1.vdif 4 1.5 8`（对拍参照）→ 写 `batches/<batch_id>.json`（start_mjd 用精确 repr，否则 fxcorr-f 对齐校验报错）→ `fxcorr-f <batch_id> T1` / `T2` → `fxcorr-x <batch_id>` → `cmp_swin.py` 与 mpifxcorr 对拍。以上手工步骤已由 `make_testdata.sh` 自动化（tInt=0.25 变体 test-sim.input，SUBINT 128ms）。已验证（2026-09-12，fxcorr-sim 数据）：tone 峰落 1.5/1.0MHz 通道；SWIN 对拍 6/6 记录全等（可见度 <1e-6、weight 逐位一致）；difx2fits 出 FITS；pcal 链路 4 tones 检出；2 band（test2b）全链路跑通（mpifxcorr 读不了 2 band VDIF，2 band 对拍以物理验证为准，详见 applications/fxcorr-sim/CLAUDE.md）。对拍注意 mpifxcorr 的 mux 滞后（v1-plan 2.3 实施记录）；**对拍数据须 `FXSIM_NOISE=0` 生成**（带噪 2bit 数据触发 mpifxcorr vdifmux 读端错乱，0 积分输出）。
 
 ## 相关指引
 

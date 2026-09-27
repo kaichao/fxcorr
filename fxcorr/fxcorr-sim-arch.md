@@ -1,6 +1,6 @@
 # fxcorr-sim 分布式架构（单二进制 `fxcorr-sim`）
 
-**最后更新**：2026-09-15（2026-09-14 定稿）
+**最后更新**：2026-09-27（§1 输出一行补"多 datastream 站每 ds 一个文件"的待做改造，见 `v5-plan.md` P6；2026-09-14 定稿）
 
 本文定 fxcorr-sim 的分布式形态与公共信号模型；命令行手册（参数/环境变量/示例）见 `usage.md`，源文件地图/实现要点见 `applications/fxcorr-sim/CLAUDE.md`，验证记录见 `applications/fxcorr-sim/VERIFICATION.md`，common/ 产物格式见 `data-spec.md`。
 
@@ -8,7 +8,7 @@
 
 用一个可执行文件 `fxcorr-sim` 生成对接 fxcorr 流水线的多站基带数据，支持单机一键与多节点分布式：
 
-- 输出：`raw/<station>/<station>_<batch_id>.vdif`（file-per-batch，不变）
+- 输出：`raw/<station>/<station>_<batch_id>.vdif`（file-per-batch，不变）。**多 datastream 站要扩展成每 ds 一个文件**（`_ds<N>` 后缀）——目前只生成该站第一个 ds；`stationNoiseSeed` 也需加 ds 索引（否则同站覆盖相同频段的两个 ds 噪声完全相同）。改造清单与对拍方案见 `v5-plan.md` P6「多 datastream 生成」（2026-09-27）
 - 配置与时间：`batches/<batch_id>.json`、`config/`（`.input`、按需 `.im`）
 - 中间：`common/<batch_id>/`（公共信号，权威一份）
 - V1：单线程；加速靠多任务/多节点跑站级，不用 OpenMP
@@ -109,6 +109,7 @@ V_i = g_i · S(t − τ_i) · e^{jφ_i} + n_i
 
 - 缓解手段（预留，不实现）：dtype 降 int16（比值 8 倍，96dB 动态范围对噪声信号无碍）；覆盖范围按 batch 实际用到的频段裁剪。**起步 float32，meta.json 带 dtype 字段留降级口。**
 - 结论：common 落盘量 ≥16× 单站数据，但 batch 粒度下绝对量可控、消费后可删；与"每节点各自重算 common（省 I/O、每站多算 ~10% 计算，见第 8 节）"相比，权威单份的一致性收益压倒 I/O 代价，定为唯一形态。
+- **代入真实观测参数后的体量核算见 `data-volume.md`**（2026-09-21 起）：t25362 那种宽跨度实测下 common 可达 55.8 GB/(1.024 s batch)，与站数无关——本节只给模型与比值。
 
 ## 6. 目录约定
 
