@@ -618,7 +618,7 @@ fxcorr 把 229 帧当 filler 丢弃 → **时间轴被压缩 229 帧** → 后�
 |---|---|---|
 | 计数 | `GAPCHECK summary`（`missing frames` / `filler frames`） | C1–C4、C6 类（计数错） |
 | 定位 | `READPOS` 的 `firstfno` 序列 | A、B5 类（读取位置错） |
-| 无效块 | `.sp` 每 subint 权重数组的零块区间（布局见 `data-spec.md` 5.3） | 缺口的**落点**错（B5 第 2 条：读取位置对了但洞标在别处） |
+| 无效块 | `.sp` 每 subint 权重数组的零块区间（布局见 `workdir-template/fengine/README.md`） | 缺口的**落点**错（B5 第 2 条：读取位置对了但洞标在别处） |
 | 产物 | `cmp_swin.py` 的差异覆盖面 | 全部，但**不指向具体病因**；有缺口的数据**不能**用它做判据（两边的 subint 窗口差一个 delay 修正，见 `fxcorr/test/gaps/README.md`） |
 
 **核心提醒：summary 全对不等于定位对。** B5 的 `missing`/`filler`/去重计数全部正常，只有 `firstfno` 能看出来。

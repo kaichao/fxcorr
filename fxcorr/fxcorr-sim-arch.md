@@ -109,7 +109,7 @@ V_i = g_i · S(t − τ_i) · e^{jφ_i} + n_i
 
 - 缓解手段（预留，不实现）：dtype 降 int16（比值 8 倍，96dB 动态范围对噪声信号无碍）；覆盖范围按 batch 实际用到的频段裁剪。**起步 float32，meta.json 带 dtype 字段留降级口。**
 - 结论：common 落盘量 ≥16× 单站数据，但 batch 粒度下绝对量可控、消费后可删；与"每节点各自重算 common（省 I/O、每站多算 ~10% 计算，见第 8 节）"相比，权威单份的一致性收益压倒 I/O 代价，定为唯一形态。
-- **代入真实观测参数后的体量核算见 `data-volume.md`**（2026-09-21 起）：t25362 那种宽跨度实测下 common 可达 55.8 GB/(1.024 s batch)，与站数无关——本节只给模型与比值。
+- **代入真实观测参数后的体量核算见 `data-volume.md`**（2026-09-21 起）：t25362 那种宽跨度实测下 common 可达 57.9 GB/(1.024 s batch)，与站数无关——本节只给模型与比值。
 
 ## 6. 目录约定
 
@@ -124,7 +124,7 @@ workdir/
     └── <station>_<batch_id>.vdif
 ```
 
-数据文件布局与 meta.json 字段以 `data-spec.md` 5.8 节为准（格式版本随文件格式变更递增；改格式必须先同步 data-spec）。
+数据文件布局与 meta.json 字段以 `workdir-template/sim-common/README.md` 为准（2026-09-27 起；格式版本随文件格式变更递增，改格式要同步那份 README 与 `data-spec` 5.8 的改版要求）。
 
 ## 7. CLI 要点
 

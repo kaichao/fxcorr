@@ -619,7 +619,7 @@ station → 全部站 f → 一次 x 同节点完成，f 与 x 同节点）、�
 语义，见 `data-spec.md` 第 1 节与 5.2.1；**各目录体量、流水线各步的落盘粒度（细到 slice / FFT
 块 / subint / intTime）、瓶颈排序与优化杠杆（含 `fengine` 的汇聚地板）见 `data-volume.md`**。
 P6 的场景设计按 `data-volume.md` §3 的参数表挑配置即可——t25362 的实测数字（每站 1.03 GB/s、
-覆盖跨度 6816 MHz、1.024 s 的 batch ≈ 127 GB）都在那里。
+覆盖跨度 7072 MHz、1.024 s 的 batch ≈ 129 GB）都在那里。
 
 **依据（病态这一半）**：现状三个造病能力各自一个环境变量——`FXSIM_GAPS`（缺口 + filler 三形态，
 帧号与计数可分别指定）、`FXSIM_STARTOFFSET`（记录起点偏移）、以及信号参数类（`FXSIM_NOISE` 等，

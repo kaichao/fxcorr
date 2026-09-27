@@ -1,0 +1,90 @@
+# =========================
+#  Project
+# =========================
+vex = t25362-4st-mini.vex
+
+antennas = BA, S6, BX, SX
+singleScan = True
+startSeries = 1
+
+nCore   = 16
+nThread = 4
+
+dataBufferFactor = 32
+maxLength = 86400
+tweakIntTime = true
+
+
+machines = difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx,difx
+
+SETUP default
+{
+    nChan = 128
+    tInt  = 1.024
+}
+
+RULE rule1
+{
+  scan  = 362-0650a
+  setup = default
+}
+
+ANTENNA BA
+{
+    datastreams = BA1, BA2, BA3, BA4, BA5, BA6, BA7, BA8
+    phaseCalInt = 5
+}
+
+DATASTREAM BA1 { filelist = data/filelist_ba_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA2 { filelist = data/filelist_ba_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA3 { filelist = data/filelist_ba_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA4 { filelist = data/filelist_ba_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA5 { filelist = data/filelist_ba_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA6 { filelist = data/filelist_ba_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA7 { filelist = data/filelist_ba_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BA8 { filelist = data/filelist_ba_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA S6
+{
+    datastreams = S61, S62, S63, S64, S65, S66, S67, S68
+    phaseCalInt = 5
+}
+
+DATASTREAM S61 { filelist = data/filelist_s6_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S62 { filelist = data/filelist_s6_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S63 { filelist = data/filelist_s6_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S64 { filelist = data/filelist_s6_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S65 { filelist = data/filelist_s6_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S66 { filelist = data/filelist_s6_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S67 { filelist = data/filelist_s6_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM S68 { filelist = data/filelist_s6_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA BX
+{
+    datastreams = BX1, BX2, BX3, BX4, BX5, BX6, BX7, BX8
+    phaseCalInt = 5
+}
+
+DATASTREAM BX1 { filelist = data/filelist_bx_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX2 { filelist = data/filelist_bx_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX3 { filelist = data/filelist_bx_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX4 { filelist = data/filelist_bx_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX5 { filelist = data/filelist_bx_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX6 { filelist = data/filelist_bx_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX7 { filelist = data/filelist_bx_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM BX8 { filelist = data/filelist_bx_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+
+ANTENNA SX
+{
+    datastreams = SX1, SX2, SX3, SX4, SX5, SX6, SX7, SX8
+    phaseCalInt = 5
+}
+
+DATASTREAM SX1 { filelist = data/filelist_sx_t1  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX2 { filelist = data/filelist_sx_t2  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX3 { filelist = data/filelist_sx_t3  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX4 { filelist = data/filelist_sx_t4  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX5 { filelist = data/filelist_sx_t5  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX6 { filelist = data/filelist_sx_t6  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX7 { filelist = data/filelist_sx_t7  format = VDIF/8032/2  sampling = REAL  nBand = 8 }
+DATASTREAM SX8 { filelist = data/filelist_sx_t8  format = VDIF/8032/2  sampling = REAL  nBand = 8 }

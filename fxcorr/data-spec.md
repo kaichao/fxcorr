@@ -73,6 +73,11 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 └── meta/                         # 全局索引、日志与根记录（meta/roots/）
 ```
 
+**每个目录的实物形态与逐文件说明见 `fxcorr/workdir-template/`**——那份模板把
+上面这些目录全建了出来，每个目录一份 README（有哪些文件、命名长什么样、
+谁写谁读、什么时候能删）。本文件只承载**规范**：格式定义、约束、跨目录规则。
+查"这个目录长什么样"看模板，查"为什么必须这样"看本文。
+
 多节点部署的存储归属（**V5 P5 起由根变量决定**，见 5.2.1）。**默认全部在 project/ 下，
 即所有节点共享同一份全局存储**；需要把某类数据放到别处（本地盘、另一块共享盘）时，
 才给对应的根变量赋值：
@@ -83,7 +88,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 | `meta/` | `$FXCORR_WORKDIR/meta` | ❌ | 同上；索引与根记录必须全局一致可见 |
 | `raw/` | `$FXCORR_WORKDIR/raw` | ✅ `FXCORR_RAW_ROOT` | TB 级原始基带，可指向各记录节点的本地盘 |
 | `fengine/` | `$FXCORR_WORKDIR/fengine` | ✅ `FXCORR_FENGINE_ROOT` | 各站 f 输出，可指向计算节点本地盘（目录逻辑集中、物理分布） |
-| `sim-common/` | `$FXCORR_WORKDIR/sim-common` | ✅ `FXCORR_SIM_COMMON_ROOT` | 全部目录里最大（≥16× 单站 2bit，见 `data-volume.md`）；**本地盘或共享盘均可**——要求是"**同一 ds 组**读到同一份"（2026-09-27 按分片修订：原来说是"同一 batch"，但同一 ds 组内的 ds 才读同一频段区段，不同组读不同区段）；同组各站在不同节点、各自读到**不同**副本才是违例。**按覆盖跨度生成时 85% 是没人读的间隙**（5.8 节），实际需要 8.2 GB/s 而非 54.5 GB/s |
+| `sim-common/` | `$FXCORR_WORKDIR/sim-common` | ✅ `FXCORR_SIM_COMMON_ROOT` | 全部目录里最大（≥16× 单站 2bit，见 `data-volume.md`）；**本地盘或共享盘均可**——要求是"**同一 ds 组**读到同一份"（2026-09-27 按分片修订：原来说是"同一 batch"，但同一 ds 组内的 ds 才读同一频段区段，不同组读不同区段）；同组各站在不同节点、各自读到**不同**副本才是违例。**按覆盖跨度生成时 85% 是没人读的间隙**（5.8 节），实际需要 8.2 GB/s 而非 56.6 GB/s |
 | `vis/` | `$FXCORR_WORKDIR/vis` | ✅ `FXCORR_VIS_ROOT` | SWIN 跨 batch 追加、difx2fits 直读（**追加保序前提**：现状是"同实验 batch 串行"；**V6 形态 A 起改为实验级 `merge` 单点写入**，⚠ 未实施——见第 12 节与 5.9 末条） |
 | `vis-parts/` | `$FXCORR_WORKDIR/vis-parts` | ❌ | x 分片的局部记录（D16，见 5.9）；**必须与 `vis/` 分离**——difx2fits 只 glob `<outputFile>/DIFX*`，放别处即隔离；量极小，恒在 workdir 下（2026-09-26） |
 | `product/` | `$FXCORR_WORKDIR/product` | ✅ `FXCORR_PRODUCT_ROOT` | 可本地生成，再由编排层迁移到全局 |
@@ -133,53 +138,26 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 
 ### 5.1 配置与模型数据（config/）
 
-```
-config/
-├── experiment.vex
-├── experiment.v2d
-├── experiment.input
-├── experiment.calc
-├── experiment.im
-└── experiment.flag          # 可选
-```
+> 实物与逐文件说明见 `fxcorr/workdir-template/config/README.md`。
 
-| 文件 | 编号 | 说明 |
-|------|------|------|
-| `*.vex` | D1 | 观测描述 |
-| `*.v2d` | D2 | vex2difx 控制 |
-| `*.input` | D3 | 相关器主配置 |
-| `*.calc` | D4 | 几何模型输入（含 IM FILENAME 指向 .im） |
-| `*.im` | D6 | 延迟模型 |
-| `*.flag` | D5 | 标记文件（可选） |
-
-注意：fxcorr-f **和** fxcorr-x 都读 D3/D4/D6——f 用 .input 解析数据流/频带并用延迟模型做条纹旋转与小数采样校正，x 用 .input 解析基线表/频点并用模型求 UVW（写 SWIN 头）。Configuration（.input 解析）与 Model（.calc/.im）复用 mpifxcorr 现有实现（零 MPI）。
+- 编号：D1 `.vex` / D2 `.v2d` / D3 `.input` / D4 `.calc` / D6 `.im`（另有可选的 `.flag`）；
+- **实验级**——一个实验一套、整个实验共用（**不是 batch 级**），长期保留；
+- 前处理：`.v2d` ──vex2difx──> `.input` + `.calc` ──difxcalc──> `.im`。原程序按 cwd 解析
+  内部相对路径，一律经 `fxcorr/wrap_*.sh` 调用（见 5.2.1 末条）；
+- **无独立根**，恒在 `$FXCORR_WORKDIR/config`。
 
 ### 5.2 原始基带数据（raw/）
 
-```
-raw/
-├── STA1/
-│   ├── STA1_00000001_ds0.vdif        # 多 datastream 站：每 ds 一个文件
-│   ├── STA1_00000001_ds1.vdif
-│   ├── ...
-│   └── STA1_00000002_ds0.vdif        # 下一个 batch
-├── STA2/
-│   └── ...
-└── STA3/
-    └── ...
-```
+> 实物与逐文件说明见 `fxcorr/workdir-template/raw/README.md`。
 
-- 编号：D7
-- 按台站组织
-- 命名建议：`<station>_<batch_id>.<suffix>` 或保持原始记录名。**多 datastream 站必须每 ds 一个文件、文件名含 ds 编号**（如 `<station>_<batch_id>_ds<N>.vdif`）——同站不同 ds 若同名会互相覆盖；每个 ds 的文件按 `.input` DATA TABLE 的对应行软链。**`_ds<N>` 后缀只在多 datastream 站出现**（单 ds 站的 `<station>_<batch_id>.vdif` 不带后缀，与加多 ds 支持之前的命名逐字相同）；生成侧已落地（fxcorr-sim `ds_index` 参数 + make_testdata.sh 的逐 ds 任务与软链，2026-09-27，见 `v5-plan.md` P6「多 datastream 生成」与 `test/multids/`）。
-- **`_ds<N>` 的 N 是站内序号**（0-based，按 `.input` DATASTREAM 表里该站出现的次序）——**与 `fengine/<batch_id>/<station>/ds_<N>/` 的 N 同一口径**（fxcorr-x 定位 `ds_N/` 时算的就是这个站内序号），也与 `fxcorr-f` 的 `ds_index` 参数同一口径。**三处必须一致**，否则 f 会读错文件。
-- 数据量：TB 级
-- 约束：一个 raw 文件的时间范围须覆盖完整 batch；切批见第 12 节
-- **文件起点语义（约束）**：file-per-batch 布局下 raw 文件的时间起点**不要求**等于 batch 起点（真实观测中各记录系统的帧计数器不同相，文件可以从某一秒的中途开始）；VDIF 文件的时间起点由**首帧时间戳**确定，起点之前（batch 头或 subint 区间）无数据的部分判为无效。batch.json 的 start_mjd 是 batch 起点的精确表示。文件中间缺帧（记录中断，含"直接缺帧"与"filler 帧占位"两种形态）同样受支持。**帧头标了 VDIF invalid 位的帧按"在时间轴上在位、数据不可用"处理**——它照常占一个时间槽（帧号参与连续性判断），只是对应的块在 f 侧被标无效；这与"占字节不占时间轴"的 filler 是两回事，实测与定案见 `fxcorr/reader-model.md` 4.12。
-- **VDIF 的时间参考**：帧头秒字段是**当日秒**（对 86400 取模、不带日期），帧号是秒内序号（对帧率取模，每秒回绕；t25362 为 16000 fps）。文件的时间起点由首帧的 (秒, 帧号) 唯一确定，**不保证落在整秒边界**——这也是"文件起点 ≠ batch 起点"的成因。
-- **读取路径的完整分析见 `fxcorr/reader-model.md`**：读模型对照（顺序读 vs 定位读）、缺陷根因与症状指纹总表（A 起点 / B 缺口 / C filler / D 有效性）、`GAPCHECK`/`READPOS` 诊断判据、改造建议；f 侧目录级实现要点见 `applications/fxcorr-f/CLAUDE.md`。
-
-- 仿真数据（测试替身，由 fxcorr-sim 生成）约束：batch 时间窗须与 subint 网格对齐（fxcorr-sim 读 .input 的 subint 结构保证，见第 12 节）；多节点分布生成时各分片的 VDIF 帧时间戳/帧号须全局连续（程序内校验点）；最小数据集可入仓库（`fxcorr/test/`，附 sha256），不受"运行时数据不进 git"约束
+- 编号：D7；生产者：记录节点（真实观测）/ `fxcorr-sim station`（仿真）；消费者：`fxcorr-f`（按 `.input` 的 DATA TABLE 读）；
+- 组织：`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`——**多 datastream 站每 ds 一个文件**，`_ds<N>` 后缀只在多 ds 站出现（单 ds 站为 `<station>_<batch_id>.vdif`，与加多 ds 支持之前逐字相同）；
+- **`N` 的口径（三处必须一致）**：站内 datastream 序号（0-based，按 `.input` DATASTREAM 表里该站出现的次序）——`raw/` 文件名、`fengine/<batch_id>/<station>/ds_<N>/` 的目录名、`fxcorr-f` 的 `ds_index` 参数。**不一致就会读错文件**；
+- **文件起点语义**：**不要求**等于 batch 起点（真实观测中各记录系统的帧计数器不同相，文件可以从某一秒的中途开始，起点之前的部分判为无效）；文件中间缺帧（"直接缺帧"与"filler 帧占位"两种形态）同样受支持；**标了 VDIF invalid 位的帧按"在时间轴上在位、数据不可用"处理**——它照常占一个时间槽（帧号参与连续性判断），只是对应的块在 f 侧被标无效，这与"占字节不占时间轴"的 filler 是两回事（实测与定案见 `fxcorr/reader-model.md` 4.12）；
+- **VDIF 时间参考**：帧头秒字段是**当日秒**（对 86400 取模、不带日期），帧号是秒内序号（对帧率取模、每秒回绕；t25362 为 16000 fps）。文件起点由首帧的 (秒, 帧号) 唯一确定，**不保证落在整秒边界**——这也是"文件起点 ≠ batch 起点"的成因；
+- 数据量 TB 级；**一个 raw 文件的时间范围须覆盖完整 batch**（切批约束见第 12 节）；
+- **读取路径的完整分析见 `fxcorr/reader-model.md`**（读模型对照、缺陷根因与症状指纹、`GAPCHECK`/`READPOS` 判据）；f 侧目录级实现要点见 `applications/fxcorr-f/CLAUDE.md`；
+- 仿真数据约束：batch 时间窗须与 subint 网格对齐（fxcorr-sim 读 `.input` 的 subint 结构保证，见第 12 节）；多节点分布生成时各分片的 VDIF 帧时间戳/帧号须全局连续（程序内校验点）；最小数据集可入仓库（`fxcorr/test/`，附 sha256），不受"运行时数据不进 git"约束。
 
 #### 5.2.1 仿真数据生成器（fxcorr-sim）规范
 
@@ -248,246 +226,65 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
 ### 5.3 F-Engine 输出（fengine/）
 
-```
-fengine/
-├── 00000001/                         # batch_id
-│   ├── STA1/
-│   │   ├── ds_0/                     # 站内 datastream 序号（多 datastream 站
-│   │   │   │                         #   每记录线程一个，f 任务带 ds_index）
-│   │   │   ├── band_00.sp            # D8：recorded band 频谱
-│   │   │   ├── band_01.sp
-│   │   │   ├── ...
-│   │   │   ├── pcal.bin              # 脉冲校准 tone（每 subint）
-│   │   │   └── autocorr.bin          # 自相关（每 subint，已频率平均）
-│   │   └── ds_1/
-│   │       └── ...
-│   ├── STA2/
-│   │   └── ds_0/
-│   │       └── ...
-│   └── STA3/
-│       └── ds_0/
-│           └── ...
-├── 00000002/
-│   └── ...
-└── ...
-```
+> 实物、逐文件说明与**三种文件的完整格式**（`band_XX.sp` / `pcal.bin` / `autocorr.bin`）
+> 见 `fxcorr/workdir-template/fengine/README.md`。
+> **`batch.json`（D9）见 `fxcorr/workdir-template/batches/README.md`**——它原先写在本节，2026-09-27 移回它自己的目录。
 
-单 datastream 站同样是 `ds_0/`（布局统一，无平铺特例）。f 任务 = (batch_id, station, ds_index)；`ds_index` 是站内 datastream 序号（0-based，按 .input datastream 序），fxcorr-x 按同一规则回读。
-
-**batch.json 示例**（D9，全字段单文件）：
-
-```json
-{
-  "batch_id": "00000001",
-  "start_mjd": 60512.520833333,
-  "start_time": "2026-09-08T12:30:00",
-  "duration_sec": 30.0,
-  "stations": ["STA1", "STA2", "STA3"],
-  "baselines": ["STA1-STA2", "STA1-STA3", "STA2-STA3"],
-  "config_file": "config/experiment.input",
-  "calc_file": "config/experiment.calc",
-  "im_file": "config/experiment.im",
-  "n_subints": 30,
-  "subint_ns": 1000000000,
-  "integration_sec": 1.0,
-  "n_channels": 256,
-  "polarizations": ["RR", "LL", "RL", "LR"],
-  "difx_dir": "experiment.difx",
-  "created_at": "2026-09-08T12:35:12Z",
-  "status": "done",
-  "fxcorr_f_version": "0.1.0",
-  "fxcorr_x_version": "0.1.0"
-}
-```
-
-字段说明：
-
-- 时间与结构：`batch_id` / `start_mjd` / `start_time` / `duration_sec` / `n_subints` / `subint_ns`——fxcorr-sim 与 fxcorr-f 读（start_mjd 建议写精确 repr，如 58948.291666666664）。
-- `config_file` / `calc_file` / `im_file`：三工具读 .input（config_file）；calc/im 为元数据。
-- `stations`：全部参与站（x 任务 = 全站全基线，任务集推导见第 6 节）。
-- `baselines` / `integration_sec` / `n_channels` / `polarizations` / `difx_dir`：可见度输出元数据，均可由 .input 提前推导（baselines = 全部基线组合；**`polarizations` 逐条 baseline 推导**——每条只出 1 个 product，其极化 = A 侧 band 的 × B 侧 band 的，见第 8 节）。**polarizations 的字符直接来自 `.input` 的 `REC BAND k POL`，程序透传不改写**，所以同一份规范下会出现两种形态（都合法）：**t25362 真实观测写的是 `X`/`Y`** → `["XX","XY","YX","YY"]`；**树里的测试资产 test.input 写的是 `R`/`L`** → `["RR","RL","LR","LL"]`（本节的示例即后者）。2026-09-27 实测核对通过（见下方 `make_testdata.sh` 的推导）。**`difx_dir` 是纯记录字段**（V5 P5 Q10 起）：写的是 `.input` 的 `OUTPUT FILENAME` 原样，**没有任何程序读它**——SWIN 的实际落点是 `FXCORR_VIS_ROOT` + `OUTPUT FILENAME`（data-spec 5.2.1），**不要拿 `difx_dir` 当"这批数据落在哪"的权威**，那件事只有 `meta/roots/<batch_id>.json` 知道。
-- `status`：running / done / failed，编排脚本更新。
-
-**batch.json 位置语义**（D9，谁写谁读）：
-
-- 位于 `batches/<batch_id>.json`（共享存储），**单文件全字段**：由编排脚本（make_testdata.sh / run_batch.sh）或调度器**一次写全**（x 阶段字段由 .input 提前推导，无需分阶段追加）；fxcorr-sim / fxcorr-f / fxcorr-x 各取所需，均**只读、不回写**；status 字段由编排脚本更新（无独立 status.txt）。
-- 各工具命令行用法见 `fxcorr/usage.md`（本规范不覆盖命令行接口）。
-
-**band_XX.sp 二进制格式**（host 字节序，V1 单机；`XX` = recorded band 序号）：
-
-```
-Header（定长 256 字节）：
-  偏移  类型      字段
-  0     char[6]   magic = "FXCSP\0"
-  6     u32       version = 1
-  10    u32       band_index（recorded band 序号）
-  14    char      pol（1 字节，"R"/"L"，取自 recordedbandpols）
-  16    u32       num_channels（recordedbandchannels）
-  20    f64       bandwidth_hz（band 带宽）
-  28    f64       bandedge_freq_hz（bandlowedgefreq）
-  36    u32       lowersideband（0/1）
-  40    u32       usecomplex（0/1）
-  44    u32       n_subints
-  48    u32       subint_ns（= .input 的 subintNS）
-  52    u32       blocks_per_send
-  56    u32       num_buffered_ffts（每 subint 的 FFT 块数）
-  60    u32       flag_words_per_subint（= ceil(blocks_per_send/30)）
-  64..255        保留，填 0
-
-每 subint 数据块（顺序存 n_subints 个）：
-  i32       scan（scan 序号）
-  i32       sec（offsetseconds，相对 scan 起点的秒）
-  i32       ns（offsetns）
-  u32[flag_words_per_subint]  valid_flags（每 30 位对应一个 FFT 块，位=1 有效）
-  f32[blocks_per_send]        weights（每 FFT 块的 dataWeight，0.0~1.0；per-band：各 .sp 文件只存本 band 的权重；槽式更新：写盘时按槽收集后回填，见 fxcorr-f 的 FEngineWriter::flushWeights）
-  cf32[blocks_per_send × num_channels]  spectra（subloop 序，每 subloop num_channels 个复数）
-```
-
-- cf32 = `struct { float re; float im; }`（与 mpifxcorr 的 `cf32` 定义一致）
-- weights 语义：对应 `Mode::getDataWeight(band, subloop)`（Mk5Mode 启用 perbandweights 时按 band 取，否则退化为 dataweight[subloop]）；fxcorr-x 侧 baselineweight 还原为两站对应 band 权重之积（mode.cpp 的 weights 累加语义）
-- spectra 语义：已完成解包、延迟对齐（整数+分数采样校正）、条纹旋转、FFT 的结果；**不存共轭副本**，fxcorr-x 侧按需对整段做逐元素共轭（等价于原 `getConjugatedFreqs()`）
-- 通道→频率映射约定见第 8 节；无效 subloop（valid=0 或 dataWeight=0）的频谱块为全零
-- **zoom band 不单独落盘**（2026-09-13 P4a 实现）：zoom 频谱是父 band 频谱数组的指针切片（mode.cpp:184-195），fxcorr-x 按 .input 的 zoom 定义（zoomfreqchanneloffset + zoom freq 的 nchan）对父 band_XX.sp 做通道切片视图读取（SpReader 切片构造参数），.sp 文件与布局不变
-
-**pcal.bin**（仅当该站配置了 phasecal；`n_tones` 由配置定）：
-
-```
-Header：
-  char[6]   magic = "FXCPC\0"
-  u32       version = 1
-  u32       n_subints
-  u32       n_tones（最大 tone 数，取各 band 之和）
-  u32       n_bands
-  每 band：u32 band_index；u32 n_tones_this_band；
-           每 tone：f64 tone_freq_mhz + char pol（交错，共 9B/tone）
-每 subint：cf32[n_tones]（各 band tone 依序排列）
-```
-
-**autocorr.bin**（每 subint 按 maxacblocks 批次频率平均后的自相关）：
-
-```
-Header：
-  char[6]   magic = "FXCAC\0"
-  u32       version = 2
-  u32       n_subints
-  u32       ac_batches（每 subint 的 AC 平均批次记录数 = ceil(blocks_per_send/maxacblocks)）
-  u32       n_bands（total bands = recorded + zoom）
-  u32       crosspol（1 = 记录含交叉极化段；0 = 仅平行段。= WRITE AUTOCORRS && maxproducts>2）
-  每 band：u32 band_index（datastream-total 序）；u32 num_channels（各 band 各自 nchan/chanstoavg）
-每 subint（ac_batches 条记录，按 fftloop 批序）：
-  平行段：每 band：cf32[num_channels]（自相关复数谱）+ f32 weight（本批次累积权重）
-  crosspol 段（仅 crosspol=1）：每 band：cf32[num_channels]（交叉极化自相关）+ f32 weight
-```
-
-自相关在 f 侧由 `Mode::process` 累积，每 maxacblocks 个 FFT（与 core.cpp:993-1003 同节奏）`averageFrequency()` 平均后落一条记录、随即 `zeroAutocorrelations()`；x 侧把该 subint 的全部记录逐条累加进 SWIN 自相关段（`vectorAdd`，基线号 `257*(telescope_index+1)`，与现 DiFX 约定一致）。maxacblocks 由 .calc 的 AC AVG INTERVAL 与 subint 结构共同决定（公式同 core.cpp:778-783）。**zoom band（2026-09-13 P4a）**：自相关谱为父 band 平均后数组的切片（mode.cpp:382-385，偏移已除 channelstoaverage），zoom 段的 weight 从父 recorded band 取（Mode 的 weights 只有 recorded 维；映射逻辑同 core.cpp:1324-1339）。**交叉极化段（2026-09-13 P7）**：crosspol=1 时记录在平行段后接同构的 crosspol 段（顺序同 core.cpp:1273-1301/1342-1369 的 results 布局串联），交叉谱 = 同一 FFT 块内 R×conj(L) 与 L×conj(R) 的累加（Mode 内 autocorrelations[1]，calccrosspolautocorrs 由 WRITE AUTOCORRS 开启）、weight 累加同平行（perbandweights 时为两 band 权重乘积）；x 侧按 header 的 crosspol 标志读段并累加进结果区 crosspol 偏移（平行段 walk 结束处接续），SWIN 写盘由 Visibility 的 autocorrwidth=2 路径处理（polpair = 平行 [p,p] / 交叉 [p,opposite(p)]）。version 1（旧产物，无 crosspol 字段）按无 crosspol 段处理。
+- 编号：D8；生产者：`fxcorr-f`；消费者：`fxcorr-x`；
+- 布局：`fengine/<batch_id>/<station>/ds_<N>/`——**单 datastream 站同样是 `ds_0/`**（无平铺特例）。f 任务 = `(batch_id, station, ds_index)`，`ds_index` 与 `raw/` 文件名的 `_ds<N>` 同口径（见 5.2）；
+- 三层编号各回答一个问题：`<batch_id>` **哪段时间**（`batches/<batch_id>.json`）、`<station>/ds_<N>` **哪个站哪路记录**（`.input` 的 DATASTREAM 表）、`band_<xx>.sp` **哪个 recorded band**（`.input` 的 FREQ 表，`xx` 是**该 ds 内**的序号而非全局 band 号）；
+- 生命周期：该 batch 的 x 跑完后可删；
+- **多节点部署必须落 tmpfs**（`/dev/shm`）：产生率 GB/s 级，SATA SSD 差两个数量级；同节点的并发组数受 tmpfs 容量约束（见 `data-volume.md` §5.1 与 `v6-plan.md`）；
+- **改这三种文件的布局时必须递增其 Header 的 `version`**，并同步 README 与本节。
 
 ### 5.4 X-Engine 输出（vis/，SWIN）
 
-```
-vis/
-└── experiment.difx/                  # SWIN 文件集（跨 batch 追加）
-    ├── DIFX_60512_43200.s0000.b0000  # 文件名 = DIFX_<MJD>_<实验开始秒>.s<相位中心>.b<脉冲星bin>
-    ├── DIFX_60512_43200.s0000.b0001
-    └── ...
-```
+> 实物、逐文件说明与 **SWIN 74 字节记录头**见 `fxcorr/workdir-template/vis/README.md`。
 
-（batch.json 已集中到 `batches/`，见 5.3 节）
-
-- **D10 = SWIN 二进制**：每记录 74 字节头（sync 0xFF00FF00、version、baselinenum、dumpmjd、dumpseconds、configindex、sourceindex、freqindex、polpair(2B)、pulsarbin、weight(double)、uvw[3×double]）+ `freqchannels` 个 cf32 可见度。与 mpifxcorr 的 `Visibility::writeSWIN` 逐字节一致，difx2fits / difx2mark4 零改造直读。
-- SWIN 文件名用**实验级** MJD+开始秒（.input 的 START MJD/SECONDS），**不含 batch_id**——同一实验的所有 batch 追加写入同一组文件（batch 边界与 intTime 对齐保证不碎片化，见第 12 节）。
-- 记录头里 `uvw[3]` 由 fxcorr-x 在写盘时用 Model（.calc + .im）在积分中点求值（`interpolateUVW`）。
-- 脉冲校准数据由 f 落盘（5.3 节 pcal.bin）；实验级文本文件 `PCAL_<mjd>_<sec>_<station>` 由 f 生成（V2 P0，2026-09-13 完成），格式与 mpifxcorr 逐字节一致、可与基准直接 diff 对拍：
-  ```
-  # DiFX-derived pulse cal data
-  # File version = 1
-  # Start MJD = <mjd>
-  # Start seconds = <sec>
-  # Telescope name = <station>
-  <station> <pcalmjd %17.11f> <intTime/86400 %13.11f> <dsindex> <n_recorded_bands> <max_tones> [<tonefreq %12g> <pol> <re %12.5e> <im %12.5e>]...
-  ```
-  每 intTime 一行（tone 值 = intTime 内 subint 累加 × 可见度层校准缩放，LSB 写原值 / USB im 取负，不足 max_tones 补 ` -1 0 0 0`，全零不写行）；追加幂等（按行时间戳替换），跨 batch 追加。
-- 自相关以基线号 `257*(telescope_index+1)` 写入 `s0000.b0000` 文件。
-
-batch.json（D9）已并入 `batches/<batch_id>.json` 单文件全字段，见 5.3 节。
+- 编号：D10；生产者：`fxcorr-x`（不分片）或**实验级 `merge`**（分片，⚠ V6 形态 A）；
+  消费者：`difx2fits` / `difx2mark4`（零改造直读，这是整个设计的前提）；
+- 目录名 = `.input` 的 `OUTPUT FILENAME`（相对时拼 `FXCORR_VIS_ROOT`）；
+  SWIN 文件名用**实验级** MJD + 开始秒，**不含 batch_id**——同一实验的所有 batch
+  追加写入同一组文件（batch 边界与 intTime 对齐保证不碎片化，见第 12 节）；
+- **追加顺序不是自由的**：`difx2fits` 按天线检查时间单调、**静默丢弃**回退记录
+  （只打一行计数）。单节点串行 batch 天然满足；多节点并行失效——约束与场景见
+  `vis/README.md`，方案见 5.9 末条与第 12 节；
+- `PCAL_<mjd>_<sec>_<station>` / `SWITCHEDPOWER_*` 两个**文本**文件也落在本目录
+  （由 f 生成，格式与 mpifxcorr 逐字节一致，可与基准 diff 对拍）；它们的并发语义
+  见第 12 节的待确认表；
+- 生命周期：**长期保留**。
 
 ### 5.5 X-Engine 波束输出（beam/，P8 2026-09-13）
 
-相位阵配置（.input CONFIG 段 `PHASED ARRAY TRUE` + `PHASED ARRAY CONFIG FILE`）时，fxcorr-x 不做互相关、不写 SWIN，改为波束形成：各站频谱按相位阵配置文件的 DWeight 加权求和（`Σ_ds DWeight[freq][ds] × spectrum_ds`，累加不归一化），按 `ACC TIME (NS)` 窗口落盘。上游 mpifxcorr 的相位阵输出端（padomain/paoutputformat/DIFX/VDIF/TIMESERIES）是无消费者的死代码，**本格式为 fxcorr 自定**（设计见 algo-plan.md P8 节；检验资产见 `fxcorr/test/phasearr/`）。
+> 实物与 **`beam.bin` 完整格式**见 `fxcorr/workdir-template/beam/README.md`。
 
-```
-beam/
-└── 00000001/                         # batch_id
-    └── beam.bin                      # D14：每 acc 窗口一条记录（追加写，重跑覆盖幂等）
-```
-
-**beam.bin 二进制格式**（host 字节序，V1 单机）：
-
-```
-Header（定长 256 字节）：
-  偏移  类型      字段
-  0     char[6]   magic = "FXCBM\0"
-  6     u32       version = 1
-  10    u32       n_subints
-  14    u32       n_accs（每 subint 的 acc 窗口数 = subintns/ACC TIME，Configuration 校验整除）
-  18    u32       acc_ns（= ACC TIME (NS)）
-  22    u32       n_segs（输出段数 = Σ_freq 该 freq 的 pol 数）
-  26..255        保留，填 0
-
-段表（n_segs 条，每段 9 字节）：u32 freq_index + char pol + u32 nchan
-  （段序 = freq table 序 × 各 freq 的 pol 列表序；nchan = 该 freq 的 NUM CHANNELS）
-
-每 subint（顺序存 n_subints 个）：
-  每 acc 窗口（n_accs 条记录）：
-    i32       scan（scan 序号）
-    i32       sec（窗口起点，相对 scan 起点的秒 = subint sec + acc×acc_ns 进位）
-    i32       ns（窗口起点 ns）
-    每段：cf32[nchan]（该窗口内所有 FFT 块的加权和频谱）
-```
-
-语义要点：
-
-- 波束 = Σ_站 DWeight×频谱，**累加不归一化**、**不查 valid flags**（无效 FFT 块的频谱在 f 侧落盘即全零，直接加权自然等价，与上游 core.cpp:818-865 一致）；权重 ≥0 由 Configuration 校验。
-- acc 窗口 = 整数个 FFT 块（Configuration 校验 accffts 为 `NUM BUFFERED FFTS` 的整数倍），窗口起点时间戳 = subint 起点 + acc 序号×acc_ns（scan 相对系，同 .sp）。
-- 无 weight 段（上游无此概念）；DWeight 不落 header（.input 可查，落盘易与配置漂移）。
-- 每 (freq, pol) 的贡献站映射：recorded band 优先（freq==该 freq 且 pol==papol），否则 zoom band——照上游 core.cpp:822-851。
-- 通道数语义修正：上游 core.cpp:821 误用 `getFNumChannels(configindex)`（参数应为 freq 序号），fxcorr 用 `getFNumChannels(freqindex)`。
-- 相位阵 batch 不写 SWIN（fxcorr-x 早退分支）；f 侧产物（.sp/autocorr.bin）照常；与 pulsar/多相位中心互斥（上游 if/else 语义）。
+- 编号：D14；生产者：`fxcorr-x`（**相位阵模式**）；消费者：下游分析；**无独立根**；
+- **与互相关模式互斥**：`.input` 的 CONFIG 段有 `PHASED ARRAY TRUE` +
+  `PHASED ARRAY CONFIG FILE` 时，x 不做互相关、不写 SWIN，改为按 `DWeight`
+  加权求和波束（累加不归一化）；
+- 上游 mpifxcorr 的相位阵输出端（padomain/paoutputformat/…）是**无消费者的死代码**，
+  所以本格式**为 fxcorr 自定**（设计见 `algo-plan.md` P8 节）。
 
 ### 5.6 最终科学产品（product/）
 
-```
-product/
-├── experiment_00000001.FITS          # D11
-├── experiment_00000002.FITS
-└── mark4/                            # D12（如使用 difx2mark4）
-    └── ...
-```
+> 实物与逐文件说明见 `fxcorr/workdir-template/product/README.md`。
+
+- 编号：D11（FITS）/ D12（Mark4）；生产者：`fxcorr/wrap_difx2fits.sh`；消费者：下游分析；
+- **实验级操作**——difx2fits 一次读整个 `<exp>.difx/`，**不进 `fxcorr/run_batch.sh`**，
+  由编排层在该实验**全部 batch 跑完后调一次**；
+- **产物名由 difx2fits 按传入的 `<base>` 自定**（`<base>` 或 `<base>.0.bin*.source*.FITS`），
+  fxcorr 不控制它；`<exp>_<batch_id>.FITS`（第 10 节）只是**推荐命名**；
+- 根：`FXCORR_PRODUCT_ROOT`；生命周期：**长期保留**。
 
 ### 5.7 全局元数据（meta/）
 
-```
-meta/
-├── batches.index                     # D13（当前唯一落盘索引，run_batch.sh 追加）
-└── difxmsg/                          # DifxMessage 落盘日志（container 模式，algo-plan P1）
-    ├── <exp>_<batch>.xml              # fxcorr-x：每条完整 XML（Starting/Running/Ending/Done/Alert）
-    ├── <exp>_<batch>_<station>.xml    # fxcorr-f：同上 + 每 subint 两条 Diagnostic
-    └── <exp>_<batch>_<station>.sta    # fxcorr-f：DifxMessageSTARecord 二进制追加（FXCORR_STA=1）
-```
+> 实物与**文件格式示例**（`batches.index` / `roots/<batch_id>.json`）见 `fxcorr/workdir-template/meta/README.md`。
 
-（stations.json / run.log / versions.txt 为早期预留命名，未实现，已删。）
-
-difxmsg/ 仅 container 模式（`FXCORR_RUN_MODE=container`）产生：组播受限的容器内降级为落盘，由编排层（scalebox）读取转发；文件内容与 host 模式组播包逐字节一致。每进程一个文件（文件名含 batch_id/station），进程启动时截断重写——重跑 batch 幂等，无并发追加竞态。
-
-**当前状态：暂不启用（2026-09-17 定）**。host 模式默认不设 `DIFX_MESSAGE_GROUP`/`DIFX_MESSAGE_PORT`，`DifxMonitor` 的每次发送都是静默 no-op（其头注释即此设计语义），故 `meta/difxmsg/` 不会产生，也不部署 `difx_monitor`/`guiServer` 等消费端。**运维侧的全局视图由 scalebox 编排层承担**：task 级状态码管理与出错信息查看，经标准输出、标准错误、工具定制输出与上下文日志几种形式记录。batch 生命周期只有十秒量级（t25362 一个 batch 11.264 s），单 batch 的实时状态本就不是运维需要的粒度，**聚合视图属编排层职责**。后期如需接入 DiFX 监控生态，再评估 host 组播（需部署组播网络 + 消费端）或 container 落盘（零组播，内容与组播包逐字节一致，见上）。
-
-**注意 `Alert` 是另一条独立通道**：fxcorrcommon 里上游代码（`configuration.cpp` 等）直接调 `cinfo`/`cverbose`/`cdebug`，经 `difxMessageSendDifxAlert` 落地——该函数在 `difxMessagePort < 0` 时**退化为打印** stdout/stderr，而 `difxMessagePort` 初值 -1、只有 `difxMessageInit()` 会设置它；**f/x 都不调用该函数，所以这条兜底打印是唯一路径，这些消息永远不会组播**。它不随本决策改变，由 `FXCORR_LOGLEVEL` 控制详略（见 usage.md 与 `applications/fxcorr-f/CLAUDE.md`）。
-
-**batches.index 示例**：
-```
-00000001,done,2026-09-08T12:35:12Z
-00000002,running,2026-09-08T12:36:01Z
-00000003,failed,2026-09-08T12:36:40Z
-```
+- 内容：`batches.index`（D13，batch 状态流水，append-only，由 `fxcorr/run_batch.sh` 追加）、`roots/<batch_id>.json`（该 batch 开跑时的根快照）、`difxmsg/`（container 模式的 DifxMessage 落盘，**当前暂不启用**）；
+- **无独立根**，恒在 `$FXCORR_WORKDIR/meta`，**必须全局一致可见**；
+- 合法状态只有 `running` / `done` / `failed`；**它是"哪些 batch 已完成"的判据来源**（实验级 `merge` 靠它核对，见 5.9）；
+- **根记录与一致性检查**：脚本开跑前写 `meta/roots/<batch_id>.json`，三个程序启动时与它比对**自己真的会用到**的根、不一致即报错退出；脚本侧另有一道实验级检查（`vis`/`product` 跨 batch 追加，与同实验已有 batch 记录不一致即报错）。规则细节见 5.2.1；
+- `Alert` 是**另一条独立通道**：fxcorrcommon 里上游代码直接调 `cinfo`/`cverbose`/`cdebug`，经 `difxMessageSendDifxAlert` 落地——该函数在 `difxMessagePort < 0` 时**退化为打印** stdout/stderr，而 f/x 都不调用 `difxMessageInit()`，所以这些消息永远不会组播。它由 `FXCORR_LOGLEVEL` 控制详略。
 
 **未来：SQLite 索引（2026-09-26 定，未实施）**——新的编排框架（scalebox）计划把 batch 元数据
 另存一份 SQLite 表，以支持结构化查询（按状态 / 时间 / 实验 / band 检索）。
@@ -503,61 +300,37 @@ difxmsg/ 仅 container 模式（`FXCORR_RUN_MODE=container`）产生：组播受
 
 ### 5.8 仿真公共信号（sim-common/）
 
-```
-sim-common/
-└── <batch_id>/                      # fxcorr-sim common 输出（D15）
-    ├── meta.json                    # 格式版本与网格参数
-    └── data_XX.bin                  # 每 0.5s 块一个文件（XX 从 00 顺序编号）
-```
+> 实物、**信号语义、网格参数与 `meta.json` 字段**见 `fxcorr/workdir-template/sim-common/README.md`。
 
-- 编号：D15；产生者：`fxcorr-sim common <batch_id>`（每个 batch 一次）；消费者：`fxcorr-sim station`（各站任务只读，不改写）。格式单独定版本，**改文件格式必须先同步本节并递增 version**。
-- **信号语义**（datasim gencplx 移植）：量化前频域公共信号——覆盖全站 `[minStartFreq, maxStartFreq+maxBW]` 的复基带频谱时间流，每 `stime = 1/specRes` µs 一个 `numSamps` 点复频谱 slice（STDEV=1 高斯复噪声，实虚独立）；各站 station 端按自己 band 的 (startIdx, blksize) 切频段、加站噪声、逆 DFT 出复基带（切出的频段逐位相同 = 跨站相干来源）。可选谱线（FXSIM_LINE）：gencplx 后逐 slice 乘高斯滤波器（√amp·exp(−π²δ²/2rms²)，δ = 网格点距，re=im 同乘）。
-- **网格参数**（由全站 band 布局推导，datasim getSpecRes 移植）：`specRes` = 全站 band 频率差/带宽的 GCD（0.5 MHz 起、二分至 1/2^10，找不到报错）；`numSamps = (maxStartFreq+maxBW − minStartFreq)/specRes`（覆盖全站 band 的实际跨度——band 间有间隙（如 200/205 MHz）时间隙网格点照常生成，仅不被任何站读取；datasim 的 `maxChanFreq = band0带宽×band数` 假设 band 连续、间隙布局会静默越界读公共信号，不照抄）；`minStartFreq` = 全站最低 band 频率。可选 specRes 缩放（FXSIM_SPECRES，正整数）：网格 ÷N 后一致性检查照跑（datasim --specres 语义）。band 频率须落在网格（`(freq−minStartFreq)/specRes` 整数，common 端校验）。
-- **meta.json 字段**：
+- 编号：D15；生产者：`fxcorr-sim common <batch_id>`（每 batch 一次）；消费者：`fxcorr-sim station`（各站只读，不改写）；**只有仿真才有这个目录**；
+- **改文件格式必须先递增 `meta.json` 的 `version`**，并同步 README 与本节；
+- **可见性**：要求是"**同一 ds 组读到同一份**"（不是"全站共享一份"）——不同 ds 组读的是不同频段区段、互不重叠，各节点各自生成或各存一份都不影响相干（公共信号只与 `(seed, batch)` 有关）。见 5.2.1 的根可见性表；
+- **生命周期**：batch 的全部 station 任务完成后 `sim-common/<batch_id>/` 可删（编排层清理）；重跑 batch 时 common 覆盖生成（`status` 回 `running` → `done`）；
+- **任务粒度**：common = `(batch_id)`；station = `(batch_id, station)`（与 fxcorr-f 同构，多节点并行）。一致性靠共享存储单份 common，**不靠多节点重复生成**；
+- **legacy 模式**：station 子命令带 `tone_mhz` 位置参数时走旧时域合成路径（供字节对拍回归）；新路径的 tone 由 P2 谱线机制（common 端频域注入）提供；
+- **噪声**：`FXSIM_NOISE`（高斯噪声 σ，默认 0.02；0 关闭）、`FXSIM_SEED`（公共种子，默认固定）。**公共信号只与 (seed, batch) 有关、与站无关**；站噪声种子 = `f(seed, station)` 派生。两站噪声全关时输出逐位一致（跨站相干校验的判据）。
 
-| 字段 | 说明 |
-|---|---|
-| `version` | 格式版本（初版 1；随布局变更递增） |
-| `dtype` | 数据元素类型（初版 `float32` 复数对；留 int16 降级口，见 `data-volume.md`） |
-| `spec_res_mhz` / `numsamps` / `min_start_freq_mhz` | 网格参数（上文） |
-| `block_bytes` / `slices_per_block` | 每块字节数与 slice 数（`slices_per_block = 0.5s/stime`） |
-| `nblocks` | 块文件数（batch 末块按 batch 时长截断） |
-| `seed` | 公共信号种子（与站无关；站噪声种子 = f(seed, station) 由 station 端派生） |
-| `batch_id` / `start_mjd` | 归属批量与时间起点 |
-| `line_freq_mhz` / `line_amp` / `line_rms` | 谱线参数（FXSIM_LINE，2026-09-14 P2 新增可选字段，version 仍为 1 向后兼容；全 0 = 无谱线；rms 单位 = 网格点数） |
-| `status` | `running` / `done`（先写数据再置 done，station 以 done 为就绪判据） |
-
-- **数据文件布局**：`data_XX.bin` 内按 slice 顺序平铺——每 slice `numSamps` 个复数（re,im 各 float32 小端交替），slice 内频点序 = 网格升序（minStartFreq 起）；块 XX 覆盖 batch 第 `XX×0.5s` 起的 0.5s。
-- **完成可见性**：块文件先写 `<name>.tmp` 再 `rename`；全部块落盘后 meta.json 写 `status=done`。station 端发现 meta 缺失或 status≠done 即报错退出。
-- **生命周期**：batch 的全部 station 任务完成后 `sim-common/<batch_id>/` 可删（编排层清理，同 fengine/ 12 节语义）；重跑 batch 时 common 覆盖生成（status 回 running→done）。
-- **数据量（2026-09-27 补口径）**：float32 复基带 = `8 字节 × 覆盖带宽 × 时长`——注意这里的带宽是**覆盖跨度**（`minStartFreq` 到 `maxStartFreq+maxBW`），**不是实际被读的带宽**。t25362 参数下两者差得很远：跨度 6816 MHz → **54.5 GB/s**，而实际被任何站读取的只有 `32 band × 32 MHz = 1024 MHz` → **8.2 GB/s**——**85% 是 band 间间隙，生成了但没人读**（上一条已说明）。所以：
+- **数据量（2026-09-27 补口径）**：float32 复基带 = `8 字节 × 覆盖带宽 × 时长`——注意这里的带宽是**覆盖跨度**（`minStartFreq` 到 `maxStartFreq+maxBW`），**不是实际被读的带宽**。t25362 参数下两者差得很远：跨度 7072 MHz → **56.6 GB/s**，而实际被任何站读取的只有 `32 band × 32 MHz = 1024 MHz` → **8.2 GB/s**——**85% 是 band 间间隙，生成了但没人读**（上一条已说明）。所以：
 
   | 口径 | 4 站 t25362 | 说明 |
   |---|---|---|
-  | 现状（覆盖跨度） | **54.5 GB/s** | 间隙照常生成 |
-  | 按频段组分片后 | **8.2 GB/s**（降 6.7×） | 只覆盖实际带宽，组间间隙一并省掉 |
+  | 现状（覆盖跨度） | **56.6 GB/s** | 间隙照常生成 |
+  | 按频段组分片后 | **8.2 GB/s**（降 6.9×） | 只覆盖实际带宽，组间间隙一并省掉 |
   | 轻量模式 | **0** | 载荷由 `f(seed, station, band)` 直接生成，不用公共信号（`v6-plan.md` S2） |
 
-  **这条 6.7× 的差不是优化，是当前实现的浪费**——按频段组分片生成（`v6-plan.md` S5.2）落地前，任何大跨度仿真都在白写 85% 的数据。
+  **这条 6.9× 的差不是优化，是当前实现的浪费**——按频段组分片生成（`v6-plan.md` S5.2）落地前，任何大跨度仿真都在白写 85% 的数据。
 
 - **跨节点可见性（2026-09-27 补）**：计算单元细化到 `(batch, ds 组)` 后（第 1 节），**每个节点只需要它那组的频段切片**——同一 ds 组内的所有 ds 覆盖同一频段组，所以它们读的是**同一区段**；不同组读不同区段，互不重叠。由此：
 
   | 形态 | 各节点要什么 | 是否需要拷贝整份 |
   |---|---|---|
-  | 现状（common 是全跨度一整份） | 按 `startIdx` seek 读自己那一段 | **不需要拷贝**，但要求存放 common 的位置对该节点可读；**生成阶段仍是 54.5 GB/s 的写入浪费** |
+  | 现状（common 是全跨度一整份） | 按 `startIdx` seek 读自己那一段 | **不需要拷贝**，但要求存放 common 的位置对该节点可读；**生成阶段仍是 56.6 GB/s 的写入浪费** |
   | 按频段组分片后（S5.2） | 只需要自己那一份（≈ 8.2/N组 GB/s） | **不需要，且可以本地生成**——同组的全部站任务都在同一节点，种子取 `f(seed, batch, 频段组)`（与站无关）即可保证"各节点各生成一份"逐位相同 |
 
   **所以不需要"把整份 common 拷到多个本地节点"**——现状下各节点 seek 读自己那段即可，分片后更是每组一份、各节点自给。**真正要跨节点共享的只有实验级的 `vis/` 与 `product/`**（第 1 节与第 2 节存储归属表）。
 
 ### 5.9 分片局部记录（vis-parts/，D16，2026-09-26 新增）
-
-```
-vis-parts/
-└── <batch_id>/
-    ├── ds0.part                      # 一个 x 分片任务的产出（一个 ds 组，跨站）
-    ├── ds1.part
-    └── ...
-```
+> 实物与逐文件说明见 `fxcorr/workdir-template/vis-parts/README.md`；本节只留规范。
 
 - **编号**：D16；产生者：fxcorr-x 的分片任务（一任务一份，粒度 `(batch_id, ds_group)`——`ds_group` = **跨站、含全部极化**的一组 datastream，见第 6 节「任务标识」与 `data-volume.md` §7.3）；消费者：**fxcorr-x 的 `merge` 子命令**（同一二进制的另一次调用）——读全部 `.part`，按时间归并，写出正式 SWIN 到 `vis/`。命令行形态见 `usage.md` 的 fxcorr-x 节。
 - **分组依据（硬约束，2026-09-27 实测后定）**：`ds_group` 的成员必须从 **`.input` 的 BASELINE TABLE 推导**——即"覆盖同一频段组的那些 baseline 条目所涉及的 ds 集合"，**不是按 ds 序号猜**。每条 baseline 条目绑定一对具体的 ds、只出一个极化产品（极化展开进 baseline 编号，机理见第 8 节），所以只含单极化的分片会丢掉该频段的 RL/LR/LL。t25362 实测：每组 4 个 ds（两站 × 两极化），共 4 组。**同一 batch 内数据齐备**（f 本就覆盖该时段全部站的全部 ds），所以只要分组正确，该频段声明的 baseline 都能算出。
