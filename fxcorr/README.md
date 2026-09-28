@@ -1,6 +1,6 @@
 # fxcorr 脚本与改造概要
 
-**最后更新**：2026-09-28（**V6 主线已落地**：真实规模验证（S1）、压测轻量模式（S2）、取消 D15（S2.5）、规模验证含 mpifxcorr 对照（S3）、多节点部署形态与**两级 `merge`（S4.1，2026-09-28 实施并验证）**，见 `v6-plan.md`；余 S4.2 清理时机（规范已出，实现在编排层）、S4.3 SQLite、S5、S6。V5 已收尾：读模型收尾三件、容器单镜像、目录根变量化、多 datastream 生成、x 按 ds 组的分片 + `merge` 全部落地，见 `v5-plan.md`）
+**最后更新**：2026-09-28（**V6 已收尾**：真实规模验证（S1）、压测轻量模式（S2）、取消 D15（S2.5）、规模验证含 mpifxcorr 对照（S3）、**两级 `merge`（S4.1）**、SQLite 索引的接口侧（S4.3）、工程债 S6.2/S6.4；**cf16 结案**并订正一处倍数错误（8×→2×）；**新增 `v7-plan.md` 草稿**——**移交项见 `v6-plan.md` 末节（最重的一条：多节点部署只交付了规范）**。V5 已收尾：读模型收尾三件、容器单镜像、目录根变量化、多 datastream 生成、x 按 ds 组的分片 + `merge` 全部落地，见 `v5-plan.md`）
 
 本目录（`fxcorr/`）用于 **bash 编排**：在已安装 `fxcorr-f` / `fxcorr-x` / `fxcorr-sim` 的前提下，按 batch 驱动处理。算法实现见 `applications/fxcorr-f`、`applications/fxcorr-x`，仿真数据生成器见 `applications/fxcorr-sim`，共享代码见 `libraries/fxcorrcommon`。
 
@@ -191,6 +191,8 @@ V1–V4 均已完成，V5 进行中；各阶段的定案、实施与验收分别
 | V5 | 读模型收尾：补两个合成盲区（多组相邻的缺口+filler、`FILL_PATTERN`）、invalid 位定案；顺带修掉补盲区时抓出的 B7 | ✅ 见 `v5-plan.md`（只差"要真实数据"那条） |
 | V5 | 另立三项：**容器单镜像**（P4，验收 5/5）、目录路径环境变量化 + `common/` 改名 `sim-common/`（P5，验收 11/11）、fxcorr-sim 造数能力（P6：**多 datastream 生成已完成**，处方文件与压测轻量模式待做） | P4/P5 ✅；P6 部分，见 `v5-plan.md` |
 | V5 | **分片架构**（2026-09-26/27 定）：batch_id 8 位顺序号、多 datastream 生成、x 按 **ds 组**的分片（D16 `vis-parts/`）+ `merge` 归并、SWIN 混跑检查 | ✅ 前三项 2026-09-27 完成（判据见 `test/multids/README.md`，含与 mpifxcorr 的多 ds 对拍）；SQLite 索引待做 |
+| **V6** | **规模与部署**：S0 单 batch 端到端实测、S1 真实规模验证、S2 压测轻量模式、S2.5 取消 D15（公共信号改各站本地合成）、S3 规模验证（4 站 × 8 ds × 20 连续 batch，含 mpifxcorr 对照）、S4 编排对接（**两级 `merge` 形态 A** 已实施、`vis-parts/` 清理与迟到策略的规范、SQLite 索引的接口侧）、S5 条件触发项、S6 工程债 | ✅ **已收尾 2026-09-28**——但**部署只交付了规范**（多节点联调移交 v7），见 `v6-plan.md` 末节 |
+| **V7** | **草稿**（2026-09-28 拟，正式开工时再定稿）：A 多节点部署联调 / B 性能 / C 功能边界 / D 生产化 | 见 `v7-plan.md` |
 | 可选 | 输出与 difx2fits 更好衔接 | 未做 |
 
 ---

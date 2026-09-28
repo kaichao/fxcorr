@@ -285,9 +285,18 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 - **权威仍是 `batches/*.json`**（D9），sqlite 是**派生索引**、可由 JSON 随时重建。这条不能反——
   `test/` 下十余个回归流程都靠**手改 `batch.json`**（改 `config_file` 指不同输入）跑，若 sqlite
   成了权威，手改就失效。
-- **单一写者**：只有编排层主路由写（单线程），计算节点只读或完全不碰。**不能多进程写**——
-  sqlite 的 WAL 依赖共享内存、在网络文件系统（NFS/Lustre）上不可用，rollback journal 模式
-  性能差且仍有损坏风险；共享存储上多写者是经典事故。
+- **单一写者，且工具侧完全不碰（2026-09-28 核实）**：只有**编排层主路由**写（单线程）。**fxcorr 的
+  三个工具（f / x / sim）既不读也不写 sqlite**——它们读的元数据永远是 `batches/<batch_id>.json`
+  本身（2026-09-28 核对：三个工具、fxcorrcommon 以及它们的 `configure.ac` 里都没有 sqlite 引用；
+  仓库里唯一的 sqlite 是 `applications/hops/`——上游的 Django web 应用、`.gitignore` 里那两行
+  就是它的默认库文件，与本改造无关）。读 sqlite
+  的只有编排层自己的查询。**不能多进程写**——sqlite 的 WAL 依赖共享内存、在网络文件系统
+  （NFS/Lustre）上不可用，rollback journal 模式性能差且仍有损坏风险；共享存储上多写者是经典事故。
+- **它解决的只是 JSON 的检索短板**：`batches/*.json` 一 batch 一文件，回答"本实验有哪些 batch /
+  哪些 `failed` / 落在某时间窗内"要**扫全目录逐个解析**；sqlite 把同样的字段做成一张表，这类查询
+  变成一条 SQL。**别的都不解决**——不提高写入吞吐、也不取代 `batches.index`（D13，那是完成流水）。
+  **上游 DiFX 已有的 `difxdb` 是 MySQL**（`utilities/difxdb/`，观测调度侧的库），与这里的 batch
+  元数据不是一回事，不复用。
 - **实现依赖**：用 python3 标准库的 `sqlite3`（编排脚本本就用 python3），**不引入 libsqlite3
   到 C++ 工具**——零新增系统依赖，容器镜像不用改。
 

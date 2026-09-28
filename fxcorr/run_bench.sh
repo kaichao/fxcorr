@@ -63,10 +63,11 @@ fi
 # python3：json 读取 + .input 解析 + 浮点（bash 无浮点算术）
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
-python3 - "$WORKDIR" <<'PYEOF' > "$OUT"
+python3 - "$WORKDIR" "$FXCORR_ROOT_RAW" <<'PYEOF' > "$OUT"
 import glob, json, math, os, re, sys
 
 workdir = sys.argv[1]
+rawroot = sys.argv[2]
 batchdir = os.path.join(workdir, 'batches')
 
 # ① batch 定位：优先从 DATA TABLE 软链 target 解析，与数据精确对应（-n 多 batch
@@ -84,7 +85,14 @@ def softlink_bid():
         m = re.search(r'^FILE \d+/\d+:\s*(\S+)\s*$', open(cfg).read(), re.M)
         if not m:
             continue
-        lnk = os.path.join(workdir, m.group(1))
+        # FILE 行是相对路径时按 RAW 根拼——与 run_batch.sh 的软链重指、程序内
+        # 的 FxcorrPath 同一规则（data-spec 5.2.1）；绝对路径原样（真实观测的
+        # FILE 行就是绝对路径，那里也没有软链可读，自然退到 fallback）。
+        # 2026-09-28 之前这里拼的是 workdir，只在 RAW 根未重定向（= workdir 的
+        # 默认值）时才碰巧正确；一旦按 Q2 把 raw 指到大盘就找不到软链，静默退到
+        # "取最新 batch.json"——多 batch 场景下那个 fallback 很可能选错 batch。
+        fn = m.group(1)
+        lnk = fn if os.path.isabs(fn) else os.path.join(rawroot, fn)
         if os.path.islink(lnk):
             target = os.readlink(lnk)
             break
