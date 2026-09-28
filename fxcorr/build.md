@@ -101,19 +101,35 @@ docker run --rm -v <workdir>:<workdir> -w <workdir> fxcorr/fxcorr:latest difxcal
 
 ## 测试机构建工作流
 
-构建与验证在 Linux 测试机（Rocky 9.8，`ssh fxcorr`，仓库在 `/root/fxcorr`）上做。**宿主集成构建仅用于 V1 回归与对拍**（mpifxcorr 需要宿主 MPI）；V2 常规构建走上面的容器构建节：
+构建与验证在 Linux 测试机上做。**宿主集成构建仅用于 V1 回归与对拍**（mpifxcorr 需要宿主 MPI）；V2 常规构建走上面的容器构建节。
+
+| 机器 | 登录 | 仓库 | 用途 |
+|---|---|---|---|
+| 测试机（Rocky 9.8） | `ssh fxcorr` | `/root/fxcorr` | 小规模回归（`gaps/`、`test/multids/`、`roots/`）|
+| 大机器 | `ssh difx` | `/home/scalebox/fxcorr` | 真实数据与规模验证（V6 的 S0/S1/S3）|
+
+**`make sync` 一次同步两台**（仓库根 `Makefile` 的 `HOSTS = fxcorr difx`）——但**同步不等于重编**：
 
 ```bash
-# 本地：同步仓库到测试机（在 fxcorr/ 工作区目录下）
+# 本地：同步仓库到两台机器（在仓库根执行）
 make sync
 
-# 测试机：集成构建
-ssh fxcorr 'cd /root/fxcorr && python3 install-difx --noipp --doonly=fxcorrcommon,fxcorr-f,fxcorr-x,fxcorr-sim'
-# （install-difx 内部已 source setup.bash 环境；手动独立构建时需 bash -c "source /root/fxcorr/setup.bash && ..."）
+# 测试机：集成构建（必须先 source setup.bash，见下）
+ssh fxcorr 'cd /root/fxcorr && source setup.bash && python3 install-difx --noipp --doonly=fxcorrcommon,fxcorr-f,fxcorr-x,fxcorr-sim'
+
+# 大机器：构建，再补一次安装（安装段要 root，见下）
+ssh difx 'cd /home/scalebox/fxcorr && source setup.bash && python3 install-difx --noipp --doonly=fxcorr-sim'
+ssh difx 'cd /home/scalebox/fxcorr/applications/fxcorr-sim && sudo -n make install'
 
 # 运行工具需附加库路径
 bash -c 'source /root/fxcorr/setup.bash && export LD_LIBRARY_PATH=/usr/local/difx/lib && fxcorr-f <batch_id> <station>'
 ```
+
+**三个实测坑**（2026-09-28）：
+
+- **`install-difx` 不会自己 source `setup.bash`**：非交互 `ssh` 下不 source 它，第一步就报 `RuntimeError: DIFXROOT must be defined`（本文件此前写的"内部已 source"是错的）。
+- **两台机器要各自重编**：`make sync` 只搬源码，`/usr/local/difx/bin` 里的二进制不动。只重编一台、在另一台上跑，**旧二进制会静默给出旧行为**——2026-09-28 就因此在 `difx` 上把完整链的 6m22s 当成了轻量模式的结果（那里的旧二进制不认 `FXSIM_LIGHT`）。**判据是"这台机器上的二进制是不是刚编的"**，不是"源码同步过没有"。
+- **`difx` 上安装要 `sudo -n make install`**：`make` 不需要，只有装到 `/usr/local/difx/bin`（属 root）需要。`install-difx` 在这里会以 `Permission denied` 中断——**构建已完成，补一次安装即可**；但 `--doonly` 列多个组件时它会在第一个组件的安装段就停住，后面的组件不会被构建，**一次一个组件**。
 
 工具链实测记录：gcc 11.5、automake 1.16.2、fftw/expat 由 dnf 装、无 IPP（须 --noipp）。
 

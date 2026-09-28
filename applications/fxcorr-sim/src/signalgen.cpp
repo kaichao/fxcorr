@@ -694,3 +694,50 @@ void FreqStationGen::fillFramePayload(unsigned char *payload, int payloadbytes, 
 	if(framecounter >= framesinblock)
 		blockstartglobal += framesinblock * (long long)vpsamps;
 }
+
+// ---- V6 S2: stress-test light mode ---------------------------------------
+//
+// Everything structural about the frame comes from the same two places the
+// full chain uses -- StationSetup's frame derivation and VDIFWriter -- so a
+// light-mode file differs from a full-chain one only in what the payload
+// bytes say.  That difference is exactly what the acceptance criterion for
+// this mode tests; there is no other claim to make about it.
+
+LightStationGen::LightStationGen()
+{
+	engine.seed(0);
+}
+
+void LightStationGen::init(unsigned long seed, const string &station, int dsindex)
+{
+	// the station noise derivation with band 0: one stream per frame.  The
+	// band layout is a property of the frame (band interleaving is positional,
+	// a sample's band is its index modulo nbands), not of the payload, so the
+	// payload carries no band dimension of its own.
+	engine.seed((unsigned)stationNoiseSeed(seed, station, dsindex, 0));
+}
+
+void LightStationGen::fillFramePayload(unsigned char *payload, int payloadbytes)
+{
+	// one engine draw per four payload bytes; the tail is written too, so the
+	// function stays correct for a payload length that is not a multiple of 4
+	// (every real frame's is: bytesperbandframe is a multiple of 8000)
+	int i = 0;
+	for(; i + 4 <= payloadbytes; i += 4)
+	{
+		uint32_t v = engine();
+		payload[i] = (unsigned char)(v & 0xFF);
+		payload[i + 1] = (unsigned char)((v >> 8) & 0xFF);
+		payload[i + 2] = (unsigned char)((v >> 16) & 0xFF);
+		payload[i + 3] = (unsigned char)((v >> 24) & 0xFF);
+	}
+	if(i < payloadbytes)
+	{
+		uint32_t v = engine();
+		for(; i < payloadbytes; i++)
+		{
+			payload[i] = (unsigned char)(v & 0xFF);
+			v >>= 8;
+		}
+	}
+}

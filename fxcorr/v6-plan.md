@@ -148,6 +148,13 @@ common）被关掉的原因**——见 S5。
 一份处方（B1 的接口），**B2 先做、B1 跟上**（2026-09-27 定）：处方文件是两者的共用接口，
 但 S1–S3 的主线只吃 B2。
 
+**实现（2026-09-28）**：环境变量 `FXSIM_LIGHT=1`，只作用于**新路径**（`station` 不带 tone）；
+legacy 路径遇到它**报错退出**——那条路径没有可替换的阶段，静默忽略是更坏的选择。规模仍由
+`batch.json` 的 `n_subints` 与 `.input` 的帧结构给定（与完整链同口径，逐帧头对拍才有共同
+基准）；载荷来自每条 `(station, datastream)` 一个流，种子派生与站噪声同源、band 固定 0
+——band 布局是帧的**位置**属性（样本序 % nbands），与载荷内容无关。病态注入
+（`FXSIM_GAPS` / `FXSIM_STARTOFFSET`）照常在 `VDIFWriter` 内生效，两模式共用同一份。
+
 **判据**：
 
 1. **与完整链同参数下逐帧头一致**（时间轴、帧号、band 布局），载荷为伪随机——这是"结构
@@ -276,6 +283,30 @@ mpifxcorr 走"用网络换单节点资源"，fxcorr 走"用本地资源换网络
 
 **要测的量**：端到端 wall time、跨节点网络流量、单节点磁盘峰值、吞吐（GB 原始数据/小时）、
 长稳（连续数小时不退化）。
+
+**进行中的发现（2026-09-28，4 站 × 8 ds 造数一上来就撞到的两件）**：
+
+1. **`run_batch.sh` 的多 datastream 软链缺陷（已修）**：软链重指的源路径写成
+   `raw/<st>/<st>_<bid>.vdif`，**缺 `_ds<N>` 后缀**——多 ds 站的文件名带它，于是
+   `isfile(src)` 恒假、软链**从不重指**，停在 `make_testdata.sh` 建的最后那个 batch 上。
+   后果是 f 按**本 batch 的时间轴**读**另一个 batch 的数据**，两边都不报错，`fxcorr-x`
+   照报 "1 integrations written" 而 SWIN 写下 **0 条记录**。**单 batch 场景完全看不出**（软链
+   本来就是对的），这正是 `test/multids/` 判据 11 绿着的原因；**真实观测（每站 8 ds）同样会
+   中招**——S1 手工跑 f/x 没走 `run_batch.sh`，所以没暴露。修法：按每站 ds 数补后缀，并把
+   "源文件不存在"从静默跳过改为**报错**。
+2. **`-n > 1` 的 128 ms SUBINT 变体在 4 站配置下让 `fxcorr-x` 写出 0 条记录**（待查）：
+   那处 sed 改写是**为 test 配置**写的（0.524288 s 与帧网格不兼容），而 t25362 的 5.12 ms
+   **本来就能多 batch**（batch 1.024 s × 16000 fps = 16384 帧，整数，起点也落在帧边界）。
+   现象是 x 报 "4 subints, 2 integrations written" 却一条记录都没写。S3 先自备
+   `test-sim.input`（内容 = 原版 `.input`）让脚本跳过 sed 来绕开。
+3. **`wrap_difx2fits.sh` 指错了 `.calc`，触发 difx2fits 段错误（已修）**：
+   `.input` 的 `CALC FILENAME` 被绝对化成 **config 下的原件**，而绝对化了 `IM FILENAME`
+   的是 **PRODUCT 下那份**——**没人读那一份**。于是 `D->job->imFile` 停在相对名
+   `test_1.im`，difx2fits 按 cwd（PRODUCT）解析找不到 `.im`；而它缺 `.im` 时
+   `fitsMC.c` **不查 NULL** 直接索引 `scan->im[antId]` → **段错误**（`fitsML.c` 有
+   `if(scan->im)` 保护，所以 ML 那遍只打印一行 "No IM info available" 就跳过，MC 那遍崩）。
+   现象是 FITS 写到 51 KB 就断。**上游这个不对称是隐患，但触发它的是我们这边指错文件**：
+   修法是让 `CALC FILENAME` 指向 PRODUCT 下那份已绝对化的 `.calc`；修后 FITS 5.4 MB 完整。
 
 ---
 
@@ -429,15 +460,15 @@ IB。跨节点流量只有两处：**输入数据进节点**（真实观测：ra
 | S0 | 分片路径（**4 组 × 8 ds**）产出与不分片**逐记录相等**（`cmp_swin.py --by-key`）——V5 的分片判据首次上真实规模 | ✅ 两次跑各 1024/1024 逐记录相等 |
 | S1 | 分片 SWIN 与不分片 SWIN 按 `(baseline, frq, pol, 整数纳秒)` 逐记录相等；各 `.part` 记录数之和 = 全量 | ✅ 2026-09-28（t25362 真实数据，2 站 16 ds / 1.024 s）：**256/256 按 key 全匹配**（`cmp_swin.py --by-key`）；4 × 64 = 256，不漏不重。**文件字节序不同**——分片归并按纳秒重排，故判据必须按 key 而非按字节 |
 | S1 | 真实规模数字落 `data-volume.md` §3 | ✅ 2026-09-28：新增 **§3.1**——f × 16 并行 6.1 s、x 不分片 17.7 s、分片 × 4 并行 4.6 s、merge 0.019 s；`fengine` 32 GB（单组 8 GB）、f 峰值 6.2 MB、x 峰值 169 MB；**≈ 100 s CPU 每 1.024 s 观测**（≈ 98× 实时，1 小时 ≈ 97.7 CPU·小时）；TFLOPS 绝对值留 S3 标定 |
-| S2 | 轻量模式与完整链**逐帧头一致**、载荷伪随机；同参数两次逐字节相同 | 待做 |
-| S2 | 生成速率与体量数字落档 | 待做 |
+| S2 | 轻量模式与完整链**逐帧头一致**、载荷伪随机；同参数两次逐字节相同 | ✅ 2026-09-28：test 配置 525 帧**帧头 0 帧不同**、载荷 0 帧重复；两次跑逐字节相同，两站 md5 不同 |
+| S2 | 生成速率与体量数字落档 | ✅ 2026-09-28：t25362 配置（2 站 16 ds、1.024 s、**2.0 GB**）轻量 **0.275 s** 对完整链 **6m22s** = **1389×**；test 配置 23×。数字见 `applications/fxcorr-sim/VERIFICATION.md` |
 | S2.5 | **可行性**：节点内生成路径的 raw 与现行路径**逐字节相同**（现有 32 个文件为基准） | ✅ 2026-09-28，**32/32 逐字节相同** |
 | S2.5 | **可行性**：新路径的 raw 喂 **mpifxcorr** 与现行路径结果一致 | ✅ 2026-09-28，mpifxcorr 正常消费并产出 SWIN（raw 逐字节相同，故结果必然一致） |
 | S2.5 | 确认后：`station` wall time 回到分钟级、**D15 目录与 `SIM_COMMON` 根消失**；贯穿性回归全绿 | ✅ 目录与根已删。**贯穿性回归 2026-09-28 在测试机整轮重跑（重建后的 FFTW 构建）全绿**：`gaps/` 七个、`test/multids/` 11 条、`test/roots/run_consistency.sh`（三档 + 自检）、单测 71 + 48。其中 multids 判据 4/5 的 raw 与 S2.5 前基准**逐字节相同**，判据 7/8/11 的分片等价性重跑复现；七个 gaps 脚本的自检均能报红 |
 | S2.5 | **性能**：`station` 单 ds 的 wall time（full 7072 MHz 跨度） | ✅ **6m01s**（落盘路径 34 min，**5.6×**）；`user 5m39s` 说明是纯计算，不再等 I/O |
 | S2.5 | **顺带修掉两处上游缺陷**（阻塞过验证）：`model.cpp` 的 `clock` 分配器不配对 → 程序退出时 `double free`；`configure.ac` 的 `--disable-ipp` 不生效 → `build.md` 要求的 `--noipp` 形同虚设，IPP 构建下仿真延迟**静默错** | ✅ 见 `libraries/CLAUDE.md` |
-| S3 | 目标规模全链跑通（f → x → merge → difx2fits），吞吐/资源/磁盘增长落档 | 待做 |
-| S3 | mpifxcorr 对照：同数据同节点的 wall time、跨节点流量、单节点磁盘峰值 | 待做 |
+| S3 | 目标规模全链跑通（f → x → merge → difx2fits），吞吐/资源/磁盘增长落档 | ✅ 2026-09-28（4 站 × 8 ds × **20 个连续 batch**，轻量模式造数）：造数 **8.6 s / 79 GB**、流水线 **4945 s（235 s/batch）**、FITS 14.5 MB；数字落 `data-volume.md` **§3.1 / §3.2**。**顺带撞出并修掉两个静默缺陷**（见下「进行中的发现」1 与 3） |
+| S3 | mpifxcorr 对照：同数据同节点的 wall time、跨节点流量、单节点磁盘峰值 | ✅ 2026-09-28（单机对照，batch 20）：mpifxcorr NP=34 **120.6 s** / CPU **4276 s**，fxcorr（f 并行 7.3 s + x 73.4 s）**80.7 s** / CPU **210 s**——wall **0.67×**、CPU **1/20**。**对照必须拿并行 f 比**：`run_batch.sh` 逐站串行（235 s/batch）比 mpifxcorr 还慢，那是调度方式不是架构限制。跨节点流量未测（需真跨节点部署） |
 | S4.1 | 实验级 merge 后 SWIN 与"单节点串行 batch 逐 batch merge"的结果**逐记录相等** | 待做 |
 | S4.1 | 故意让 batch 乱序完成（先完成时间靠后的），实验级 merge 仍产出时间单调的 SWIN | 待做 |
 | S4.2 | 缺 batch 时实验级 merge 报错不写；`FXCORR_X_MERGE_FORCE=1` 强制写出并列明 | 待做 |

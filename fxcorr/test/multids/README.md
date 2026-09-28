@@ -96,6 +96,7 @@ fxcorr/make_testdata.sh /tmp/mds
 | 9 | 真实 `.input` 的分组推导 | t25362（16 ds / 16 baseline）→ **4 组 = `{0,1,8,9} {2,3,10,11} {4,5,12,13} {6,7,14,15}`**，与 `data-spec` 第 8 节的实测分析逐字一致；越界组号报 `has 4 ds group(s)` |
 | 10 | 缺片处理 | 删掉 `.part` 后 `merge` 报错、**不写任何东西**；`FXCORR_X_MERGE_FORCE=1` 时告警并写出已到齐的部分 |
 | 11 | `run_batch.sh` 的分片路径 | `FXCORR_X_SHARD=1` 逐组跑 + 自动 `merge`，产物与基准逐字节相同 |
+| 12 | **多 batch 下软链重指**（2026-09-28 由 V6 S3 发现并修复，**判据 11 是单 batch 所以没抓到**） | 判据 11 用的是**单 batch**，而单 batch 下 `make_testdata.sh` 建的软链本来就是对的——`run_batch.sh` 的重指即使用错也看不出来。多 batch 才现形：**重指的源路径必须带 `_ds<N>` 后缀**（多 ds 站），漏了它软链就停在**最后一个 batch** 上，f 按本 batch 的时间轴读**另一个 batch 的数据**，全程无报错，`fxcorr-x` 照报 "N integrations written" 而 SWIN 写下 **0 条记录**。复现：`-n 4` 生成后跑 `run_batch.sh 00000001`，`readlink raw/<st>_ds0.vdif` 应指向 `_00000001_`；修好后 4 个 batch 的 SWIN 是单 batch 的精确 4 倍（4497408 = 4 × 1124352） |
 
 判据 5 是"分片不改变结果"的生成侧依据（v5-plan.md P6 的"生成链已是逐 band 隔离"那张表）：
 同一个 ds 在单 ds 配置与多 ds 配置下**字节相同**，所以按 ds 拆开生成不会改变任何一个 ds 的内容。

@@ -82,7 +82,12 @@ cleanup()
 	rm -f "$PROD/$BASE.input" "$PROD/$BASE.calc" "$PROD/$BASE.difx"
 }
 trap cleanup EXIT
-sed -e "s|^CALC FILENAME:[[:space:]]*\([^/].*\)\$|CALC FILENAME:      $CFG/\1|" \
+# CALC 必须指向**本目录这份**（$PROD/$BASE.calc），不能指向 config 下的原件：
+# 原件里的 `IM FILENAME` 是相对名，difx2fits 拿它按 cwd 解析就找不到 .im，
+# 而 .im 缺失时它的 fitsMC.c 不检查 NULL 直接索引 scan->im[antId] —— **段错误**
+# （fitsML.c 有 `if(scan->im)` 保护，只在 MC 这一遍崩）。绝对化的 .calc 就在
+# 本目录，指过来即可，不必动 config 里的原件。
+sed -e "s|^CALC FILENAME:[[:space:]]*\([^/].*\)\$|CALC FILENAME:      $PROD/$BASE.calc|" \
     -e "s|^OUTPUT FILENAME:[[:space:]]*\([^/].*\)\$|OUTPUT FILENAME:    $SWINDIR|" \
     "$CFG/$BASE.input" > "$PROD/$BASE.input"
 sed -e "s|^IM FILENAME:[[:space:]]*\([^/].*\)\$|IM FILENAME:        $CFG/\1|" \

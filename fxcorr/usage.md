@@ -44,6 +44,7 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `FXSIM_SEED` | 固定值 | 公共信号种子（mt19937）。**V6 S2.5 之后它随 `batches/<id>.json` 的 `seed` 字段走**，本变量只用于 `make_testdata.sh` 生成 batch.json 时选种子；一个 batch 的全部 station 任务必须读到同一个值，否则跨站相干静默消失。公共信号只与 (seed, batch) 有关、与站无关；站噪声种子由 (seed, station, ds_index) 派生——**ds 维度必需**：dual-pol 站的 X/Y 两个 ds 覆盖同一频段，不带 ds 就会得到逐位相同的两份数据 |
+| `FXSIM_LIGHT` | 关 | **压力测试轻量模式**（V6 S2，`1` 开启）：跳过整条物理信号链（公共信号、块 IDFT、帧级 FFT、延迟链、量化），载荷改由 `(seed, station, ds_index)` 派生的确定性伪随机流填充。**结构完全不变**——帧头、时间轴、帧号、band 布局与完整链**逐帧头相同**（实测 525/525），但数值不含物理意义、跨站不相干，**明确不用于正确性对拍**。用途是体量与时长：t25362 配置（2 站 16 ds、1.024 s、2.0 GB）实测 **0.275 s**，完整链同配置 **6m22s**（1389×）。`FXSIM_GAPS` / `FXSIM_STARTOFFSET` 照常生效。**只作用于新路径**：与 tone 参数（legacy）同时给出时报错退出 |
 | `FXSIM_NOISE` | `0.02` | station 端高斯噪声 σ；`0` 关闭（两站同参数全关闭 = 输出逐位一致，跨站相干校验） |
 | `FXSIM_ADAPTIVE` | 关 | station 端自适应量化门限（`1` 开启；datasim d_tmul 语义：量化前按数据 rms 缩放、每帧更新、1M 样本封顶），默认关 |
 | `FXSIM_SPECRES` | 1 | specRes 缩放因子（正整数）：公共信号频谱分辨率 ÷N、样本数 ×N（datasim --specres 语义）；网格缩放后的一致性检查照跑，station 须用同一值（meta.json 网格不匹配即报错） |

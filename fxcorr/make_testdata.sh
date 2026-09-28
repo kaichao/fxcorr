@@ -23,7 +23,7 @@
 #   FXCORR_WORKDIR 定义项目根目录（位置参数优先）
 set -euo pipefail
 
-# 五个可重定向的根（V5 P5）：容器/ssh 透传与解析共用一份清单
+# 四个可重定向的根（V5 P5）：容器/ssh 透传与解析共用一份清单
 FXCORR_ROOT_VARS=(FXCORR_RAW_ROOT FXCORR_FENGINE_ROOT FXCORR_VIS_ROOT FXCORR_PRODUCT_ROOT)
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
@@ -59,7 +59,7 @@ run_in_container()
 	[ -n "${FXSIM_FLUX+x}" ] && envargs+=(-e FXSIM_FLUX="$FXSIM_FLUX")
 	[ -n "${FXSIM_SEFD+x}" ] && envargs+=(-e FXSIM_SEFD="$FXSIM_SEFD")
 	[ -n "${FXSIM_PCAL+x}" ] && envargs+=(-e FXSIM_PCAL="$FXSIM_PCAL")
-	# 五个根一并透传（Q12）：容器内程序仍要知道用哪个根。挂载由外部编排平台
+	# 四个根一并透传（Q12）：容器内程序仍要知道用哪个根。挂载由外部编排平台
 	# 按"各根按宿主同路径可见"的约定负责，本脚本不实现多根挂载。
 	local r
 	for r in "${FXCORR_ROOT_VARS[@]}"; do
@@ -137,7 +137,7 @@ fxcorr_roots "$WORKDIR"
 WORKDIR=$FXCORR_ROOT_WORKDIR
 CFG="$WORKDIR/config"
 mkdir -p "$CFG" "$WORKDIR/batches"
-fxcorr_mkroots	# Q19：五个根由编排层建齐，程序遇根不存在只报错
+fxcorr_mkroots	# Q19：四个根由编排层建齐，程序遇根不存在只报错
 
 # ---- ① 前处理（幂等） ----
 # config 资产缺才复制。
@@ -424,16 +424,22 @@ done
 # LD_LIBRARY_PATH（$DIFXROOT/lib，默认 /usr/local/difx）；FXSIM_* 透传（存在才传）；
 # BatchMode 防交互卡死，accept-new 首次 host key 自动接受。
 FXCSIM=$(command -v fxcorr-sim || echo fxcorr-sim)
+# 决定"生成出什么数据"的变量必须整组透传：漏掉一个，远程站就与本地站生成
+# 不同的数据，而两边的日志都不会说（--nodes 的回归判据正是逐位比较两边产物）
 ENVS=()
 [ -n "${FXSIM_NOISE+x}" ] && ENVS+=("FXSIM_NOISE=$FXSIM_NOISE")
 [ -n "${FXSIM_SEED+x}" ] && ENVS+=("FXSIM_SEED=$FXSIM_SEED")
+[ -n "${FXSIM_LIGHT+x}" ] && ENVS+=("FXSIM_LIGHT=$FXSIM_LIGHT")
 [ -n "${FXSIM_ADAPTIVE+x}" ] && ENVS+=("FXSIM_ADAPTIVE=$FXSIM_ADAPTIVE")
 [ -n "${FXSIM_SPECRES+x}" ] && ENVS+=("FXSIM_SPECRES=$FXSIM_SPECRES")
 [ -n "${FXSIM_LINE+x}" ] && ENVS+=("FXSIM_LINE=$FXSIM_LINE")
 [ -n "${FXSIM_FLUX+x}" ] && ENVS+=("FXSIM_FLUX=$FXSIM_FLUX")
 [ -n "${FXSIM_SEFD+x}" ] && ENVS+=("FXSIM_SEFD=$FXSIM_SEFD")
 [ -n "${FXSIM_PCAL+x}" ] && ENVS+=("FXSIM_PCAL=$FXSIM_PCAL")
-# 五个根同样透传给远程站（分片生成的产物必须落在与本地同一套根上）
+[ -n "${FXSIM_DELAY+x}" ] && ENVS+=("FXSIM_DELAY=$FXSIM_DELAY")
+[ -n "${FXSIM_GAPS+x}" ] && ENVS+=("FXSIM_GAPS=$FXSIM_GAPS")
+[ -n "${FXSIM_STARTOFFSET+x}" ] && ENVS+=("FXSIM_STARTOFFSET=$FXSIM_STARTOFFSET")
+# 四个根同样透传给远程站（分片生成的产物必须落在与本地同一套根上）
 for r in "${FXCORR_ROOT_VARS[@]}"; do
 	[ -n "${!r+x}" ] && ENVS+=("$r=${!r}")
 done

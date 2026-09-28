@@ -82,6 +82,9 @@ static void usage()
 	     << "      serial: every datastream of every station in .input\n"
 	     << "      (single machine only)\n"
 	     << "  env (new path): FXSIM_NOISE (default 0.02, 0 disables), FXSIM_SEED,\n"
+	     << "      FXSIM_LIGHT (1 = stress-test light mode: the physical chain is\n"
+	     << "      skipped and the payload is a deterministic pseudorandom stream;\n"
+	     << "      frame structure is unchanged, the values carry no physics),\n"
 	     << "      FXSIM_ADAPTIVE (1 = running-rms quantiser), FXSIM_SPECRES\n"
 	     << "      (grid scaling factor, positive integer), FXSIM_LINE (spectral\n"
 	     << "      line freq,amp,rms - freq in MHz, rms in grid points),\n"
@@ -664,43 +667,62 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 		}
 	}
 
-	CommonSignal::Grid grid;
-	int specres = parseSpecres();
-	if(specres < 0)
-		return EXIT_FAILURE;
-	if(!CommonSignal::deriveGrid(config, &grid, specres))
-		return EXIT_FAILURE;
+	// V6 S2 (v5-plan P6 "light mode"): stress-test load, for volume and
+	// duration rather than for physics.  It skips the whole physical chain --
+	// common signal, block IDFT, frame FFTs, delay model, quantiser -- and
+	// fills the payload from a stream keyed by (seed, station, datastream).
+	// Everything structural is kept, because that is what the mode is for:
+	// setupStation() above derived the frame layout and VDIFWriter below emits
+	// the frames, exactly as on the full path.
+	bool light = false;
+	if(const char *le = getenv("FXSIM_LIGHT"))
+		light = (strcmp(le, "1") == 0);
 
-	// V6 S2.5 (plan E): the common signal is generated here, in this process -
-	// there is no common/ directory to read.  Its grid and extent are pure
-	// functions of .input (recomputed on the spot, no need to store or ship
-	// them); the seed comes from batch.json, the one parameter that has to be
-	// shared by every station of the batch.  The numbers are identical to what
-	// the old file path produced, because both run the same fillSliceBlock().
-	CommonSignal::LineSpec line;
-	if(parseLine(&line) != 0)
-		return EXIT_FAILURE;
-	long long totalslices = 0;
-	if(!deriveTotalslices(config, grid, bi, &totalslices))
-		return EXIT_FAILURE;
+	// declared outside the branch: the writer is built after it, and a failure
+	// to initialise the chain must not leave an empty file behind
 	CommonSignal::SliceStream stream;
-	if(!stream.init(grid, totalslices, bi.seed, line))
-		return EXIT_FAILURE;
-	long long nblocks = stream.nblocks();
-	long long blockfloats = stream.blockfloats();
-
-	// vpsamps: complex baseband samples per band per frame (= payload bytes
-	// per band * 2, datasim's 4-bit-complex counting of 2-bit real samples)
-	int vpsamps = st.bytesperbandframe * 2;
 	FreqStationGen gen;
-	if(!gen.init(st.bandfreqmhz, st.bandbwmhz, grid, noisesigma, seed,
-	             st.station, vpsamps, adaptive, flux, sefd, st.pcalhz,
-	             pcalcomb, st.ratehz, st.dslocal))
-		return EXIT_FAILURE;
-	if(dodgen)
-		gen.enableDelayInjection(model, 0, config.getDModelFileIndex(0, st.dsindex),
-		                         st.srcindex, st.batchstartscanrel,
-		                         (double)st.framens / 1.0e9);
+	long long nblocks = 0;
+	long long blockfloats = 0;
+
+	if(!light)
+	{
+		CommonSignal::Grid grid;
+		int specres = parseSpecres();
+		if(specres < 0)
+			return EXIT_FAILURE;
+		if(!CommonSignal::deriveGrid(config, &grid, specres))
+			return EXIT_FAILURE;
+
+		// V6 S2.5 (plan E): the common signal is generated here, in this process -
+		// there is no common/ directory to read.  Its grid and extent are pure
+		// functions of .input (recomputed on the spot, no need to store or ship
+		// them); the seed comes from batch.json, the one parameter that has to be
+		// shared by every station of the batch.  The numbers are identical to what
+		// the old file path produced, because both run the same fillSliceBlock().
+		CommonSignal::LineSpec line;
+		if(parseLine(&line) != 0)
+			return EXIT_FAILURE;
+		long long totalslices = 0;
+		if(!deriveTotalslices(config, grid, bi, &totalslices))
+			return EXIT_FAILURE;
+		if(!stream.init(grid, totalslices, bi.seed, line))
+			return EXIT_FAILURE;
+		nblocks = stream.nblocks();
+		blockfloats = stream.blockfloats();
+
+		// vpsamps: complex baseband samples per band per frame (= payload bytes
+		// per band * 2, datasim's 4-bit-complex counting of 2-bit real samples)
+		int vpsamps = st.bytesperbandframe * 2;
+		if(!gen.init(st.bandfreqmhz, st.bandbwmhz, grid, noisesigma, seed,
+		             st.station, vpsamps, adaptive, flux, sefd, st.pcalhz,
+		             pcalcomb, st.ratehz, st.dslocal))
+			return EXIT_FAILURE;
+		if(dodgen)
+			gen.enableDelayInjection(model, 0, config.getDModelFileIndex(0, st.dsindex),
+			                         st.srcindex, st.batchstartscanrel,
+			                         (double)st.framens / 1.0e9);
+	}
 
 	// output raw/<station>/<station>_<batch_id>.vdif (data-spec 5.2)
 	string outpath = stationOutPath(st, bi);
@@ -721,43 +743,54 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 	if(applyFrameOffset(writer) != 0)
 		return EXIT_FAILURE;
 
-	// block buffer sized for one full common-signal block; the last block is
-	// truncated to the batch length by whichever source is in use
-	vector<float> blockbuf((size_t)blockfloats);
 	int payloadbytes = st.bytesperbandframe * st.nbands;
-	unsigned char *payload = new unsigned char[payloadbytes];
+	vector<unsigned char> payload((size_t)payloadbytes);
 	long long frameswritten = 0;
-	for(long long blk = 0; blk < nblocks; blk++)
+
+	if(light)
 	{
-		long long nfloats = stream.fillBlock(blk, &blockbuf[0]);
-		if(nfloats < 0)
+		LightStationGen lgen;
+		lgen.init(seed, st.station, st.dslocal);
+		for(long long fr = 0; fr < st.nframestotal; fr++)
 		{
-			delete [] payload;
-			return EXIT_FAILURE;
-		}
-		if(!gen.processBlock(&blockbuf[0], nfloats))
-		{
-			delete [] payload;
-			return EXIT_FAILURE;
-		}
-		for(int f = 0; f < gen.framesPerBlock(); f++)
-		{
-			memset(payload, 0, (size_t)payloadbytes);
-			gen.fillFramePayload(payload, payloadbytes, st.nbands);
-			if(!writer.writeFrame(payload, payloadbytes))
+			lgen.fillFramePayload(&payload[0], payloadbytes);
+			if(!writer.writeFrame(&payload[0], payloadbytes))
 			{
 				cerr << "fxcorr-sim: write failed at frame " << frameswritten << endl;
-				delete [] payload;
 				return EXIT_FAILURE;
 			}
 			frameswritten++;
 		}
 	}
-	delete [] payload;
+	else
+	{
+		// block buffer sized for one full common-signal block; the last block
+		// is truncated to the batch length by the stream itself
+		vector<float> blockbuf((size_t)blockfloats);
+		for(long long blk = 0; blk < nblocks; blk++)
+		{
+			long long nfloats = stream.fillBlock(blk, &blockbuf[0]);
+			if(nfloats < 0)
+				return EXIT_FAILURE;
+			if(!gen.processBlock(&blockbuf[0], nfloats))
+				return EXIT_FAILURE;
+			for(int f = 0; f < gen.framesPerBlock(); f++)
+			{
+				memset(&payload[0], 0, (size_t)payloadbytes);
+				gen.fillFramePayload(&payload[0], payloadbytes, st.nbands);
+				if(!writer.writeFrame(&payload[0], payloadbytes))
+				{
+					cerr << "fxcorr-sim: write failed at frame " << frameswritten << endl;
+					return EXIT_FAILURE;
+				}
+				frameswritten++;
+			}
+		}
+	}
 	if(frameswritten != st.nframestotal)
 	{
-		cerr << "fxcorr-sim: common signal covers " << frameswritten
-		     << " frames, expected " << st.nframestotal << endl;
+		cerr << "fxcorr-sim: wrote " << frameswritten << " frames, expected "
+		     << st.nframestotal << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -772,6 +805,20 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 static int doStationLegacy(Configuration &config, Model *model, const BatchInfo &bi,
                            const StationSetup &st)
 {
+	// the light mode (V6 S2) replaces what the new path synthesises; the
+	// legacy path exists for byte-comparison regressions and has no such
+	// stage, so the two together are a mistake rather than a no-op
+	if(const char *le = getenv("FXSIM_LIGHT"))
+	{
+		if(strcmp(le, "1") == 0)
+		{
+			cerr << "fxcorr-sim: FXSIM_LIGHT does not apply to the legacy tone "
+			        "path (drop the tone arguments to use the new path's light "
+			        "mode)" << endl;
+			return EXIT_FAILURE;
+		}
+	}
+
 	double noisesigma = 0.02;
 	if(const char *ns = getenv("FXSIM_NOISE"))
 		noisesigma = atof(ns);

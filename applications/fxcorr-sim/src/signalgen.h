@@ -243,4 +243,36 @@ private:
 	double framesec;
 };
 
+// V6 S2 (v5-plan P6 "light mode"): the stress-test load generator.  It shares
+// everything that defines the frame -- structure, timing, frame numbering,
+// band layout and the VDIFWriter that emits it -- with FreqStationGen, and
+// replaces only the payload: a deterministic pseudorandom 2-bit stream
+// instead of the physical chain (common signal -> block IDFT -> frame FFTs ->
+// fringe rotation -> quantiser).
+//
+// The point is volume and duration, so two consequences follow:
+//
+//   * it is not a correctness generator.  Its output has no cross-station
+//     coherence, no delay model and no pcal; comparisons that need physical
+//     meaning still use the full chain.  Its own subject is structure.
+//   * one stream per (station, datastream), seeded exactly like the station
+//     noise, so the same configuration run twice is byte-identical and a
+//     station's two datastreams are not identical to each other.
+//
+// Every 2-bit byte is a legal sample, so there is no quantiser stage: filling
+// bytes from the stream is the whole of it.
+class LightStationGen
+{
+public:
+	LightStationGen();
+
+	void init(unsigned long seed, const std::string &station, int dsindex);
+
+	// fill one frame payload (bytesperbandframe * nbands bytes)
+	void fillFramePayload(unsigned char *payload, int payloadbytes);
+
+private:
+	std::mt19937 engine;
+};
+
 #endif

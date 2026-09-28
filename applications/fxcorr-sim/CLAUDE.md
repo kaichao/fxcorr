@@ -1,6 +1,6 @@
 # fxcorr-sim 目录说明
 
-**最后更新**：2026-09-27（**多 datastream 生成落地**：`station` 增 `ds_index` 参数、噪声种子加 ds 维度、输出名 `[_ds<N>]`——见"关键实现要点"的「多 datastream」条；2026-09-19）
+**最后更新**：2026-09-28（**V6 S2 轻量模式落地**：`FXSIM_LIGHT=1` 跳过整条物理链、只填确定性伪随机载荷——见"关键实现要点"的「轻量模式」条）；2026-09-27（**多 datastream 生成落地**：`station` 增 `ds_index` 参数、噪声种子加 ds 维度、输出名 `[_ds<N>]`——见"关键实现要点"的「多 datastream」条；2026-09-19）
 
 仿真 VDIF 数据生成器：无 MPI 串行程序，单二进制两入口（`station` 生成单站 VDIF / 无子命令本机串行）。datasim 的替身（上游 datasim 因 subband.{h,cpp} 硬编码 IPP 无法 --noipp 构建）。新架构 P0-P4 完成并验证（2026-09-14）。
 
@@ -14,7 +14,7 @@
 |---|---|
 | main.cpp | 入口分派（station/默认串行）、批处理上下文与站校验（setupStation，两路径共用）、**deriveTotalslices**（batch 的 slice 总数，`.input` 的纯函数，station 端就地重算）、FXSIM_* 解析（SPECRES/LINE、FLUX/SEFD 列表按 dsindex 取值、DELAY 开关、PCAL 梳齿）、旧 4 参调用报错提示 |
 | commonsignal.{h,cpp} | 公共信号**内存生成**（S2.5 后无文件 I/O）：deriveGrid（specRes/numSamps 网格，datasim getSpecRes 移植+修 bug，FXSIM_SPECRES 缩放因子；候选序列分两段——0.5→1/1024 MHz 优先，全不适配时放宽到 1/2/4… MHz，并加**帧兼容**条件 `blksize` 整除每帧复样本数，t25362 由此取 2 MHz）、**SliceStream**（流式 slice 生成器：`fillSliceBlock` 是**唯一**推进 PRNG 的地方，engine 与 `normal_distribution` 必须跨块保持同一对——后者缓存 Box-Muller 的第二个值）、jsonDouble/jsonInt/jsonString（batch.json 解析） |
-| signalgen.{h,cpp} | 两层：SignalGen（legacy 时域合成，原样保留，字节对拍路径）；FreqStationGen（station 新路径频域链：切频段→站噪声/SEFD 定标→归一化→Ormsby→块 IDFT（滚动缓冲）→帧 DFT/DC 置零/fracsample 校正/条纹旋转/扩展/2N IDFT 复转实→pcal 注入→量化打包；datasim updatevalues 延迟吸收；站噪声种子 = FNV-1a(station, ds_index) 派生） |
+| signalgen.{h,cpp} | 三层：SignalGen（legacy 时域合成，原样保留，字节对拍路径）；FreqStationGen（station 新路径频域链：切频段→站噪声/SEFD 定标→归一化→Ormsby→块 IDFT（滚动缓冲）→帧 DFT/DC 置零/fracsample 校正/条纹旋转/扩展/2N IDFT 复转实→pcal 注入→量化打包；datasim updatevalues 延迟吸收；站噪声种子 = FNV-1a(station, ds_index) 派生）；**LightStationGen**（V6 S2 压测轻量模式：只填确定性伪随机 2bit 载荷、无物理链，见下条「轻量模式」） |
 | vdifwriter.{h,cpp} | VDIF 帧封装：帧头 8 字（**vdifio/mark5access 字布局，2026-09-13 修正**）、帧时间戳/帧号按 batch 起点换算逐帧自增、2^n band 数校验（不动） |
 | VERIFICATION.md | 验证档案（legacy 路径 + P0-P4 全部验证记录与坑） |
 
@@ -38,6 +38,13 @@
 - **输出名**：`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`——**后缀只在多 ds 站出现**（`ndsinstation > 1`），单 ds 站的文件名与加多 ds 之前逐字相同。`make_testdata.sh` 的 `vdifrel()` 是同一规则的两处实现，改一处要改两处。
 - **命令行**：`station <bid> <st> [workdir] [ds_index] [tone_mhz ...]`——`ds_index` 缺省 0，位置固定在 workdir 之后，legacy tone 要写在它后面（`station <bid> <st> . 0 1.5`）。默认模式（无子命令）遍历**全部** datastream，每站每 ds 一个文件。
 - **验证（2026-09-27，测试机）**：① 单 ds 配置产物**逐字节不变**（T1/T2 的 00000001/00000003 与改前 md5 相同）；② 两 ds 配置下同站 ds0/ds1 有噪时 md5 不同、`FXSIM_NOISE=0` 时**逐字节相同**（差异只来自噪声，帧头/时间轴/延迟链完全一致）；③ 多 ds 配置生成的 ds0 与**单 ds 配置**生成的文件**逐字节相同**（`18dea81e…` 两边一致）——即"单 ds 生成与全 ds 生成在同一 ds 上逐位相同"。测试资产与用法见 `fxcorr/test/multids/`。
+
+轻量模式（V6 S2，2026-09-28 加，`FXSIM_LIGHT=1`）：
+
+- **定义**：跳过整条物理链（公共信号、块 IDFT、帧级 FFT、延迟链、量化），载荷由 `(seed, station, ds_index)` 派生的流填充。**结构一行不改**——`setupStation` 的帧推导与 `VDIFWriter` 是两模式共用的，判据"逐帧头一致"因此是结构性保证而不是巧合。
+- **必须保持的两条**：① 载荷流按 `(station, ds_index)` 派生（与站噪声同源）——同配置跑两次逐字节相同、两站与同站两 ds 互不相同；② **band 维度固定 0**：band 布局是帧的**位置**属性（样本序 % nbands），与载荷内容无关，按 band 填没有意义。
+- **边界**：只作用于**新路径**；legacy（带 tone 参数）遇到 `FXSIM_LIGHT=1` **报错退出**——那条路径没有可替换的阶段，静默忽略是更坏的选择。病态注入（`FXSIM_GAPS` / `FXSIM_STARTOFFSET`）在 `VDIFWriter` 内照常生效，两模式共用同一份实现。
+- **判据（2026-09-28 实测）**：test 配置 525 帧**帧头 0 帧不同**、载荷 0 帧重复（全部伪随机）；同参数两次跑逐字节相同。速率见 `VERIFICATION.md` 的 S2 节。
 
 频域链要点（新路径，照 datasim 移植时）：
 

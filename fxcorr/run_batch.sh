@@ -20,7 +20,7 @@
 #             deriveDsGroups 同规则，两处必须同改）。不设 = 现行行为。
 set -euo pipefail
 
-# 五个可重定向的根（V5 P5）：容器透传与解析共用一份清单
+# 四个可重定向的根（V5 P5）：容器透传与解析共用一份清单
 FXCORR_ROOT_VARS=(FXCORR_RAW_ROOT FXCORR_FENGINE_ROOT FXCORR_VIS_ROOT FXCORR_PRODUCT_ROOT)
 
 # 容器模式开关：FXCORR_RUN_MODE=container 时工具经 docker run 调用（见下方 fxc）
@@ -45,7 +45,7 @@ run_in_container()
 	local envargs=()
 	[ -n "${FXSIM_NOISE+x}" ] && envargs+=(-e FXSIM_NOISE="$FXSIM_NOISE")
 	[ -n "${FXSIM_SEED+x}" ] && envargs+=(-e FXSIM_SEED="$FXSIM_SEED")
-	# 五个根一并透传（Q12）：容器内程序仍要知道用哪个根。挂载由外部编排平台
+	# 四个根一并透传（Q12）：容器内程序仍要知道用哪个根。挂载由外部编排平台
 	# 按"各根按宿主同路径可见"的约定负责，本脚本不实现多根挂载。
 	local r
 	for r in "${FXCORR_ROOT_VARS[@]}"; do
@@ -95,7 +95,7 @@ else
 	command -v fxcorr-x >/dev/null 2>&1 || { echo "run_batch.sh: fxcorr-x not found (source setup.bash or install)" >&2; exit 2; }
 fi
 mkdir -p "$WORKDIR/meta"
-fxcorr_mkroots	# Q19：五个根由编排层建齐，程序遇根不存在只报错
+fxcorr_mkroots	# Q19：四个根由编排层建齐，程序遇根不存在只报错
 
 # ---- ①② 读 batch.json + .input、前置校验、DATA TABLE 软链重做 ----
 OUT=$(mktemp)
@@ -161,8 +161,21 @@ if len(stations) != len(datafiles):
 # make_testdata.sh 布局（raw/<st>/<st>_<bid>.vdif）下软链重指本 batch，落在
 # RAW 根下（Q2）；真实观测场景 FILE 行已是数据文件路径（绝对路径或直接可见），
 # 不软链。
-for st, fn in zip(stations, datafiles):
-    src = os.path.join(rawroot, st, '%s_%s.vdif' % (st, bid))
+# 每站有几个 datastream：多 ds 站的文件名带 `_ds<N>` 后缀（N = 站内序号，
+# data-spec 5.2），单 ds 站没有后缀——与 fxcorr-sim 的 stationOutPath、
+# make_testdata.sh 的 vdifrel **同一规则，三处必须同改**。少了这个后缀时
+# 多 ds 站的 src 永远不存在，软链就停在 make_testdata.sh 建的最后那个 batch
+# 上：单 batch 场景看不出来（软链本来就是对的），多 batch 才现形，而 f 读的是
+# 别的 batch 的数据却按本 batch 的时间轴解，全程没有任何报错。
+nds_of = {}
+for st in stations:
+    nds_of[st] = nds_of.get(st, 0) + 1
+
+for st, di, fn in zip(stations, dsidx, datafiles):
+    base = '%s_%s' % (st, bid)
+    if nds_of[st] > 1:
+        base += '_ds%d' % di
+    src = os.path.join(rawroot, st, base + '.vdif')
     if os.path.isfile(src):
         tgt = os.path.join(rawroot, fn)
         if os.path.islink(tgt) or os.path.exists(tgt):
@@ -170,6 +183,11 @@ for st, fn in zip(stations, datafiles):
         # absolute target: a relative one breaks across filesystems, which is
         # the whole point of pointing the raw root at a different disk (Q2)
         os.symlink(src, tgt)
+    elif fn == os.path.basename(fn):
+        # 裸文件名 = make_testdata 布局（DATA TABLE 直接写文件名，由 RAW 根解析）,
+        # 文件必须在；真实观测的 FILE 行是路径（绝对或已可见），走不到这里
+        sys.exit('run_batch.sh: %s not found (batch %s, station %s datastream %d)'
+                 % (src, bid, st, di))
 
 # OUTPUT FILENAME resolves against the vis root (Q20); an absolute value wins,
 # os.path.join drops the prefix for it - same rule as the programs

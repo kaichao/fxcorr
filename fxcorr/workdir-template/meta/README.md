@@ -18,7 +18,7 @@
 meta/
 ├── batches.index             # D13：batch 状态流水（append-only）
 ├── roots/
-│   ├── 00000001.json         # 该 batch 的五个根快照
+│   ├── 00000001.json         # 该 batch 的四个根快照
 │   └── ...
 └── difxmsg/                  # DifxMessage 落盘（container 模式；当前暂不启用）
     ├── <exp>_<batch>.xml
@@ -43,7 +43,7 @@ meta/
 
 ## `roots/<batch_id>.json`
 
-该 batch **开跑时**的五个根快照。程序启动时会比对自己用到的根，脚本也会先做
+该 batch **开跑时**的四个根快照。程序启动时会比对自己用到的根，脚本也会先做
 实验级一致性检查——**同一实验中途换了根，产物会分裂在两处而没有任何报错**，
 所以写前先查。
 
