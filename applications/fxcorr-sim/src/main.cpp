@@ -688,10 +688,6 @@ static int doStationNew(Configuration &config, Model *model, const BatchInfo &bi
 		return EXIT_FAILURE;
 	long long nblocks = stream.nblocks();
 	long long blockfloats = stream.blockfloats();
-	cerr << "DBG seed=" << bi.seed << " nsubints=" << bi.nsubints
-	     << " totalslices=" << totalslices << " nblocks=" << nblocks
-	     << " blockfloats=" << blockfloats
-	     << " numsamps=" << stream.numsamps() << endl;
 
 	// vpsamps: complex baseband samples per band per frame (= payload bytes
 	// per band * 2, datasim's 4-bit-complex counting of 2-bit real samples)

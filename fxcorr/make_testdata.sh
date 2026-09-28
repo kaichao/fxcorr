@@ -3,15 +3,15 @@
 #
 # 步骤：① config/ 前处理（vex2difx + difxcalc，幂等）→ ② 从 .input 推导 batch 参数、
 # 分配 batch_id（8 位顺序号，已有同参数的 batch 则复用，见 data-spec 第 6 节）
-# → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ fxcorr-sim 两段式生成 raw VDIF
-# （无 tone：每 batch 先 common 一次、(batch, station, ds) 任务并行分发；带 tone：legacy 逐站）
+# → ③ 写 batches/<batch_id>.json（全字段一次写全）→ ④ fxcorr-sim 生成 raw VDIF
+# （无 tone：新路径，(batch, station, ds) 任务并行分发，公共信号各任务就地合成；带 tone：legacy 逐站）
 # → ⑤ 软链 <DATA TABLE 文件名> 到最后 batch 的 VDIF → ⑥ stdout 打印 batch_id。
 #
 # 用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]
 #
 #   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）
-#   -p P          station 任务本地并行度（默认 1 = 串行，P1：common 一次后
-#                 (batch,station) 任务 xargs 并行分发）
+#   -p P          station 任务本地并行度（默认 1 = 串行，P1：
+#                 (batch,station,ds) 任务 xargs 并行分发）
 #   --nodes MAP   ssh 节点映射（P1）：把站分发到远程节点跑 station（共享存储假设，
 #                 workdir 全节点同路径可见），未列出站回落本地；每 entry
 #                 host:st1,st2，可多个 entry 空格分隔
@@ -323,8 +323,8 @@ calcrel = os.path.relpath(calcfull, workdir)
 imrel = calcrel[:-len('.calc')] + '.im' if calcrel.endswith('.calc') else calcrel + '.im'
 
 # 公共信号种子（V6 S2.5）：各站的 station 任务在本地各自合成公共信号，种子
-# 必须一致，否则跨站相干就没了——所以它随 batch.json 走，而不是落在某个
-# common/ 目录里。默认值与 fxcorr-sim 的默认值一致。
+# 必须一致，否则跨站相干就没了——所以它随 batch.json 走（公共信号不落盘，
+# 没有别的交接点）。默认值与 fxcorr-sim 的默认值一致。
 seed = int(os.environ.get('FXSIM_SEED') or '20260912')
 
 epo = datetime(1858, 11, 17)
@@ -370,9 +370,9 @@ for st, di, fn in zip(stations, dsidx, datafiles):
     print('%s %s %d %s' % (st, di, nds_of[st], fn))
 PYEOF
 
-# ---- ④ fxcorr-sim 两段式（新路径）：每 batch 先 common（一次），station 任务并行分发 ----
-# 带 tone 参数 = legacy 时域合成路径（对拍回归），无 common 阶段；
-# 无 tone = 新频域路径（公共信号 + 站噪声）。VDIF 已存在则跳过，幂等。
+# ---- ④ fxcorr-sim：逐 (batch, station, ds) 任务生成（新路径），并行分发 ----
+# 带 tone 参数 = legacy 时域合成路径（对拍回归）；无 tone = 新频域路径
+# （公共信号在任务内就地合成 + 站噪声）。VDIF 已存在则跳过，幂等。
 # 分发（P1）：(batch, station) 任务列表 → xargs -P（-p P，默认 1 = 串行）；
 # --nodes 映射的站改 ssh 远程执行（共享存储假设：workdir 全节点同路径可见）。
 # $OUT：前段每行一个 batch_id，"--" 之后每行 "站名 文件名"

@@ -309,7 +309,7 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
   且跨 slice 连续，要取 slice 内第 k 个点必须先算出前 k 个；改成按 `(slice, freq)` 独立 hash
   会**改变全部数值**，现有对拍基准全部作废。算全部、留一部分是正确且代价最小的做法；
 - **代价与收益**：算力 ×ds 组数（各组并行，wall time 不增），换来落盘、分发、跳读三项 I/O 归零
-  ——t25362 4 站的实测是 57.93 GB/batch 的落盘与 221× 的读放大（`data-volume.md` §4.3）；
+  ——t25362 4 站的实测是 57.93 GB/batch 的落盘与 221× 的读放大（`data-volume.md` §4.1）；
 - **legacy 模式不受影响**：station 带 `tone_mhz` 参数仍走旧时域合成路径（字节对拍回归），
   它本来就不经过公共信号；
 - **噪声**：`FXSIM_NOISE`（高斯噪声 σ，默认 0.02；0 关闭）。**公共信号只与 (seed, batch) 有关、

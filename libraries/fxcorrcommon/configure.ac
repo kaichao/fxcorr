@@ -59,6 +59,15 @@ dnl ippsMalloc_64f, and the Model arrays allocated that way come out subtly
 dnl wrong, which makes fxcorr-sim's simulated delays wrong by a sample or so
 dnl (found in the V6 S2.5 investigation; the symptom is a handful of 2-bit
 dnl quantiser levels flipping, with no error anywhere).
+dnl pkg-config has to be located at top level, ahead of that 'if'.  This is the
+dnl first PKG_CHECK_MODULES in the file, and that macro AC_REQUIREs
+dnl PKG_PROG_PKG_CONFIG -- so the search for the pkg-config program itself lands
+dnl inside whichever shell branch the first use sits in.  Guarded away by
+dnl ipp_enabled=0 (the default) the block never runs, PKG_CONFIG stays empty,
+dnl and every later PKG_CHECK_MODULES reports "not found" without a word about
+dnl why: a fresh build dies at "checking for FFTW3... no".
+PKG_PROG_PKG_CONFIG
+
 if test ${ipp_enabled} = 1; then
 	PKG_CHECK_MODULES(IPP, ipp, [AC_DEFINE([HAVE_IPP], 1, [1=has IPP])], ipp_enabled=0)
 fi
