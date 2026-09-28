@@ -294,11 +294,26 @@ mpifxcorr 走"用网络换单节点资源"，fxcorr 走"用本地资源换网络
    本来就是对的），这正是 `test/multids/` 判据 11 绿着的原因；**真实观测（每站 8 ds）同样会
    中招**——S1 手工跑 f/x 没走 `run_batch.sh`，所以没暴露。修法：按每站 ds 数补后缀，并把
    "源文件不存在"从静默跳过改为**报错**。
-2. **`-n > 1` 的 128 ms SUBINT 变体在 4 站配置下让 `fxcorr-x` 写出 0 条记录**（待查）：
-   那处 sed 改写是**为 test 配置**写的（0.524288 s 与帧网格不兼容），而 t25362 的 5.12 ms
-   **本来就能多 batch**（batch 1.024 s × 16000 fps = 16384 帧，整数，起点也落在帧边界）。
-   现象是 x 报 "4 subints, 2 integrations written" 却一条记录都没写。S3 先自备
-   `test-sim.input`（内容 = 原版 `.input`）让脚本跳过 sed 来绕开。
+2. ~~**`-n > 1` 的 128 ms SUBINT 变体在 4 站配置下让 `fxcorr-x` 写出 0 条记录**~~
+   **已结案（2026-09-28）：与发现 1 同属"raw 与 batch 时间轴不符"，128 ms 是无关变量。**
+   真因分两层。**① 这类错位全链没有任何一处检测**：f 按本 batch 的时间轴读 raw，读到的不是本
+   batch 的数据就**静默写出全空的 `.sp`**，x 照报 "N integrations written" 而 SWIN 写 0 条记录
+   （发现 1 的软链不重指是成因之一，修好"源文件不存在"的报错后**仍有漏网**：源文件**存在**但
+   内容属于别的时间段，`isfile(src)` 检查放行）。**② 当时的触发机制是 `make_testdata.sh` 的
+   幂等跳过**（**推断**——当时未留日志）：VDIF 已存在就不重生成（`v1-plan.md:155` 的幂等设计），
+   而 `-n` 重新规划时 batch 时长会变（5.12 ms×200 → 128 ms×4，1.024 s → 0.512 s），**每个 batch
+   的起点跟着走**，旧 raw 于是整体错位；S3 最终跑通用的正是 5.12 ms 的 raw（`batch.json` 里
+   `n_subints=200 / subint_ns=5120000`，raw 每文件 131596288 B = 1.024 s）。**实测**（`ssh difx`，
+   4 站 32 ds，同一份 raw 复用）：原版 5.12 ms×200（raw 匹配）→ 1124352 B、197/200 subint 有正
+   weight；**128 ms×4（raw = 别的 batch）→ 0 B、0 个 subint 有 weight**（复现报告的现象：
+   "4 subints, 2 integrations written"）；**128 ms×8（raw 匹配）→ 4497408 B、8/8 有 weight**。
+   即 128 ms 配置**本身完全正常**（4096 条 = 1024 条/积分 × 4 积分，与基线自洽），
+   `test/pcal/README.md` 的 128 ms 多 batch 用例也一直在过。**sed 不是问题**：128 ms 是帧对齐
+   （2048 帧）的正确变体，"0.524288 s 与帧网格不兼容"指的正是它要绕开的那个网格。
+   另一条调查路径同时被排除：`writedata` 的停写判据 `currentstartseconds +
+   getScanStartSec() >= executeseconds` 与 `main.cpp:1208` 的算式**时间基准不一致**（后者缺
+   `getScanStartSec()` 一项），但 t25362 的 `.calc` 是 `SCAN 0 START (S): 0` ⇒ 该值为 0，本次
+   不成立。**隐患仍在，登记为 S5.5。**
 3. **`wrap_difx2fits.sh` 指错了 `.calc`，触发 difx2fits 段错误（已修）**：
    `.input` 的 `CALC FILENAME` 被绝对化成 **config 下的原件**，而绝对化了 `IM FILENAME`
    的是 **PRODUCT 下那份**——**没人读那一份**。于是 `D->job->imFile` 停在相对名
@@ -543,6 +558,7 @@ IB。跨节点流量只有两处：**输入数据进节点**（真实观测：ra
 | ~~S5.2~~ | ~~**按频段组分片生成 common**（B5）~~ **已被 S2.5（方案 E）取代**——E 之后 common 不再落盘，分片生成的前提消失 | — | `data-volume` §6 杠杆 6 |
 | S5.3 | 真实数据四项（A 组）：FILL_PATTERN / invalid 位的真实样本、filler 修正量形态、病态数据的对拍基准、真实 `.calc` 的 `IM`/`FLAG FILENAME` 形态 | 拿到第二份真实观测（带形态清单去要，`v4-plan.md` 末节） | `v5-plan.md` 表第 1/5 条、P5 遗留第 2 条 |
 | S5.4 | **`PCAL_*` 的并发写**：f 侧是 `ios::trunc` 整文件重写（read-modify-write），多节点并行批时**后写者丢掉先写者新增的行**；difx2fits 读它（`fitsPH.c`）故丢行影响产物。`SWITCHEDPOWER_*` 是追加、只乱序不丢，可不动 | 多节点部署成真（S4 落地后）；处置 = 加锁，或把它退化成"只追加本 ds 的行"（与 `SWITCHEDPOWER_*` 同形态） | `v6-plan.md` S4.1 的待确认项核实（2026-09-28） |
+| S5.5 | **`fxcorr-x` 的 `executeseconds` 与 `writedata` 判据时间基准不一致**：判据比的是 `currentstartseconds + getScanStartSec()`（**实验相对**），而 `main.cpp:1208` 算的 `batch时长 + initsec + 1` 是 **scan 相对**、缺 `getScanStartSec()` 一项。该值非 0 时条件可能恒真 ⇒ **`writedata` 第一处早退命中，静默不写盘**（`visibility.cpp:382` 无日志无报错，只在注释里留了一句）。f 侧没有这条路径（不写 SWIN） | 出现 `.input` 的 START ≠ 首 scan 起点、或实验含多个 scan 的真实观测（多 scan 现被 V1 启动边界挡住，故只有第一种情形会中招）；处置 = 把该项补进算式，或改判据口径 | `v6-plan.md` 进行中的发现 2 的核实（2026-09-28）；2026-09-12 那次修复只覆盖了同 scan 内的 batch 偏移 |
 
 **S5.2 的形态修正**（2026-09-27，**已整体被 S2.5 取代**，以下保留作决策记录）：原定"按 band 分片生成 common"，代价栏写"改 D15 落盘布局
 + **seed 派生按频点可寻址**"。V5 建成的 `ds_group` 正是它需要的切割线，所以形态改为**按
@@ -562,6 +578,7 @@ IB。跨节点流量只有两处：**输入数据进节点**（真实观测：ra
 | S6.1 | P5 "遗留**十六条**"订正为 **3 条** | `v5-plan.md:809` 与 P5 末节"清理为 3 条"矛盾（16 = 13 已落实 + 3 遗留） | 改措辞，免得下一个人去找不存在的十三条 |
 | S6.2 | `run_bench.sh` 定位 batch 的软链层次与 `make_testdata.sh` 写软链的位置不在同一层 | 已知但有意未做第 3 条 | 目前靠 fallback（取最新 batch.json）兜住；不紧急，随手对齐 |
 | S6.3 | 分片模式不支持多相位中心与 pulsar binning | 已知但有意未做第 1 条 | **这是有意的功能边界，不是债**——程序内明确报错退出（不是静默降级），文档保留说明即可 |
+| S6.4 | ~~**raw 与 `batch.json` 的时间轴不符时没有任何检测**~~ **已实施 2026-09-28：改在 x 侧判"空"，不在 `run_batch.sh` 判"错"** | 进行中的发现 2 的核实（2026-09-28） | 成因不止软链一种（发现 1 的不重指、发现 2 的 VDIF 幂等跳过 + 重新规划改 batch 时长、手工造 `batch.json`），但**后果一致**：f 静默出全空 `.sp`、x 静默写 0 条记录，只有一句 "N integrations written" 看着正常（见发现 2 的实测）。**编排层那个做法（软链重指后从 VDIF 头读首帧时间戳比对 batch 起点）没采用**——*文件起点晚于 batch 起点是合法的*（`datareader.cpp:150` 注释：t25362 的 BA 站就晚 79.3 ms），"不符即报错"会误伤，而"差多少算错"没有客观阈值。改为在 `fxcorr-x` 里判**空**（正是用户看得见的那个后果）：整个 batch 无有效块 ⇒ 报错；全量模式下 SWIN 里本 batch 0 条记录 ⇒ 报错；`FXCORR_X_ALLOW_EMPTY=1` 绕过。细则见 `applications/fxcorr-x/CLAUDE.md`，环境变量见 `usage.md` |
 
 ---
 

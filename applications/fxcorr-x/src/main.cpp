@@ -48,6 +48,39 @@ static int fail(DifxMonitor &monitor, const string &msg)
 	return EXIT_FAILURE;
 }
 
+// Valid FFT blocks of the subint an SpReader last read: the .sp carries one
+// validity bit per block, filled from the bytes actually read out of the raw
+// file (FEngineWriter::writeSubintHeader, "valid flags, one bit per FFT
+// block").  fxcorr-x used to ignore them entirely and let the weight gate in
+// Visibility::writedata decide - which makes "the raw data was never there"
+// indistinguishable from "it was there but every weight came out zero", and
+// both end as an SWIN with no records and no error (v6-plan.md "进行中的
+// 发现" 2).  The batch-level check after the subint loop needs the real
+// thing.
+static long long countValidBlocks(const SpReader *reader)
+{
+	const u32 bps = reader->blocksPerSend();
+	const s32 *flags = reader->flags();
+	const u32 words = reader->flagWords();
+	long long n = 0;
+
+	for(u32 i=0;i<words;i++)
+	{
+		const u32 base = i*32;
+		if(base >= bps)
+			break;
+		u32 w = (u32)flags[i];
+		if(bps - base < 32)	// trailing bits of the last word are not blocks
+			w &= (1u << (bps - base)) - 1u;
+		while(w)		// Kernighan: one iteration per set bit
+		{
+			w &= w - 1u;
+			n++;
+		}
+	}
+	return n;
+}
+
 // Minimal batch.json field extraction (fixed V1 format, data-spec 5.3 D9).
 static bool extractJsonDouble(const string &json, const string &key, double *value)
 {
@@ -1233,6 +1266,7 @@ int main(int argc, char **argv)
 
 	int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
 	int integrationswritten = 0;
+	long long validblocks = 0;	// over every .sp view and subint, see countValidBlocks
 	for(int s=0;s<nsubints;s++)
 	{
 		// read this subint from every station, checking the time stamps
@@ -1280,6 +1314,7 @@ int main(int argc, char **argv)
 					oss << "fxcorr-x: subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band << " has time " << rscan << "/" << rsec << "/" << rns << ", expected " << scan << "/" << expectedsec << "/" << expectedns;
 					return fail(monitor, oss.str());
 				}
+				validblocks += countValidBlocks(readers[ds][band]);
 			}
 		}
 
@@ -1322,7 +1357,60 @@ int main(int argc, char **argv)
 			integrationswritten++;
 	}
 
+	// Empty-input / empty-output guards (v6-plan.md "进行中的发现" 2).  Two
+	// complementary checks, both aimed at the worst shape a silent corruption
+	// can take here: every program exits 0, the log line looks normal, and the
+	// product is an empty file.
+	//
+	//   F: not one valid FFT block in the whole batch.  fxcorr-f writes the
+	//      validity of every block into the .sp, so this says exactly "the raw
+	//      data was never there" - typically because batch.json's time axis
+	//      does not match what the raw files hold (a relink left over from
+	//      another batch, or a VDIF regenerated under a different batch
+	//      duration).  f then writes all-empty .sp files and x happily
+	//      integrates them, because the weight gate that drops the records is
+	//      indistinguishable from "no data".
+	//   C: data was fine but nothing reached the SWIN - e.g. every baseline
+	//      weight came out zero.  Sharded runs write .part files that the
+	//      batch-level merge collects, so they are not checked here.
+	bool allowempty = false;
+	if(const char *v = getenv("FXCORR_X_ALLOW_EMPTY"))
+		allowempty = (strcmp(v, "1") == 0 || strcmp(v, "allow") == 0);
+
+	if(validblocks == 0 && nsubints > 0 && !allowempty)
+	{
+		ostringstream oss;
+		oss << "fxcorr-x: batch " << batchid << " read no valid data at all: every FFT block of every subint is flagged invalid in all "
+		    << numdatastreams << " datastream(s) (start_mjd " << startmjd << ", " << nsubints << " subints of " << subintns << " ns).  "
+		       "fxcorr-f wrote the .sp files from raw data that does not cover this batch's time range - check that the files behind the "
+		       "DATA TABLE really hold this batch (run_batch.sh relinks them from <raw>/<station>/<station>_<batch_id>[_ds<N>].vdif) and "
+		       "that the raw data was generated with the batch duration this .input describes.  Without this check the run would finish "
+		       "with a normal-looking log line and an SWIN holding no records.  Set FXCORR_X_ALLOW_EMPTY=1 if an empty batch is really "
+		       "what you want.";
+		return fail(monitor, oss.str());
+	}
+
 	FXLOG(FXLOG_INFO) << "fxcorr-x: batch " << batchid << " complete, " << nsubints << " subints, " << integrationswritten << " integrations written" << endl;
+
+	if(!sharded && integrationswritten > 0 && !allowempty)
+	{
+		char swinpath[4096];
+		snprintf(swinpath, sizeof(swinpath), "%s/DIFX_%05d_%06d.s0000.b0000",
+		         config.getOutputFilename().c_str(), config.getStartMJD(), config.getStartSeconds());
+		double duration = (double)nsubints * (double)subintns / 1.0e9;
+		long long nrecords = 0;
+		swinHasBatchRange(swinpath, config, startmjd, duration, &nrecords);
+		if(nrecords == 0)
+		{
+			ostringstream oss;
+			oss << "fxcorr-x: batch " << batchid << " finished " << integrationswritten << " integration(s) but " << swinpath
+			    << " holds no record inside this batch's time range (start_mjd " << startmjd << ", duration " << duration << " s).  "
+			       "The .sp input was not empty (valid FFT blocks were read), so this is not a raw/layout mismatch: either every "
+			       "baseline weight came out zero, or the output went somewhere other than this file.  Set FXCORR_X_ALLOW_EMPTY=1 "
+			       "to accept it.";
+			return fail(monitor, oss.str());
+		}
+	}
 
 	for(int ds=0;ds<numdatastreams;ds++)
 		for(size_t band=0;band<readers[ds].size();band++)

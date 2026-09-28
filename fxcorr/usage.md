@@ -190,6 +190,7 @@ fxcorr-x merge --experiment [workdir]            # ② 实验级归并 → SWIN�
 | `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：基线循环并行线程数（scratch 按线程私有化，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
 | `FXCORR_X_MERGE_FORCE` | 未设（严格） | **两个层级的 `merge` 都认**：batch 级是"ds 组不齐"、实验级是"batch 不齐"，语义相同——强制写出已到齐的部分（缺失者留空洞 + stderr 列明缺了哪些），未设 = 报错退出不写 |
 | `FXCORR_X_SWIN_CONFLICT` | 未设（严格） | **三种写 SWIN 的模式共用（全量 / 分片 / 实验级 `merge`）**：目标 SWIN 里若已有**本 batch 时间范围内**的记录（说明这个 batch 已经被另一次运行写过），默认报错退出——再写会追加重复记录、破坏 SWIN 的时间单调（difx2fits 顺序读、时间回退的记录被静默丢弃）。设 `allow` 强制继续。**重跑分片与 batch 级 `merge` 不受影响**（两者都不写 SWIN），被拦的是"`merge` 之后又跑全量、或又 `merge`"。**2026-09-28 起移交实验级**：检查由 `merge --experiment` 做，范围扩为"**本次将写出的全部 batch**"；batch 级 `merge` 与分片任务都不写 SWIN、**都不查** |
+| `FXCORR_X_ALLOW_EMPTY` | 未设（严格） | **空输入 / 空产物防呆（2026-09-28，`v6-plan.md`「进行中的发现」2）**。两条互补的检查，挡的是同一种最坏的静默——每个程序都退 0、日志照报 "N integrations written"，产物却是空文件：① **整个 batch 一块有效数据都没有**（`.sp` 的 valid flags 全 0；那是 f 写的"这些块没有数据"，x 以前完全不用它，只靠 weight 门控间接判断，于是"数据根本没读到"与"读到了但权重为 0"分不开）；② 全量模式下 batch 算完却**一条记录都没进 SWIN**（数据有效，但每条基线的 weight 都成了 0）。两者都可能由 **raw 与 `batch.json` 的时间轴不符**引起（软链指错 batch、VDIF 幂等跳过而重新规划改了 batch 时长……）。设 `1`（或 `allow`）跳过检查。**正常数据不触发**：部分 subint 无效是常态（gap / filler / 真实观测丢帧），只有**全无效**才报；分片模式写 `.part`，只做① |
 
 输入输出：
 
