@@ -6,7 +6,7 @@
 | 属性 | |
 |---|---|
 | **根变量** | `FXCORR_VIS_ROOT`（默认 `$FXCORR_WORKDIR/vis`） |
-| **生产者** | `fxcorr-x`（不分片）或**实验级 `merge`**（分片；⚠ V6 形态 A 未实施） |
+| **生产者** | `fxcorr-x`（不分片）或**实验级 `merge --experiment`**（分片） |
 | **消费者** | `difx2fits` / `difx2mark4`（零改造，直读） |
 | **生命周期** | **长期保留** |
 | **量级** | GB 级（1 小时 4 站） |
@@ -38,14 +38,16 @@ SWIN 文件名里的 MJD / 秒是**实验级**的（`.input` 的 `START MJD`/`ST
 
 | 场景 | 结果 |
 |---|---|
-| 单节点、同实验 batch 按时间序串行 | ✓ 天然满足 |
-| 多节点并行（后完成的 batch 先写） | ✗ 回退 → 静默丢数据 |
+| 分片 + 两级 `merge`（2026-09-28 起） | ✓ 实验级按各 `merged.part` 的**首记录时间**定序，与 batch 的完成顺序无关 |
+| 不分片、逐 batch 顺序跑 | ✓ 天然满足（只有一个写入者，且按时间序调用） |
+| **单级** `merge` 逐 batch 写（旧行为） | ✗ 多节点并行时回退 → 静默丢数据 |
 | 同一 batch 混跑不分片与分片 | ✗ 重复记录 + 回退 |
 
-- 现状防呆：`fxcorr-x` 启动时读目标 SWIN 的记录头，若本 batch 的时间范围内已有
-  记录就**报错退出**（`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续）；
-- **V6 形态 A** 把 SWIN 的写入收敛到**实验级 `merge` 一次**（`fxcorr/v6-plan.md` S4.1）——
-  batch 级只产出 `vis-parts/<batch_id>/merged.part`，不碰 SWIN。**⚠ 未实施**。
+- **防呆**：`fxcorr-x` 在**全量/分片**模式启动时读目标 SWIN 的记录头，若本 batch 的时间范围内
+  已有记录就**报错退出**（`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续）；**实验级 `merge`** 另查
+  "**本次将写出的全部 batch 的总时间范围**"；
+- **SWIN 的写入收敛到实验级 `merge --experiment` 一次**（`fxcorr/v6-plan.md` S4.1，2026-09-28
+  实施）——batch 级只产出 `vis-parts/<batch_id>/merged.part`，不碰 SWIN。
 
 ## ⚠ 这里还有两个文本文件会被并发写
 

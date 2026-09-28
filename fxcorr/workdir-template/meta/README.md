@@ -38,8 +38,10 @@ meta/
 格式：`<batch_id>,<status>,<UTC 时间戳>`。合法状态只有
 **`running` / `done` / `failed`**——没有 `pending`（那不是一个会被落盘的状态）。
 
-**它是"哪些 batch 已完成"的判据来源**：实验级 `merge` 靠它核对 batch 是否到齐
-（`fxcorr/v6-plan.md` S4.2）。
+**它是"哪些 batch 已完成"的流水记录**——但**不是**"这个实验应该有哪些 batch"的判据来源：
+它 append-only、只在 `done` 时追加一行，拿它当应有集会让 `failed` 与尚未调度的 batch
+**静默消失**。实验级 `merge` 的应有集判据是 `batches/*.json` 本身（2026-09-28 订正，
+`data-spec` 5.9 末条第 2 条、`fxcorr/v6-plan.md` S4.1 实施细则）。
 
 ## `roots/<batch_id>.json`
 

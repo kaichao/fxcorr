@@ -98,6 +98,21 @@ fxcorr/make_testdata.sh /tmp/mds
 | 11 | `run_batch.sh` 的分片路径 | `FXCORR_X_SHARD=1` 逐组跑 + 自动 `merge`，产物与基准逐字节相同 |
 | 12 | **多 batch 下软链重指**（2026-09-28 由 V6 S3 发现并修复，**判据 11 是单 batch 所以没抓到**） | 判据 11 用的是**单 batch**，而单 batch 下 `make_testdata.sh` 建的软链本来就是对的——`run_batch.sh` 的重指即使用错也看不出来。多 batch 才现形：**重指的源路径必须带 `_ds<N>` 后缀**（多 ds 站），漏了它软链就停在**最后一个 batch** 上，f 按本 batch 的时间轴读**另一个 batch 的数据**，全程无报错，`fxcorr-x` 照报 "N integrations written" 而 SWIN 写下 **0 条记录**。复现：`-n 4` 生成后跑 `run_batch.sh 00000001`，`readlink raw/<st>_ds0.vdif` 应指向 `_00000001_`；修好后 4 个 batch 的 SWIN 是单 batch 的精确 4 倍（4497408 = 4 × 1124352） |
 
+**两级 merge（V6 S4.1，2026-09-28 实施）**：
+
+| # | 判据 | 结果 |
+|---|---|---|
+| 13 | **两级 merge = 不分片**，且 batch **乱序完成**仍正确 | 4 ds / 1 组 / **3 个 batch**，**故意乱序**（batch 3 → 1 → 2）跑：batch 级 `merge` 各写 `vis-parts/<bid>/merged.part`，实验级 `merge --experiment` 写出 SWIN——与**不分片顺序跑 3 个 batch** 的 SWIN **逐字节相同**（`7fbf2847…`）。实验级按各 `merged.part` 的**首记录时间**定序，这是乱序下仍正确的原因。**旧行为**（单级 `merge` 直写 SWIN）用同样的乱序跑出来是 `09349c2b…`——**不同**，即形态 A 要消除的那种静默错数据 |
+| 14 | 实验级缺 batch | 拿掉一个 `merged.part` → 报错退出（exit=1）、**0 个文件落盘**；`FXCORR_X_MERGE_FORCE=1` → 写出已到齐的部分（2/3 = 32 条记录）+ stderr 列明缺哪个（含 `status`）。判据来源是 `batches/*.json` 里的**全部** batch（**不是** `meta/batches.index`——那是 append-only 的完成流水，会让 `failed` 与未调度的 batch 静默消失） |
+| 15 | 实验级的错误路径 | ① **根不一致**：改坏 `meta/roots/<bid>.json` 的 `vis` 值 → 报 `FXCORR_VIS_ROOT disagrees with …`（对每个**候选** batch 逐个查）；② **workdir 混实验**：候选 batch 的 `config_file` 不一致 → 报 "candidate batches do not share one configuration"；③ **重跑**：SWIN 里已有本次时间范围的记录 → 报 "already holds N record(s)…"（互斥检查已从"本 batch"扩为"**本次写出的全部 batch**"） |
+
+> **判据 7/8/10/11 的语义在 2026-09-28 变了**（V6 S4.1 两级 merge）：当时 `merge` **直接写 SWIN**，
+> 所以那些判据写成"`.part` → `merge` → 与不分片 SWIN 相同"。现在 batch 级 `merge` 只写
+> `vis-parts/<batch_id>/merged.part`，**要再加一次实验级 `merge --experiment` 才产出 SWIN**
+> （判据 13 就是那个两步版本）。上表 7/8/10/11 的**结果列是当时的历史记录**，资产与配置未变；
+> 重跑它们时按新语义多跑一次实验级 merge 即可——`run_batch.sh` 的分片路径现在只做到 batch 级
+> （实验级不进脚本），两层的缺片/缺 batch 判据与逃生口都还在（判据 10 与 14 各覆盖一层）。
+
 判据 5 是"分片不改变结果"的生成侧依据（v5-plan.md P6 的"生成链已是逐 band 隔离"那张表）：
 同一个 ds 在单 ds 配置与多 ds 配置下**字节相同**，所以按 ds 拆开生成不会改变任何一个 ds 的内容。
 

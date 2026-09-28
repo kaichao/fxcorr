@@ -3,10 +3,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <fxcorrcommon/configuration.h>
@@ -281,11 +283,166 @@ static bool swinHasBatchRange(const string &path, Configuration &config,
 	return *nrecords > 0;
 }
 
-// merge 子命令：读 vis-parts/<batch_id>/ 下的全部分片，按积分周期归并，追加写出
-// 该 batch 的 SWIN 记录。**SWIN 只能有一个写入者**：difx2fits 顺序读记录并按天线
-// 检查时间单调（fitsUV.c:1227 的 RecordIsOld），时间回退的记录被静默丢弃、只在
-// 结尾打一行计数（fitsUV.c:1868，不报错）——分片任务各自追加同一个文件必然时间
-// 回退，所以写出集中在这里。分析与方案见 data-volume.md §7.5。
+// ---------------------------------------------------------------------------
+// 两级 merge（v6-plan.md S4.1 / data-spec 5.9 末条）
+//
+// 形态 A：SWIN 的写入收敛到**实验级一次**。batch 级 merge 只写
+// vis-parts/<batch_id>/merged.part（batch 内归并，不碰 SWIN），实验级
+// `merge --experiment` 才写 SWIN、且是它唯一的写入者。
+//
+// 理由是 difx2fits 的读取语义：顺序读记录、按天线检查时间单调（fitsUV.c:1227 的
+// RecordIsOld），时间回退的记录**静默丢弃**（fitsUV.c:1868 只打一行计数）。单节点
+// 串行 batch 时"每 batch 完成即 merge"天然按时间序；数百节点并行处理不同 batch 时
+// 不然——B 先完成先写、A 后写就是时间回退，全程无报错。
+
+// 实验级 merge 认的 batch 清单来自 batches/<batch_id>.json——它是**切批规划**的产物
+// （data-spec 第 6 节：由单点分配、单调递增），也就是"这个实验规划了哪些 batch"的
+// 权威清单。只取用得到的字段。
+struct BatchEntry
+{
+	string id;
+	string configfile;	// .input 路径（相对 workdir）——认定"本实验"的依据
+	string status;		// running/done/failed——**不参与判据**，只进报错信息
+	double startmjd;
+	int nsubints;
+	bool hastime;		// 两个时间字段齐备时才参与 SWIN 互斥检查
+};
+
+static string mergedPartPath(const string &workdir, const string &batchid)
+{
+	return workdir + "/vis-parts/" + batchid + "/merged.part";
+}
+
+// 扫 batches/*.json 读成 BatchEntry 列表（按文件名排 = batch_id 升序）。目录扫描用
+// dirent——三个 fxcorr 程序都跑在 POSIX 上（system("mkdir -p") 已在用）。
+static bool scanBatches(const string &workdir, vector<BatchEntry> *out, ostringstream *err)
+{
+	const string dir = workdir + "/batches";
+	DIR *d = opendir(dir.c_str());
+	if(d == 0)
+	{
+		*err << "cannot open " << dir;
+		return false;
+	}
+	vector<string> names;
+	struct dirent *ent;
+	while((ent = readdir(d)) != 0)
+	{
+		const string n = ent->d_name;
+		if(n.size() > 5 && n.compare(n.size() - 5, 5, ".json") == 0)
+			names.push_back(n);
+	}
+	closedir(d);
+	sort(names.begin(), names.end());
+	for(size_t i = 0; i < names.size(); i++)
+	{
+		const string path = dir + "/" + names[i];
+		ifstream f(path.c_str());
+		if(!f.is_open())
+		{
+			*err << "cannot open " << path;
+			return false;
+		}
+		stringstream ss;
+		ss << f.rdbuf();
+		const string json = ss.str();
+		BatchEntry be;
+		be.id = names[i].substr(0, names[i].size() - 5);
+		if(!extractJsonString(json, "config_file", &be.configfile))
+		{
+			*err << path << ": missing config_file";
+			return false;
+		}
+		if(!extractJsonString(json, "status", &be.status))
+			be.status = "?";	// make_testdata.sh 不写 status，run_batch.sh 才置
+		be.hastime = extractJsonDouble(json, "start_mjd", &be.startmjd) &&
+		             extractJsonInt(json, "n_subints", &be.nsubints);
+		out->push_back(be);
+	}
+	return true;
+}
+
+// 认定"本实验"：候选 = 已有 merged.part 的 batch（它们证明这个实验确实在跑 batch 级
+// merge）。候选之间 config_file 不一致即报错——那说明 workdir 混了多个实验，选任何
+// 一个都会把 SWIN 写到错的实验目录去；候选为空同样是错（还没有东西可归并）。
+static bool pickExperiment(const string &workdir, const vector<BatchEntry> &all,
+                           vector<const BatchEntry *> *candidates, string *inputfile,
+                           ostringstream *err)
+{
+	for(size_t i = 0; i < all.size(); i++)
+	{
+		ifstream probe(mergedPartPath(workdir, all[i].id).c_str());
+		if(probe.is_open())
+			candidates->push_back(&all[i]);
+	}
+	if(candidates->empty())
+	{
+		*err << "no batch under " << workdir << "/vis-parts/ has a merged.part yet - run the "
+		        "batch-level merge first (fxcorr-x merge <batch_id> [workdir])";
+		return false;
+	}
+	*inputfile = (*candidates)[0]->configfile;
+	for(size_t i = 1; i < candidates->size(); i++)
+	{
+		if((*candidates)[i]->configfile != *inputfile)
+		{
+			*err << "candidate batches do not share one configuration: " << (*candidates)[0]->id
+			     << " uses " << *inputfile << ", " << (*candidates)[i]->id << " uses "
+			     << (*candidates)[i]->configfile << " - this workdir holds more than one "
+			        "experiment, so the target SWIN would be ambiguous";
+			return false;
+		}
+	}
+	return true;
+}
+
+// 一个 merged.part 的**首记录时间**（整数纳秒，与 PartRecord::key 同口径）。实验级按它
+// 给 batch 定序——**不是** batch_id 数值序：编号只保证由单点分配，未规定"编号 = 时间序"。
+static bool firstRecordKey(const string &path, long long *key, ostringstream *err)
+{
+	ifstream in(path.c_str(), ios::binary);
+	if(!in.is_open())
+	{
+		*err << "cannot open " << path;
+		return false;
+	}
+	char head[74];
+	in.read(head, sizeof(head));
+	if(in.gcount() != (std::streamsize)sizeof(head))
+	{
+		*err << path << ": no complete record (empty or truncated)";
+		return false;
+	}
+	unsigned int sync;
+	int mjd;
+	double sec;
+	memcpy(&sync, head, 4);
+	if(sync != Visibility::SYNC_WORD)
+	{
+		*err << path << ": bad sync word 0x" << hex << sync << dec;
+		return false;
+	}
+	memcpy(&mjd, head + 12, 4);
+	memcpy(&sec, head + 16, 8);
+	*key = (long long)mjd * 86400LL * 1000000000LL + (long long)floor(sec * 1.0e9 + 0.5);
+	return true;
+}
+
+struct ShardRef
+{
+	long long key;
+	const BatchEntry *batch;
+};
+
+static bool shardRefLess(const ShardRef &a, const ShardRef &b)
+{
+	return a.key < b.key;
+}
+
+// batch 级 merge：读 vis-parts/<batch_id>/ 下的全部分片，按**整数纳秒**归并，写出
+// vis-parts/<batch_id>/merged.part——**不碰 SWIN**（形态 A：实验级 merge 才是 SWIN 的
+// 唯一写入者）。输出与 SWIN 逐字节同构（就是记录流），所以实验级只需按 batch 顺序搬运、
+// 不需要理解语义；`.part` 的 glob 是 `ds*.part`，与 `merged.part` 不冲突——命名即隔离。
 static int doMerge(Configuration &config, const string &workdir, const string &batchid,
                    DifxMonitor &monitor)
 {
@@ -365,26 +522,206 @@ static int doMerge(Configuration &config, const string &workdir, const string &b
 		cerr << "fxcorr-x merge: WARNING: " << ntimeback
 		     << " record(s) out of time order after sorting (please report)" << endl;
 
-	// ④ 追加写出：文件名与不分片模式完全一致（experiment 起点决定，与记录时间无关）
-	//    输出目录可能还不存在（分片任务不写 SWIN，没人建过它）——与全量模式一样
-	//    自己建
-	string outdir = config.getOutputFilename();
-	if(system(("mkdir -p '" + outdir + "'").c_str()) != 0)
-		return fail(monitor, "fxcorr-x merge: cannot create " + outdir);
-	char filename[4096];
-	snprintf(filename, sizeof(filename), "%s/DIFX_%05d_%06d.s0000.b0000",
-	         config.getOutputFilename().c_str(), config.getStartMJD(), config.getStartSeconds());
-	ofstream out(filename, ios::app|ios::binary);
+	// ④ 写出 merged.part：本 batch 的归并结果，**不碰 SWIN**（形态 A——SWIN 由实验级
+	//    merge 单点写出）。一次运行写一次、**第一次写截断**：重跑 batch 级 merge 得到
+	//    新内容，不与上一次叠加（与分片 `.part` 的重跑语义一致）。
+	string outpath = mergedPartPath(workdir, batchid);
+	ofstream out(outpath.c_str(), ios::trunc|ios::binary);
 	if(!out.is_open())
-		return fail(monitor, string("fxcorr-x merge: cannot open ") + filename + " for append");
+		return fail(monitor, string("fxcorr-x merge: cannot open ") + outpath + " for writing");
 	for(size_t i = 0; i < records.size(); i++)
 		out.write(records[i].bytes.data(), records[i].bytes.size());
 	out.close();
 	if(!out)
-		return fail(monitor, string("fxcorr-x merge: error writing ") + filename);
+		return fail(monitor, string("fxcorr-x merge: error writing ") + outpath);
 
 	FXLOG(FXLOG_INFO) << "fxcorr-x merge: batch " << batchid << ", " << groups.size() << " shard(s), "
-	                  << records.size() << " records -> " << filename << endl;
+	                  << records.size() << " records -> " << outpath << endl;
+	return EXIT_SUCCESS;
+}
+
+// 实验级 merge：把本实验全部 batch 的 merged.part 按**数据时间序**搬进 SWIN。它是 SWIN
+// 的**唯一写入者**（形态 A）——difx2fits 依赖的时间单调性在这里得到保证，而不是靠"编排层
+// 按时间序串行调 merge"这种外部约定。
+//
+// 四步都是容易写错的地方（细则见 data-spec 5.9 末条）：**应有集取自 batches/*.json 而
+// 不是 meta/batches.index**（后者只在 done 时追加，会让 failed 与未调度的 batch 静默
+// 消失）、**按首记录时间定序而不是 batch_id 序**、**逐个 batch 流式写出**（各 batch 时间
+// 范围不重叠，把顺序定对即全局单调；全量读入不现实——24 h 观测的 SWIN 约 11.8 GB），
+// 以及只对**候选**（有 merged.part 的）查根一致性。
+static int doMergeExperiment(Configuration &config, const string &workdir,
+                             const vector<BatchEntry> &all, const string &inputfile,
+                             DifxMonitor &monitor)
+{
+	int configindex = config.getScanConfigIndex(0);
+	if(configindex < 0)
+		return fail(monitor, "fxcorr-x merge --experiment: no configuration for scan 0");
+
+	// ① 应有集 = config_file 与本次选定者**相同**的全部 batch。**status 不参与判据**：
+	//    done/failed/running 都仍是"规划过的 batch"，拿它过滤会让跑挂的 batch 静默消失
+	vector<const BatchEntry *> expected;
+	for(size_t i = 0; i < all.size(); i++)
+	{
+		if(all[i].configfile == inputfile)
+			expected.push_back(&all[i]);
+	}
+
+	// ② 缺 merged.part 的即缺失：默认报错退出、不写任何东西（逃生口同 batch 级）
+	vector<const BatchEntry *> ready;
+	vector<string> missing;
+	for(size_t i = 0; i < expected.size(); i++)
+	{
+		ifstream probe(mergedPartPath(workdir, expected[i]->id).c_str());
+		if(probe.is_open())
+			ready.push_back(expected[i]);
+		else
+			missing.push_back(expected[i]->id + " (status=" + expected[i]->status + ")");
+	}
+	bool forced = false;
+	if(const char *f = getenv("FXCORR_X_MERGE_FORCE"))
+		forced = (strcmp(f, "1") == 0);
+	if(!missing.empty())
+	{
+		string list;
+		for(size_t i = 0; i < missing.size(); i++)
+			list += (i ? ", " : "") + missing[i];
+		if(!forced)
+		{
+			return fail(monitor,"fxcorr-x merge --experiment: "
+			            + std::to_string((long long)missing.size()) + " of "
+			            + std::to_string((long long)expected.size()) + " batch(es) of this "
+			              "experiment have no merged.part: " + list + "; nothing was written (set "
+			              "FXCORR_X_MERGE_FORCE=1 to write the batches that are ready, leaving the "
+			              "missing ones' time ranges empty)");
+		}
+		cerr << "fxcorr-x merge --experiment: WARNING: writing a partial merge, "
+		     << missing.size() << " of " << expected.size()
+		     << " batch(es) have no merged.part: " << list
+		     << " - those time ranges will have no records in the SWIN" << endl;
+	}
+	if(ready.empty())
+	{
+		cerr << "fxcorr-x merge --experiment: no batch is ready, nothing written" << endl;
+		return EXIT_SUCCESS;
+	}
+
+	// ③ 根一致性：对**每个候选** batch 逐个比对 VIS 根（实验级唯一用到的根）。范围取
+	//    候选集而非应有集——缺 merged.part 的不参与写出，检查它没有意义（上面刚报过）。
+	//    checkRoots 一致时静默、不一致时打印双方的值并返回 false，所以没有输出代价。
+	static const FxcorrPath::Root usedroots[] = { FxcorrPath::ROOT_VIS };
+	for(size_t i = 0; i < ready.size(); i++)
+	{
+		if(!FxcorrPath::checkRoots(ready[i]->id, usedroots, 1, "fxcorr-x"))
+			return EXIT_FAILURE;
+	}
+
+	// ④ 定序：按各 merged.part 的**首记录时间**（不是 batch_id 数值序——编号只保证由
+	//    单点分配，未规定"编号 = 时间序"）
+	vector<ShardRef> ordered;
+	for(size_t i = 0; i < ready.size(); i++)
+	{
+		ShardRef sr;
+		ostringstream err;
+		if(!firstRecordKey(mergedPartPath(workdir, ready[i]->id), &sr.key, &err))
+			return fail(monitor, "fxcorr-x merge --experiment: " + err.str());
+		sr.batch = ready[i];
+		ordered.push_back(sr);
+	}
+	sort(ordered.begin(), ordered.end(), shardRefLess);
+	// 两个序不一致时报错而非静默选一：那说明"编号由单点按时间分配"这个前提被破坏了，
+	// 此时"哪个序才对"没有安全答案
+	for(size_t i = 1; i < ordered.size(); i++)
+	{
+		if(ordered[i - 1].batch->id > ordered[i].batch->id)
+		{
+			return fail(monitor, "fxcorr-x merge --experiment: batch id order disagrees with data "
+			            "time order: " + ordered[i - 1].batch->id + " holds earlier data than "
+			            + ordered[i].batch->id + ".  Batch ids are meant to be allocated in time "
+			              "order (data-spec section 6); refusing to guess which order to write in");
+		}
+	}
+
+	// ⑤ SWIN 互斥：查**本次将写出的全部 batch 的总时间范围**（不是单个 batch 的）——
+	//    实验级 merge 是 SWIN 的唯一写入者，只查一个 batch 的话重跑会追加一整份重复记录
+	string outdir = config.getOutputFilename();
+	char filename[4096];
+	snprintf(filename, sizeof(filename), "%s/DIFX_%05d_%06d.s0000.b0000",
+	         outdir.c_str(), config.getStartMJD(), config.getStartSeconds());
+	{
+		double lo = -1.0, hi = 0.0;
+		for(size_t i = 0; i < ordered.size(); i++)
+		{
+			if(!ordered[i].batch->hastime)
+			{
+				return fail(monitor, "fxcorr-x merge --experiment: batches/"
+				            + ordered[i].batch->id + ".json has no usable start_mjd / n_subints, "
+				              "so its time range cannot be checked against the SWIN");
+			}
+			double s = ordered[i].batch->startmjd * 86400.0;
+			double e = s + (double)ordered[i].batch->nsubints
+			             * (double)config.getSubintNS(configindex) / 1.0e9;
+			if(lo < 0.0 || s < lo) lo = s;
+			if(e > hi) hi = e;
+		}
+		long long nconflict = 0;
+		bool allow = false;
+		if(const char *v = getenv("FXCORR_X_SWIN_CONFLICT"))
+			allow = (strcmp(v, "allow") == 0);
+		if(swinHasBatchRange(filename, config, lo / 86400.0, hi - lo, &nconflict) && !allow)
+		{
+			return fail(monitor, "fxcorr-x merge --experiment: " + string(filename) + " already holds "
+			            + std::to_string(nconflict) + " record(s) inside the time range this run "
+			              "would write (MJD span " + std::to_string(lo / 86400.0) + " + "
+			            + std::to_string(hi - lo) + " s): this experiment has been merged already.  "
+			              "Writing it again would append a duplicate copy and break the monotonic "
+			              "time order difx2fits relies on (it silently drops out-of-time records).  "
+			              "Remove or rename the SWIN file - or set FXCORR_X_SWIN_CONFLICT=allow - "
+			              "if you really mean to redo it.");
+		}
+	}
+
+	// ⑥ 逐个 batch 流式写出：读一个、批内按整数纳秒排序、追加、立刻释放。峰值内存因此
+	//    是**单个 batch** 而不是整个实验
+	if(system(("mkdir -p '" + outdir + "'").c_str()) != 0)
+		return fail(monitor, "fxcorr-x merge --experiment: cannot create " + outdir);
+	ofstream out(filename, ios::app|ios::binary);
+	if(!out.is_open())
+		return fail(monitor, string("fxcorr-x merge --experiment: cannot open ") + filename
+		            + " for append");
+
+	long long total = 0;
+	long long lastkey = -1;
+	long long ntimeback = 0;
+	for(size_t i = 0; i < ordered.size(); i++)
+	{
+		vector<PartRecord> records;
+		ostringstream err;
+		if(!readPart(mergedPartPath(workdir, ordered[i].batch->id), config, &records, &err))
+			return fail(monitor, "fxcorr-x merge --experiment: " + err.str());
+		stable_sort(records.begin(), records.end(), partRecordLess);
+		for(size_t k = 0; k < records.size(); k++)
+		{
+			if(records[k].key < lastkey)
+				ntimeback++;
+			lastkey = records[k].key;
+			out.write(records[k].bytes.data(), records[k].bytes.size());
+		}
+		total += (long long)records.size();
+		FXLOG(FXLOG_VERBOSE) << "fxcorr-x merge --experiment: batch " << ordered[i].batch->id
+		                     << ", " << records.size() << " record(s)" << endl;
+		vector<PartRecord>().swap(records);
+	}
+	out.close();
+	if(!out)
+		return fail(monitor, string("fxcorr-x merge --experiment: error writing ") + filename);
+	if(ntimeback > 0)
+	{
+		cerr << "fxcorr-x merge --experiment: WARNING: " << ntimeback
+		     << " record(s) out of time order (please report)" << endl;
+	}
+
+	FXLOG(FXLOG_INFO) << "fxcorr-x merge --experiment: " << ordered.size() << " batch(es), "
+	                  << total << " record(s) -> " << filename << endl;
 	return EXIT_SUCCESS;
 }
 
@@ -399,10 +736,15 @@ int main(int argc, char **argv)
 		     << "      shard mode: correlate only that ds group, write\n"
 		     << "      vis-parts/<batch_id>/ds<G>.part instead of SWIN\n"
 		     << "  fxcorr-x merge <batch_id> [workdir]\n"
-		     << "      merge the batch's shards into SWIN (the only SWIN writer)\n"
+		     << "      merge the batch's shards into vis-parts/<batch_id>/merged.part\n"
+		     << "  fxcorr-x merge --experiment [workdir]\n"
+		     << "      merge every batch's merged.part into SWIN in data time order;\n"
+		     << "      this is the only writer of SWIN - run it once the experiment's\n"
+		     << "      batches are all done\n"
 		     << "  env: FXCORR_WORKDIR (default .), overridden by the workdir argument;\n"
 		     << "      FXCORR_X_MERGE_FORCE=1 writes a partial merge instead of failing\n"
-		     << "      when a shard is missing" << endl;
+		     << "      when a shard (batch level) or a batch (experiment level) is missing"
+		     << endl;
 		return EXIT_FAILURE;
 	}
 	// P3 (algo-plan.md): thread count from OMP_NUM_THREADS; unset = serial
@@ -412,9 +754,10 @@ int main(int argc, char **argv)
 		if(env == 0 || env[0] == '\0')
 			omp_set_num_threads(1);
 	}
-	// Three call forms (usage above).  ds_group sits after workdir, same
+	// Four call forms (usage above).  ds_group sits after workdir, same
 	// position as fxcorr-f's ds_index, so giving it requires giving workdir.
 	bool merge = false;
+	bool experiment = false;	// merge --experiment: batch_id is not known up front
 	int dsgroup = -1;
 	string batchid;
 	string workdir = ".";
@@ -422,15 +765,32 @@ int main(int argc, char **argv)
 		workdir = wd;
 	if(strcmp(argv[1], "merge") == 0)
 	{
-		if(argc < 3)
-		{
-			cerr << "fxcorr-x merge: missing batch_id" << endl;
-			return EXIT_FAILURE;
-		}
 		merge = true;
-		batchid = argv[2];
-		if(argc > 3)
-			workdir = argv[3];	// argument takes precedence over the environment
+		if(argc >= 3 && strcmp(argv[2], "--experiment") == 0)
+		{
+			// experiment level: no batch id, so [workdir] comes right after the flag
+			// and the experiment itself is identified from batches/*.json later
+			experiment = true;
+			if(argc > 3)
+				workdir = argv[3];	// argument takes precedence over the environment
+			if(argc > 4)
+			{
+				cerr << "fxcorr-x merge --experiment: unexpected extra argument '"
+				     << argv[4] << "'" << endl;
+				return EXIT_FAILURE;
+			}
+		}
+		else
+		{
+			if(argc < 3)
+			{
+				cerr << "fxcorr-x merge: missing batch_id (or --experiment)" << endl;
+				return EXIT_FAILURE;
+			}
+			batchid = argv[2];
+			if(argc > 3)
+				workdir = argv[3];	// argument takes precedence over the environment
+		}
 	}
 	else
 	{
@@ -481,28 +841,45 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
-	string batchjsonpath = workdir + "/batches/" + batchid + ".json";
-	ifstream jf(batchjsonpath.c_str());
-	if(!jf.is_open())
-	{
-		cerr << "fxcorr-x: cannot open " << batchjsonpath << endl;
-		return EXIT_FAILURE;
-	}
-	stringstream jss;
-	jss << jf.rdbuf();
-	string json = jss.str();
-	jf.close();
-
 	double startmjd = 0.0;
 	int nsubints = 0;
 	string inputfile;
-	if(!extractJsonDouble(json, "start_mjd", &startmjd) ||
-	   !extractJsonInt(json, "n_subints", &nsubints) ||
-	   !extractJsonString(json, "config_file", &inputfile))
+	// experiment level has no batch_id, so it identifies the experiment (and thus the
+	// .input) from batches/*.json instead.  That has to happen before the
+	// Configuration is built: inputfile is what feeds it.
+	vector<BatchEntry> batches;
+	if(experiment)
 	{
-		cerr << "fxcorr-x: batch.json missing required fields" << endl;
-		return EXIT_FAILURE;
+		ostringstream err;
+		vector<const BatchEntry *> candidates;
+		if(!scanBatches(workdir, &batches, &err) ||
+		   !pickExperiment(workdir, batches, &candidates, &inputfile, &err))
+		{
+			cerr << "fxcorr-x merge --experiment: " << err.str() << endl;
+			return EXIT_FAILURE;
+		}
+	}
+	else
+	{
+		// batch.json is pre-written by run_batch.sh (batches/<batch_id>.json)
+		string batchjsonpath = workdir + "/batches/" + batchid + ".json";
+		ifstream jf(batchjsonpath.c_str());
+		if(!jf.is_open())
+		{
+			cerr << "fxcorr-x: cannot open " << batchjsonpath << endl;
+			return EXIT_FAILURE;
+		}
+		stringstream jss;
+		jss << jf.rdbuf();
+		string json = jss.str();
+		jf.close();
+		if(!extractJsonDouble(json, "start_mjd", &startmjd) ||
+		   !extractJsonInt(json, "n_subints", &nsubints) ||
+		   !extractJsonString(json, "config_file", &inputfile))
+		{
+			cerr << "fxcorr-x: batch.json missing required fields" << endl;
+			return EXIT_FAILURE;
+		}
 	}
 
 	// FXCORR_LOGLEVEL has to be in force before the configuration is loaded:
@@ -568,10 +945,13 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// 互斥检查（三种模式共用）：本 batch 的时间范围若已经在 SWIN 里，说明它已经
-	// 被另一次运行写过——全量模式、或者 merge。再写一遍就会追加重复记录、破坏
-	// 时间单调。**分片任务本身不写 SWIN，所以正常重跑分片不会被拦**；会被拦的
-	// 是"merge 之后又跑全量/又 merge"，那正是要挡的情况。
+	// 互斥检查：只有**会写 SWIN 的路径**需要它。全量模式与分片模式走这里——本 batch 的
+	// 时间范围若已经在 SWIN 里，说明它被另一次运行写过（全量、或过去的 merge），再写一遍
+	// 就是追加重复记录、破坏时间单调。**分片任务自身不写 SWIN，所以正常重跑分片不会被
+	// 拦**；会被拦的是"merge 之后又跑全量/又跑分片"。**两个层级的 merge 都不在这里查**：
+	// batch 级不碰 SWIN（无需查），实验级在 doMergeExperiment 内按"本次写出的全部 batch
+	// 的总时间范围"查——那里才有 batch 清单。
+	if(!merge)
 	{
 		char swinpath[4096];
 		snprintf(swinpath, sizeof(swinpath), "%s/DIFX_%05d_%06d.s0000.b0000",
@@ -596,12 +976,13 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// merge 分支：读分片、归并、写 SWIN（本工具唯一写 SWIN 的路径；
-	// 分片的输出是 D16，见 data-spec 5.9）
+	// merge 分支（两级，data-spec 5.9 末条）：batch 级读本 batch 的分片、写
+	// vis-parts/<batch_id>/merged.part；实验级读全部 batch 的 merged.part、写实验的 SWIN
 	if(merge)
 	{
 		monitor.status(DIFX_STATE_STARTING, "Version 0.1.0", 0.0, 0, 0, 0.0, 0.0);
-		int rc = doMerge(config, workdir, batchid, monitor);
+		int rc = experiment ? doMergeExperiment(config, workdir, batches, inputfile, monitor)
+		                    : doMerge(config, workdir, batchid, monitor);
 		monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);
 		if(rc == EXIT_SUCCESS)
 			monitor.status(DIFX_STATE_DONE, "", 0.0, 0, 0, 0.0, 0.0);

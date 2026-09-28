@@ -15,7 +15,10 @@
 #   batch_id  批量标识（batches/<batch_id>.json 须已写好，可用 make_testdata.sh 生成）
 #   workdir   项目根目录（默认 .；环境变量 FXCORR_WORKDIR 亦可定义，位置参数优先）
 #   环境变量：FXCORR_X_SHARD=1 走分片路径——逐 ds 组跑 fxcorr-x（各写
-#             vis-parts/<bid>/ds<G>.part），再由 fxcorr-x merge 归并写出 SWIN。
+#             vis-parts/<bid>/ds<G>.part），再由 **batch 级** merge 归并成
+#             vis-parts/<bid>/merged.part（**不写 SWIN**：SWIN 由实验级的
+#             `fxcorr-x merge --experiment` 单点写出，那是实验级操作、不在本
+#             脚本里——见 data-spec 5.9 末条）。
 #             组数由本脚本从 .input 的 BASELINE TABLE 推导（与程序内
 #             deriveDsGroups 同规则，两处必须同改）。不设 = 现行行为。
 set -euo pipefail
@@ -277,10 +280,11 @@ for entry in "${DSTATION[@]}"; do
 done
 
 mkdir -p "$OUTDIR"    # 规格⑤（fxcorr-x 自身也会建，先建无害）
-# FXCORR_X_SHARD=1：按 ds 组分片（每片一个 x 任务），再由 merge 归并写出 SWIN。
-# 分片任务不写 SWIN（D16 落 vis-parts/），**merge 是 SWIN 的唯一写入者**——写出
-# 顺序必须时间单调，而分片各自追加必然时间回退（data-spec 5.9）。组数由上面
-# 的 python 段从 .input 推导（与程序内同一规则）。
+# FXCORR_X_SHARD=1：按 ds 组分片（每片一个 x 任务），再由 **batch 级** merge 归并成
+# vis-parts/<bid>/merged.part。分片与 batch 级 merge 都**不写 SWIN**（D16 落
+# vis-parts/）——分片各自追加 SWIN 必然时间回退、被 difx2fits 静默丢弃，所以 SWIN 的
+# 写出收敛到实验级的 `fxcorr-x merge --experiment` 一次（形态 A，data-spec 5.9 末条）。
+# 组数由上面的 python 段从 .input 推导（与程序内同一规则）。
 if [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
 	echo "run_batch.sh: shard mode, $NGRP ds group(s)" >&2
 	g=0
@@ -304,4 +308,8 @@ elif ! fxc fxcorr-x "$BID" "$WORKDIR"; then
 fi
 
 mark_status done
-echo "run_batch.sh: batch $BID done, SWIN in $(basename "$OUTDIR")"
+if [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
+	echo "run_batch.sh: batch $BID done, shards merged into vis-parts/$BID/merged.part"
+else
+	echo "run_batch.sh: batch $BID done, SWIN in $(basename "$OUTDIR")"
+fi

@@ -7,7 +7,7 @@
 |---|---|
 | **根变量** | **无**——恒在 `$FXCORR_WORKDIR/vis-parts`，但**必须全局可见** |
 | **生产者** | `fxcorr-x` 的分片任务（一个 `(batch, ds 组)` 一份） |
-| **消费者** | `fxcorr-x merge`（batch 级）；`merge --experiment`（实验级，⚠ V6） |
+| **消费者** | `fxcorr-x merge`（batch 级，读 `ds*.part`）；`merge --experiment`（实验级，读 `merged.part`） |
 | **生命周期** | 实验级 merge 写出 SWIN 后即删 |
 | **量级** | ≈ SWIN（KB 级 / batch） |
 | **共享 / 本地** | **必须全局共享**（见下） |
@@ -20,7 +20,7 @@ vis-parts/
     ├── ds0.part              # 一个 ds 组的产出（跨站、含全极化）
     ├── ds1.part
     ├── ...
-    └── merged.part           # batch 级归并产物（⚠ V6 形态 A，未实施）
+    └── merged.part           # batch 级归并产物（实验级 merge 的输入）
 ```
 
 `.part` **就是 SWIN 记录流原样**——74 字节记录头 + `cf32` 频谱，与 `DIFX_*`
@@ -66,9 +66,15 @@ vis-parts/
 
 ## 缺片处理
 
-`merge` 启动时先核对本 batch 的 ds 组是否集齐，**缺则报错退出、不写任何东西**。
-`FXCORR_X_MERGE_FORCE=1` 可强制写出已到齐的部分（缺失组对应的频段静默缺段，
-只在 stderr 留痕）。默认严格是刻意的：分片缺失通常意味着任务失败或未调度。
+**两个层级各查各的**，判据不同但逃生口同一个（`FXCORR_X_MERGE_FORCE=1`）：
+
+- **batch 级**（`merge <batch_id>`，现状）：启动时先核对本 batch 的 ds 组是否集齐，
+  **缺则报错退出、不写任何东西**。强制写出时缺失组对应的频段静默缺段，只在 stderr 留痕。
+- **实验级**（`merge --experiment`）：核对**本实验的全部 batch** 是否都已有
+  `merged.part`，判据是 `batches/*.json`（**不是** `meta/batches.index`——那是 append-only
+  的完成流水，会让 `failed` 与未调度的 batch 静默消失），见 `data-spec` 5.9 末条第 2 条。
+
+默认严格是刻意的：分片缺失通常意味着任务失败或未调度，静默缺段比报错危险得多。
 
 ## 相关
 

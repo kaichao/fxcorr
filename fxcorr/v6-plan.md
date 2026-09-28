@@ -1,6 +1,6 @@
 # fxcorr V6 计划
 
-> **规划中**（2026-09-27 开，方案待评审）——V6 的主题是**规模与部署**：把 V1–V5 建成的
+> **进行中**（2026-09-27 开；**S0–S3 与 S4.1 已完成 2026-09-28**，余 S4.2 的编排侧实现 / S4.3 / S5 / S6）——V6 的主题是**规模与部署**：把 V1–V5 建成的
 > "跑得对、跑得起来"的流水线，推到**多节点、真实规模**上跑。V5 收尾时确认：分片架构已成
 > 闭环，但端到端判据**全部跑在合成小配置上**（4 ds / 4 baseline），真实规模与多节点部署
 > 都还没有验过——这是 V6 的起点，不是遗留问题，是下一段路。
@@ -316,7 +316,7 @@ mpifxcorr 走"用网络换单节点资源"，fxcorr 走"用本地资源换网络
 接口**——`data-spec` / `usage.md` 的规范条文，以及三工具里承载这些语义的参数与子命令。
 不实现调度、不实现任务表、不实现清理器。
 
-### S4.1 merge 的实验级语义（形态 A，2026-09-27 定）
+### S4.1 merge 的实验级语义（形态 A，2026-09-27 定，2026-09-28 实施细则定稿）
 
 **现状在多节点下会静默错数据。** V5 实现的是 `fxcorr-x merge <batch_id>` **直接追加写
 SWIN**，`run_batch.sh` 的 `FXCORR_X_SHARD=1` 是"逐组跑 + 立刻 merge"。单节点串行 batch 时
@@ -358,24 +358,77 @@ batch 级（在计算节点本地，跟随 batch 完成）
 84,375 个 batch × 4 组 = **337,500 个 `.part`**；batch 级归并把文件数收敛 4 倍，且 batch 内的
 4 路归并**本来就必须做**——放在 batch 完成时做，失败可只重跑该 batch。
 
-**⚠ 另一处并发缺口（2026-09-27 发现，S4.1 的待确认项）**：实验级共享**文本**文件
-`PCAL_*` / `SWITCHEDPOWER_*` 同样会被多节点并行写——它们用 `ios::app` 追加、文件名含**实验
-起点**（`visibility.cpp:122` 的 `config->getStartMJD/getStartSeconds`，**不是 batch 起点**），
-所以同一实验的全部 batch 写同一批文件。`O_APPEND` 对 `PIPE_BUF`（4096 B）以内的写是原子的，
-短行不会截断交错；但**行序不再等于时间序**，且每次打开都会重写一遍注释头（串行下同样如此）。
-**形态 A 只解决 SWIN，不解决这两个文件**——实施前必须核实 difx2fits 对行序与重复注释头的
-容忍度（`data-spec` 第 12 节有表）。
+**实施细则（2026-09-28 定稿并实施）**——四条：
+
+1. **实验的认定与 config 来源**：实验级没有 `batch_id`，读不到 `batches/<batch_id>.json`。
+   实现扫 `batches/*.json`、**把已有 `merged.part` 的那些 batch 当候选**，用候选的
+   `config_file` 构造 `Configuration`（与另外两种模式同一个加载路径）。**候选之间
+   `config_file` 不一致即报错**——那说明这个 workdir 混了多个实验，选任何一个都会把 SWIN
+   写错；候选为空（还没有任何 batch 做过 batch 级 merge）同样报错退出。
+2. **缺 batch 的判据来源：`batches/*.json`，不是 `meta/batches.index`。** 应有集 =
+   `config_file` 与本次选定者相同的**全部** batch——`batches/*.json` 是**切批规划**的产物
+   （`data-spec` 第 6 节：由单点分配），它就是"这个实验规划了哪些 batch"的权威清单。
+   **`batches.index` 是 append-only 的"完成流水"（batch `done` 时才追加），拿它当应有集会让
+   `failed` 与未跑的 batch 静默消失、SWIN 缺段且无任何报错**——这正是本文档 S4.2 原措辞的
+   漏洞，随之订正。`status` 字段不参与判据（`done`/`failed`/`running` 都仍是"规划过的
+   batch"），但会随缺失清单逐条列出，一眼看出是没跑完还是跑挂了。
+3. **定序与流式写出**：按各 `merged.part` 的**首记录时间**定序，**不是** `batch_id` 数值序；
+   两者不一致时报错而非静默选取。写出**逐个 batch 流式进行**（读一个、批内按整数纳秒排序、
+   追加写出、释放），**不做全局排序**——各 batch 的时间范围互不重叠，把 batch 顺序定对就足以
+   保证全局时间单调；而全量读入不现实（24 h 观测的 SWIN 约 11.8 GB）。**内存峰值 = 单个
+   batch 的记录量**。
+4. **根一致性检查：对每个候选 batch 逐个调 `FxcorrPath::checkRoots`，只比 `VIS` 一个根**
+   （实验级唯一用到的根）。范围取**候选集而非应有集**——缺 `merged.part` 的 batch 不参与
+   写出，检查它没有意义（它本就会触发第 2 条的缺失报错）。这一条与 `run_batch.sh` 的
+   `fxcorr_write_roots` 不重复：后者在**写记录时**保证同实验一致，前者拦的是**记录存在、而
+   本次运行解析出的根与记录不符**——换了 `FXCORR_VIS_ROOT`、或工作区被两套编排写过。
+   `checkRoots` 一致时静默、不一致时打印双方的值并返回 false，所以逐候选检查**没有输出
+   代价**——这是选"逐个查"而不是"只查第一个"的理由。
+
+`FXCORR_X_SWIN_CONFLICT` 的移交有个**容易漏的细节**：实验级要查的是**本次将写出的全部 batch
+的时间范围**，不是单个 batch 的——否则重跑一次实验级 merge 会追加一整份重复记录。
+
+细则同步写在 `data-spec` 5.9 末条（规范）与 `usage.md` 的 fxcorr-x 节（接口）。
+
+**⚠ 另一处并发缺口（2026-09-27 发现，2026-09-28 核实完毕——下面的表格取代原描述）**：实验级
+共享**文本**文件 `PCAL_*` / `SWITCHEDPOWER_*` 同样会被多节点并行写。核实结果与本文档原描述
+**不同**（原文写"两者都是 `ios::app` 追加（`visibility.cpp:122`）"——那指向 x 侧那段，而
+**x 侧根本不写这两个文件**）：
+
+| 文件 | 真正的写出者 | 打开模式 | 文件名的时间 | 并发后果 |
+|---|---|---|---|---|
+| `PCAL_*` | **f 侧** `PcalTextWriter`（`applications/fxcorr-f/src/pcaltextwriter.cpp:248`） | **`ios::trunc` 整文件重写**（read-modify-write；幂等重写是 P0 为单机串行设计的策略） | 实验起点 | **竞态丢行**——不是行序问题 |
+| `SWITCHEDPOWER_*` | **f 侧** `SwitchedPower`（`libraries/fxcorrcommon/src/switchedpower.cpp:74`） | `ios::app` 追加 | 实验起点 + **ds 序号**（文件名尾） | 行序可能不等于时间序，**不丢** |
+
+x 侧 `visibility.cpp` 那两处 PCAL 代码（`:121` 建文件、`:1072` 写行）**实际不产出任何行**：写行那处
+由 `if(nonzero)` 门控，而 `nonzero` 来自 `results` 的 pcal 段——**x 侧从不填充那一段**（pcal 是
+f 侧 Mode 算的，x 只做互相关）。这与 `test/pcal/README.md` 的"PCAL 与 mpifxcorr 基准逐字节
+一致"互洽：mpifxcorr 的 PCAL 由 manager 写一次，若 x 也写就会是两份、对拍必挂。
+
+**所以 PCAL 的并发缺陷比原描述严重**：`PcalTextWriter::flush` 是"读入整个文件 → 替换本
+`(ds, intTime)` 的行 → `ios::trunc` 重写"，两个进程并发时**后写者会丢掉先写者新增的行**——
+这是**数据丢失**，不是原文说的"行序不对、短行不会截断"（那套 `O_APPEND`/`PIPE_BUF` 分析对
+`ios::app` 的 `SWITCHEDPOWER_*` 成立，对 `PCAL_*` 不成立）。而 **difx2fits 确实读 PCAL**
+（`fitsPH.c` 出 FITS 的 PC 表），丢行会影响产物。
+
+**这条不阻塞 S4.1**：形态 A 只改 SWIN 的写出路径，而 SWIN（x 写）与这两个文件（f 写）由不同
+程序产出、互不干涉——**形态 A 既不引入也不解决它**。它需要独立处置（给 `PCAL_*` 的
+read-modify-write 加锁，或改成"只追加本 ds 的行"从而退化为 `SWITCHEDPOWER_*` 那种形态），
+是单独一条的工作量，登记在 S5。
 
 ### S4.2 `vis-parts/` 的清理时机与分片迟到策略
 
 **清理时机**（规范，编排层实现）：实验级 merge 成功写出 SWIN 后，该实验的
-`vis-parts/<batch_id>/` 即可删——**重跑代价低**（重跑该 batch 的 x 分片即可，不需要重生成
-raw）。`data-spec` 第 12 节的生命周期表补这一行。
+`vis-parts/<batch_id>/` **整目录**（含 `ds*.part` 与 `merged.part`）即可删——**重跑代价低**
+（重跑该 batch 的 x 分片 + batch 级 merge 即可，**不需要重生成 raw**）。`data-spec` 5.9 末条
+与第 12 节的生命周期表已写这一行。
 
 **分片迟到策略**（规范）：形态 A 是**全量等待**——实验级 merge 等全部 batch 的
-`merged.part` 到齐。缺失的判据来源是 `meta/batches.index`（现状：batch `done` 时追加一行，
-在共享盘上）；缺 batch 时**默认报错退出、不写**，`FXCORR_X_MERGE_FORCE=1` 语义沿用（强制
-写出已到齐部分 + stderr 列明缺了哪些 batch）。
+`merged.part` 到齐。**缺失的判据来源是 `batches/*.json`**（2026-09-28 订正：此处原写
+`meta/batches.index`，那是 append-only 的"完成流水"、只在 batch `done` 时追加，用它当应有集
+会让 `failed` 与未跑的 batch **静默消失**、SWIN 缺段而无任何报错；`batches/*.json` 才是切批
+规划的权威清单——理由见 S4.1 实施细则第 2 条）；缺 batch 时**默认报错退出、不写**，
+`FXCORR_X_MERGE_FORCE=1` 语义沿用（强制写出已到齐部分 + stderr 列明缺了哪些 batch）。
 
 **增量合并明确不做**（2026-09-27 定）：滚动窗口合并（按积分窗口边跑边出）需要定义"分片
 迟到时等 / 超时跳过 / 告警"，这套语义没有真实需求驱动时引入只会变成"看起来在跑、实际卡住"
@@ -469,9 +522,12 @@ IB。跨节点流量只有两处：**输入数据进节点**（真实观测：ra
 | S2.5 | **顺带修掉两处上游缺陷**（阻塞过验证）：`model.cpp` 的 `clock` 分配器不配对 → 程序退出时 `double free`；`configure.ac` 的 `--disable-ipp` 不生效 → `build.md` 要求的 `--noipp` 形同虚设，IPP 构建下仿真延迟**静默错** | ✅ 见 `libraries/CLAUDE.md` |
 | S3 | 目标规模全链跑通（f → x → merge → difx2fits），吞吐/资源/磁盘增长落档 | ✅ 2026-09-28（4 站 × 8 ds × **20 个连续 batch**，轻量模式造数）：造数 **8.6 s / 79 GB**、流水线 **4945 s（235 s/batch）**、FITS 14.5 MB；数字落 `data-volume.md` **§3.1 / §3.2**。**顺带撞出并修掉两个静默缺陷**（见下「进行中的发现」1 与 3） |
 | S3 | mpifxcorr 对照：同数据同节点的 wall time、跨节点流量、单节点磁盘峰值 | ✅ 2026-09-28（单机对照，batch 20）：mpifxcorr NP=34 **120.6 s** / CPU **4276 s**，fxcorr（f 并行 7.3 s + x 73.4 s）**80.7 s** / CPU **210 s**——wall **0.67×**、CPU **1/20**。**对照必须拿并行 f 比**：`run_batch.sh` 逐站串行（235 s/batch）比 mpifxcorr 还慢，那是调度方式不是架构限制。跨节点流量未测（需真跨节点部署） |
-| S4.1 | 实验级 merge 后 SWIN 与"单节点串行 batch 逐 batch merge"的结果**逐记录相等** | 待做 |
-| S4.1 | 故意让 batch 乱序完成（先完成时间靠后的），实验级 merge 仍产出时间单调的 SWIN | 待做 |
-| S4.2 | 缺 batch 时实验级 merge 报错不写；`FXCORR_X_MERGE_FORCE=1` 强制写出并列明 | 待做 |
+| S4.1 | 实验级 merge 后 SWIN 与"不分片逐 batch 顺序跑"的结果**逐记录相等** | ✅ 2026-09-28（测试机 `v6mg`：4 ds / 1 组 / 3 batch）：**逐字节相同**（`7fbf2847…`）。基准 = 不分片模式顺序跑 3 个 batch 的 SWIN |
+| S4.1 | 故意让 batch 乱序完成（先完成时间靠后的），实验级 merge 仍产出时间单调的 SWIN | ✅ 2026-09-28：batch 完成顺序 **3,1,2**，实验级 merge 按首记录时间恢复正确序、产物与基准**逐字节相同**。**旧行为**（单级 merge 直写 SWIN）用同样的乱序跑出来是 `09349c2b…`——**不同**，这就是不做形态 A 会静默错数据的直接证据 |
+| S4.2 | 缺 batch 时实验级 merge 报错不写；`FXCORR_X_MERGE_FORCE=1` 强制写出并列明 | ✅ 2026-09-28：缺 1 个 batch → 报错 exit=1、**0 个文件落盘**；`FORCE=1` → 写出 2/3 的 32 条记录，stderr 列明缺哪个（含 `status`）。**判据来源已订正为 `batches/*.json`** 而非 `meta/batches.index` |
+| S4.1 | 根不一致时报错（对每个**候选** batch 逐个比 `VIS` 根） | ✅ 2026-09-28：改坏 `meta/roots/00000003.json` 的 `vis` 值 → 报 `FXCORR_VIS_ROOT disagrees with …`、exit=1 |
+| S4.1 | workdir 混多个实验时报错（候选 batch 的 `config_file` 不一致） | ✅ 2026-09-28：造一个 `config_file` 不同的 batch 并给它 `merged.part` → 报 "candidate batches do not share one configuration"、exit=1 |
+| S4.1 | 重跑实验级 merge 被互斥检查拦截 | ✅ 2026-09-28：报 "already holds 32 record(s) inside the time range this run would write"、exit=1——查的是**本次写出的全部 batch 的总时间范围** |
 | S6 | `gaps/` 七个脚本 + 单测（71 + 48）全绿 | 回归不变 |
 
 **贯穿性回归**：V1–V5 的全部判据（`cmp_swin.py` 对拍、`test/multids/` 11 条、P5 的
@@ -486,6 +542,7 @@ IB。跨节点流量只有两处：**输入数据进节点**（真实观测：ra
 | S5.1 | **病态数据处方文件**（B1） | S2 完成后跟进（共用接口） | `v5-plan.md` P6 |
 | ~~S5.2~~ | ~~**按频段组分片生成 common**（B5）~~ **已被 S2.5（方案 E）取代**——E 之后 common 不再落盘，分片生成的前提消失 | — | `data-volume` §6 杠杆 6 |
 | S5.3 | 真实数据四项（A 组）：FILL_PATTERN / invalid 位的真实样本、filler 修正量形态、病态数据的对拍基准、真实 `.calc` 的 `IM`/`FLAG FILENAME` 形态 | 拿到第二份真实观测（带形态清单去要，`v4-plan.md` 末节） | `v5-plan.md` 表第 1/5 条、P5 遗留第 2 条 |
+| S5.4 | **`PCAL_*` 的并发写**：f 侧是 `ios::trunc` 整文件重写（read-modify-write），多节点并行批时**后写者丢掉先写者新增的行**；difx2fits 读它（`fitsPH.c`）故丢行影响产物。`SWITCHEDPOWER_*` 是追加、只乱序不丢，可不动 | 多节点部署成真（S4 落地后）；处置 = 加锁，或把它退化成"只追加本 ds 的行"（与 `SWITCHEDPOWER_*` 同形态） | `v6-plan.md` S4.1 的待确认项核实（2026-09-28） |
 
 **S5.2 的形态修正**（2026-09-27，**已整体被 S2.5 取代**，以下保留作决策记录）：原定"按 band 分片生成 common"，代价栏写"改 D15 落盘布局
 + **seed 派生按频点可寻址**"。V5 建成的 `ds_group` 正是它需要的切割线，所以形态改为**按
@@ -510,14 +567,15 @@ IB。跨节点流量只有两处：**输入数据进节点**（真实观测：ra
 
 ## 与其他文档的关系
 
-**规范性内容已先同步、统一标 `⚠ 未实施`**（2026-09-27）——这样读 `data-spec` / `usage.md` 的人
-不会把计划当现状；**实施时只需去掉标记、补实测数字**。
+**规范性内容先同步、实施后去标记**（2026-09-27 定）——这样读 `data-spec` / `usage.md` 的人
+不会把计划当现状。**S4.1 的两级 merge 已于 2026-09-28 实施并去除标记**；其余条目（S4.2 的清理
+时机、S4.3 SQLite、S5、S6）**仍标 `⚠`**。
 
 | 文档 | 已同步（标 ⚠） | 待实施时做 |
 |---|---|---|
 | `data-volume.md` | §4 拆 4.1/4.2（1 小时口径）、**§5.1 两种实现对比**、§7.1 内存规格、§7.5 `vis-parts/` 全局可见理由、§8 第 4 项部分结案、§9 引用；§4 已标 ⚠"全部为推算，S0 后换实测" | **S0 后把 §3/§4 的推算值换成实测值**；§8 各项按 S1/S3 结案 |
-| `data-spec.md` | 5.9 两级 merge、第 6 节 `<exp>-merge`、第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表与**"同实验 batch 串行"改写 + `PCAL_*`/`SWITCHEDPOWER_*` 并发语义待确认** | 5.7 明确 sqlite 写入方（S4.3）；实施后去掉 ⚠ |
-| `usage.md` | fxcorr-x 节「⚠ V6：两级 `merge`」小节 + 命令行形态 + `FXCORR_X_SWIN_CONFLICT` 作用域 + 尾部流程图注 | 实施后去掉 ⚠ |
+| `data-spec.md` | 5.9 两级 merge（**2026-09-28 定稿并实施**：实验的认定、缺 batch 判据、定序与流式写出、根一致性检查）、第 6 节 `<exp>-merge`、第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表与**"同实验 batch 串行"改写 + `PCAL_*`/`SWITCHEDPOWER_*` 并发语义已核实**（2026-09-28；**结论与原文不同**，见 S4.1 末表；处置登记在 S5.4） | 5.7 明确 sqlite 写入方（S4.3） |
+| `usage.md` | fxcorr-x 节「两级 `merge`」小节（**2026-09-28 定稿并实施**，四条接口约定）+ 命令行形态 + `FXCORR_X_SWIN_CONFLICT` / `FXCORR_X_MERGE_FORCE` 作用域 + 尾部流程图注 | — |
 | `applications/fxcorr-x/CLAUDE.md` | 调用方式与「分片实现要点」末条的 V6 注 | 实现 `--experiment` 后更新 |
 | `fxcorr/CLAUDE.md` | 文档状态表加 `v6-plan.md`、`v5-plan.md` 改"已收尾"、数据流与目录条目 | 脚本表 `run_batch.sh` 的分片路径改为"逐组 + batch 级 merge" |
 | `v5-plan.md` | 末节移交去向 + **"十六条"订正为 3 条**；头部改"已收尾" | — |

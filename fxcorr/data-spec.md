@@ -1,7 +1,7 @@
 # fxcorr 数据规范文档（完整版）
 
 **版本**：1.2
-**最后更新**：2026-09-27（**V6 S2.5 已实施：D15 整体取消**——`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根、`fxcorr-sim common` 子命令全部删除；公共信号改为每个 `station` 任务在本地合成（算全部、只留自己那段），公共参数只剩 `seed`，随 `batch.json` 走；5.8 节重写为"参数"，第 2/3/4/9/10/12 节的 D15 相关行同步。判据是 raw 与旧路径**逐字节相同**。**注意：以下"未实施"标记指 V6 的其余各项**：5.9 补**两级 merge（形态 A）**——batch 级只写 `merged.part`、实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；第 6 节任务标识加 `<exp>-merge`；第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表同步；**第 12 节的"同实验 batch 串行约定"按多节点部署改写**——SWIN 由形态 A 解决，`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义列为待确认（见该节表格）。路线与验收见 `v6-plan.md`。**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
+**最后更新**：2026-09-28（**V6 S4.1 已实施：两级 `merge` 落地**——batch 级 `merge <batch>` 只写 `vis-parts/<batch_id>/merged.part`、**新增**实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；5.9 末条的四条定则（实验的认定、缺 batch 判据取 `batches/*.json`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）与第 4/6/12 节的相应行同步去 ⚠。**`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义已核实**（2026-09-28，结论与原文不同——见第 12 节表格）。此前 2026-09-27（**V6 S2.5 已实施：D15 整体取消**——`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根、`fxcorr-sim common` 子命令全部删除；公共信号改为每个 `station` 任务在本地合成（算全部、只留自己那段），公共参数只剩 `seed`，随 `batch.json` 走；5.8 节重写为"参数"，第 2/3/4/9/10/12 节的 D15 相关行同步。判据是 raw 与旧路径**逐字节相同**。**注意：以下"未实施"标记指 V6 的其余各项**：5.9 补**两级 merge（形态 A）**——batch 级只写 `merged.part`、实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；第 6 节任务标识加 `<exp>-merge`；第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表同步；**第 12 节的"同实验 batch 串行约定"按多节点部署改写**——SWIN 由形态 A 解决，`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义列为待确认（见该节表格）。路线与验收见 `v6-plan.md`。**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
 **上一版更新**：2026-09-21（**第 11 节的体积公式移入 `data-volume.md` §1.3**，本节只留速查；V5 P6 讨论：第 12 节补六条——**时间层级表**（FFT 块 / Core 短积分 /
 Manager 最终积分 ↔ fxcorr 的 `.sp` 块 / subint / intTime）、batch 时长与起点约束（`intTime`
 整数倍、下限随配置而变而非固定秒数、**起点须落在积分边界**——并记下当前三层校验都只覆盖
@@ -87,7 +87,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 | `meta/` | `$FXCORR_WORKDIR/meta` | ❌ | 同上；索引与根记录必须全局一致可见 |
 | `raw/` | `$FXCORR_WORKDIR/raw` | ✅ `FXCORR_RAW_ROOT` | TB 级原始基带，可指向各记录节点的本地盘 |
 | `fengine/` | `$FXCORR_WORKDIR/fengine` | ✅ `FXCORR_FENGINE_ROOT` | 各站 f 输出，可指向计算节点本地盘（目录逻辑集中、物理分布） |
-| `vis/` | `$FXCORR_WORKDIR/vis` | ✅ `FXCORR_VIS_ROOT` | SWIN 跨 batch 追加、difx2fits 直读（**追加保序前提**：现状是"同实验 batch 串行"；**V6 形态 A 起改为实验级 `merge` 单点写入**，⚠ 未实施——见第 12 节与 5.9 末条） |
+| `vis/` | `$FXCORR_WORKDIR/vis` | ✅ `FXCORR_VIS_ROOT` | SWIN 跨 batch 追加、difx2fits 直读（**追加保序前提**：**实验级 `merge` 单点写入**——2026-09-28 起实施，取代旧的"同实验 batch 串行"约定；见第 12 节与 5.9 末条） |
 | `vis-parts/` | `$FXCORR_WORKDIR/vis-parts` | ❌ | x 分片的局部记录（D16，见 5.9）；**必须与 `vis/` 分离**——difx2fits 只 glob `<outputFile>/DIFX*`，放别处即隔离；量极小，恒在 workdir 下（2026-09-26） |
 | `product/` | `$FXCORR_WORKDIR/product` | ✅ `FXCORR_PRODUCT_ROOT` | 可本地生成，再由编排层迁移到全局 |
 
@@ -125,7 +125,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 | **fxcorr-sim station** | 数据生成 | D3（.input）、D9（batch.json，取 seed） | D7（raw/ 单站 VDIF） | 每站一任务，多节点并行；公共信号在任务内本地合成，不读也不写任何公共文件（5.8 节） |
 | **fxcorr-f** | 核心（Station-based） | D3（.input）、D4（.calc）、D6（.im）、D7（raw）、D9（batch.json，只读） | D8（频域谱+自相关+pcal） | 按台站、按批量处理 |
 | **fxcorr-x** | 核心（Baseline-based） | D3（.input）、D4（.calc）、D6（.im）、D8（fengine）、D9（batch.json，只读） | D10（SWIN 可见度）；相位阵配置时改出 D14（beam.bin，无 SWIN） | 按批量处理多台站数据；UVW 由模型求值。**分片模式下改出 D16**（不再直接写 SWIN，见 5.9） |
-| **fxcorr-x `merge`** | 归并（子命令，**2026-09-27 已实施**） | D16（vis-parts 局部记录） | D10（SWIN 可见度） | 按整数纳秒时间戳归并；SWIN 的**唯一写入者**（`data-volume.md` §7.5）。与分片任务**同二进制、不同调用**，复用 fxcorr-x 已有的 SWIN 写入路径。**⚠ V6 起改为两级**（batch 级只写 `merged.part`、**实验级**才写 SWIN），见 5.9 末条与 `v6-plan.md` S4.1——现状是 batch 级直接写 SWIN |
+| **fxcorr-x `merge`** | 归并（子命令，**2026-09-27 实施、2026-09-28 改为两级**） | D16（vis-parts 局部记录） | **batch 级** = D16 的 `merged.part`；**实验级** = D10（SWIN 可见度） | 按整数纳秒时间戳归并。**两级**：`merge <batch>` 读 `ds*.part`、只写 `vis-parts/<batch>/merged.part`；`merge --experiment` 读全部 batch 的 `merged.part`、按数据时间序写出 SWIN，**它才是 SWIN 的唯一写入者**（`data-volume.md` §7.5）。与分片任务**同二进制、不同调用**，复用 fxcorr-x 已有的 SWIN 写入路径。见 5.9 末条与 `v6-plan.md` S4.1 |
 | **difx2fits** | 后处理1 | D3、D4、D6、D10、D5（可选） | D11（.FITS） | 生成 FITS-IDI，SWIN 零改造直读 |
 | **difx2mark4** | 后处理2 | D3、D4、D6、D10、D1 等 | D12（Mark4） | 生成 Mark4 格式 |
 
@@ -234,7 +234,7 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
 > 实物、逐文件说明与 **SWIN 74 字节记录头**见 `fxcorr/workdir-template/vis/README.md`。
 
-- 编号：D10；生产者：`fxcorr-x`（不分片）或**实验级 `merge`**（分片，⚠ V6 形态 A）；
+- 编号：D10；生产者：`fxcorr-x`（不分片）或**实验级 `merge --experiment`**（分片；2026-09-28 起实施）；
   消费者：`difx2fits` / `difx2mark4`（零改造直读，这是整个设计的前提）；
 - 目录名 = `.input` 的 `OUTPUT FILENAME`（相对时拼 `FXCORR_VIS_ROOT`）；
   SWIN 文件名用**实验级** MJD + 开始秒，**不含 batch_id**——同一实验的所有 batch
@@ -275,7 +275,7 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
 - 内容：`batches.index`（D13，batch 状态流水，append-only，由 `fxcorr/run_batch.sh` 追加）、`roots/<batch_id>.json`（该 batch 开跑时的根快照）、`difxmsg/`（container 模式的 DifxMessage 落盘，**当前暂不启用**）；
 - **无独立根**，恒在 `$FXCORR_WORKDIR/meta`，**必须全局一致可见**；
-- 合法状态只有 `running` / `done` / `failed`；**它是"哪些 batch 已完成"的判据来源**（实验级 `merge` 靠它核对，见 5.9）；
+- 合法状态只有 `running` / `done` / `failed`（`batches/<batch_id>.json` 的 `status` 字段是同一信息的结构化版本）；**它是"哪些 batch 已完成"的流水记录**。**注意它不能当"这个实验应该有哪些 batch"的判据来源**——它是 append-only 的**完成**流水、只在 `done` 时追加一行，拿它当应有集会让 `failed` 与尚未调度的 batch **静默消失**。实验级 `merge` 的应有集判据是 `batches/*.json` 本身（2026-09-28 订正，见 5.9 末条第 2 条）；
 - **根记录与一致性检查**：脚本开跑前写 `meta/roots/<batch_id>.json`，三个程序启动时与它比对**自己真的会用到**的根、不一致即报错退出；脚本侧另有一道实验级检查（`vis`/`product` 跨 batch 追加，与同实验已有 batch 记录不一致即报错）。规则细节见 5.2.1；
 - `Alert` 是**另一条独立通道**：fxcorrcommon 里上游代码直接调 `cinfo`/`cverbose`/`cdebug`，经 `difxMessageSendDifxAlert` 落地——该函数在 `difxMessagePort < 0` 时**退化为打印** stdout/stderr，而 f/x 都不调用 `difxMessageInit()`，所以这些消息永远不会组播。它由 `FXCORR_LOGLEVEL` 控制详略。
 
@@ -326,24 +326,37 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 - **记录内容与格式（2026-09-27 定稿）**：`.part` **就是 SWIN 记录流原样**——74 字节记录头（`visibility.cpp` 的 `appendSWINHeaderBuffered`：sync word / 版本 / baseline 号 / MJD / 秒（double）/ config 索引 / source 索引 / freq 索引 / 极化对两字节 / pulsar bin / weight（double）/ UVW 三分量）+ `nchan/chansToAverage` 个 `cf32` 复频谱，与 D10 逐字节同构。这样 `merge` 只做搬运、不需要理解语义。
 - **记录长度不在头里**：由 `freqindex` 查 `.input` 的 FREQ 表得到（`nchan / channelsToAverage × 8` 字节），所以 `merge` 必须读 `.input`——它本来就要读（输出文件名、根解析同源）。**分片模式下每条记录必属单相位中心、无 pulsar binning**（程序对这二者直接报错退出），所以 `flushBuffersToDisk` 的多文件分支不会出现，一个分片就是一个文件。
 - **归并 key**：用**整数纳秒时间戳**（由 scan 起点与 `offsetns` 推算），不是浮点 `sec`——浮点相等比较不可靠。
-- **生命周期**：实验的合并写出 SWIN 后即删（编排层清理，同 `fengine/` 第 12 节语义）；重跑分片时覆盖写自己的 `.part`。
-- **等待策略（2026-09-27 定，未实施）**：**全量**——实验级 merge 等全部 batch 的 `merged.part` 到齐后一次合并；缺 batch 时**默认报错退出、不写**，`FXCORR_X_MERGE_FORCE=1` 的语义沿用（强制写出已到齐的部分 + stderr 列明缺了哪些）。**增量合并明确不做**：滚动窗口必须先定义"分片迟到时等 / 超时跳过 / 告警"，没有真实需求驱动时引入只会变成"看起来在跑、实际卡住"；将来首个结果的可见延迟成为真实痛点时再立条目（`v6-plan.md` S4.2）。
-- **缺片处理（硬约束 + 逃生口）**：`merge` 启动时先核对本 batch 的 ds 组是否集齐，**缺则报错退出、不写任何东西**（stderr 列出缺哪几组）。设 `FXCORR_X_MERGE_FORCE=1` 可强制写出已到齐的部分——缺失组对应的频段在该 batch 的时间段内**没有记录**，difx2fits 不会因此报错，只是静默缺段（只在 `merge` 的 stderr 日志里留痕）。默认严格是刻意的：分片缺失通常意味着任务失败或未调度，静默缺段比报错危险得多。
+- **生命周期**：`vis-parts/<batch_id>/` **整目录**（`ds*.part` 与 `merged.part`）在该实验的**实验级 merge 写出 SWIN 之后**即删（编排层清理，同 `fengine/` 第 12 节语义）——重跑代价低（重跑该 batch 的分片与 batch 级 merge 即可，**不需要重生成 raw**）。重跑分片时覆盖写自己的 `.part`。
+- **等待策略（2026-09-27 定，2026-09-28 定稿——判据来源见上"两级 merge"第 2 条）**：**全量**——实验级 merge 等全部 batch 的 `merged.part` 到齐后一次合并；缺 batch 时**默认报错退出、不写**，`FXCORR_X_MERGE_FORCE=1` 的语义沿用（强制写出已到齐的部分 + stderr 列明缺了哪些）。**增量合并明确不做**：滚动窗口必须先定义"分片迟到时等 / 超时跳过 / 告警"，没有真实需求驱动时引入只会变成"看起来在跑、实际卡住"；将来首个结果的可见延迟成为真实痛点时再立条目（`v6-plan.md` S4.2）。
+- **缺片处理（硬约束 + 逃生口）**：**batch 级** `merge` 启动时先核对本 batch 的 ds 组是否集齐，**缺则报错退出、不写任何东西**（stderr 列出缺哪几组）。设 `FXCORR_X_MERGE_FORCE=1` 可强制写出已到齐的部分——缺失组对应的频段在该 batch 的时间段内**没有记录**，difx2fits 不会因此报错，只是静默缺段（只在 `merge` 的 stderr 日志里留痕）。默认严格是刻意的：分片缺失通常意味着任务失败或未调度，静默缺段比报错危险得多。
 - **与"全 band 模式"互斥（硬约束，2026-09-27）**：同一 batch 的 fxcorr-x 只能选一种模式——**不分片**（一次处理全部 ds，直写 SWIN）或**分片**（按 `ds_group` 多次写 `.part`，再由 `merge` 写 SWIN）。**两者不能对同一 batch 混跑**：分片任务不写 SWIN，而 `merge` 会为该 batch 的时间范围追加记录，混跑会产生重复记录、破坏 SWIN 的时间单调（§7.5）。**f 侧不受影响**——f 天然是每 ds 一个任务，两种模式下产出**完全相同**的 `fengine/`；选哪种只决定 x 的一次跑还是多次跑。
-- **互斥已落成程序内检查**（2026-09-27）：三种模式启动时都读目标 SWIN 的**记录头**（数据用 `seekg` 跳过，GB 级文件也是秒级），若本 batch 的时间范围内已有记录则报错退出，提示"这个 batch 已经被全量或 merge 写过"；`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续。分片任务自身不写 SWIN，所以**重跑分片不会被拦**。
+- **互斥已落成程序内检查**（2026-09-27，作用域 2026-09-28 订正）：**全量模式与分片模式**启动时都读目标 SWIN 的**记录头**（数据用 `seekg` 跳过，GB 级文件也是秒级），若本 batch 的时间范围内已有记录则报错退出，提示"这个 batch 已经被全量或 merge 写过"；`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续。分片任务自身不写 SWIN，所以**重跑分片不会被拦**。**2026-09-28 起这条检查移交实验级**：实验级 `merge --experiment` 是 SWIN 的**唯一**写入者，检查由它做、作用范围从"本 batch"扩为"**本次将写出的全部 batch**"；batch 级 `merge` 与分片任务都不写 SWIN，**两者都不查**。
 - **`.part` 的重复运行是覆盖写**：同一次运行里 `writeSWIN` 每个积分周期写一次（追加），但**一次运行的第一次写是截断**——重跑分片得到的是新内容，不会把上一次的翻倍。
-- **两级 merge（2026-09-27 定，⚠ 未实施——V6 的 S4.1，见 `v6-plan.md`）**：多节点并行时"每个 batch 跑完立刻 merge 写 SWIN"会让**时间回退**——节点 B 先完成先写、节点 A 后写，而 difx2fits 对回退记录**静默丢弃**（见上"为什么需要这一步"）。所以 SWIN 的写入要收敛到**实验级一次**：
+- **两级 merge（2026-09-27 定，2026-09-28 定稿并实施——V6 的 S4.1，见 `v6-plan.md`）**：多节点并行时"每个 batch 跑完立刻 merge 写 SWIN"会让**时间回退**——节点 B 先完成先写、节点 A 后写，而 difx2fits 对回退记录**静默丢弃**（见上"为什么需要这一步"）。所以 SWIN 的写入要收敛到**实验级一次**：
 
   | 级 | 调用 | 读 | 写 |
   |---|---|---|---|
   | **batch 级** | `fxcorr-x merge <batch_id> [workdir]` | `vis-parts/<batch_id>/ds*.part` | **`vis-parts/<batch_id>/merged.part`**（不碰 SWIN） |
   | **实验级** | `fxcorr-x merge --experiment [workdir]` | 全部 batch 的 `merged.part` | **D10 SWIN——它才是唯一写入者** |
 
-  实验级按各 `merged.part` 的**首记录时间**定序，**不是** `batch_id` 数值序（第 6 节只保证编号由单点分配，未规定"编号 = 时间序"）；两者不一致时报错而非静默选取。`FXCORR_X_SWIN_CONFLICT`（上面那条互斥检查）随之**移交实验级**。`run_batch.sh` 的分片路径改为"逐组 + batch 级 merge"，**实验级 merge 不进 `run_batch.sh`**——它与 `wrap_difx2fits.sh` 同为实验级操作，由编排层在实验全部 batch `done` 后调一次。
+  **实验级的四条定则**（在一次运行内按此顺序执行）：
+
+  1. **实验的认定与 config 来源**：实验级没有 `batch_id`，读不到 `batches/<batch_id>.json`。它扫 `batches/*.json`，**把已有 `merged.part` 的那些 batch 当候选**，用候选的 `config_file` 字段构造 `Configuration`（与另外两种模式同一个加载路径）。**候选之间 `config_file` 不一致即报错**——那说明这个 workdir 混了多个实验，选任何一个都会把 SWIN 写错。候选为空（还没有任何 batch 做过 batch 级 merge）同样报错退出。
+  2. **应有集与缺 batch**：`batches/*.json` 是**切批规划**的产物（第 6 节：由单点分配），**它就是"这个实验规划了哪些 batch"的权威清单**——应有集 = 其中 `config_file` 与本次选定的那个**相同**的全部 batch。缺 `merged.part` 的即缺失，**默认报错退出、不写任何东西**；`FXCORR_X_MERGE_FORCE=1` 强制写出已到齐的部分并在 stderr 列明缺了哪些。**`status` 字段不参与判据**（`done`/`failed`/`running` 都仍是"规划过的 batch"），但会随缺失清单逐条列出——一眼能看出是没跑完还是跑挂了。
+
+     > **此处按 `v6-plan.md` S4.2 原措辞（判据来源 `meta/batches.index`）执行是危险的**：`batches.index` 是 append-only 的"**完成**流水"（第 5.7 节，`run_batch.sh` 在 `done` 时追加），拿它当应有集会让 `failed` 与未跑的 batch **静默消失**、SWIN 缺段且无任何报错。S4.2 的措辞随之订正为"判据来源 `batches/*.json`"。
+  3. **定序与写出**：按各 `merged.part` 的**首记录时间**定序，**不是** `batch_id` 数值序（第 6 节只保证编号由单点分配、未规定"编号 = 时间序"）；两者不一致时报错而非静默选取。写出**逐个 batch 流式进行**——读一个 `merged.part`、批内按整数纳秒排序、追加写出、释放，**不做全局排序**。各 batch 的时间范围互不重叠，所以把 batch 顺序定对就足以保证全局时间单调；而全量读入不现实（24 h 观测的 SWIN 约 11.8 GB，见 `data-volume.md` §4.2）。**内存峰值 = 单个 batch 的记录量**。
+  4. **根一致性检查**：实验级对**每个候选 batch** 逐个调 `FxcorrPath::checkRoots`，且只比 `VIS` 这一个根（实验级唯一用到的根——它不读 fengine、也不读 raw）。范围取**候选集而非应有集**：缺 `merged.part` 的 batch 不参与写出，检查它没有意义（它本就会触发上一条的缺失报错）。这一条看似与 `run_batch.sh` 的 `fxcorr_write_roots` 重复（后者写 `meta/roots/<batch_id>.json` 时已保证同实验的 `vis`/`product` 一致），实际拦的是另一类：**记录存在、而本次运行解析出的根与记录不符**——换了 `FXCORR_VIS_ROOT`、或工作区被两套编排写过。`checkRoots` 一致时静默、不一致时打印双方的值并返回 false，所以逐候选检查没有输出代价。
+
+  **`FXCORR_X_SWIN_CONFLICT` 移交实验级**：batch 级 merge 不再碰 SWIN，那条互斥检查对它已无意义；实验级写 SWIN 前必须查——而且要查**本次将写出的全部 batch 的时间范围**（不是单个 batch 的），否则重跑一次实验级 merge 就会追加一整份重复记录。**分片任务与 batch 级 merge 都不写 SWIN，所以重跑它们不会被拦**，这正是要保留的性质。
+
+  `run_batch.sh` 的分片路径改为"逐组 + batch 级 merge"，**实验级 merge 不进 `run_batch.sh`**——它与 `wrap_difx2fits.sh` 同为实验级操作，由编排层在实验全部 batch `done` 后调一次。
 
   **为什么保留 batch 级那一层**（而不是让实验级直接读全部分片）：24 h 观测按 t25362 参数是 84,375 batch × 4 组 = **337,500 个 `.part`**；batch 内归并把文件数收敛 4 倍，且这一层归并**本来就必须做**，放在 batch 完成时做还能只重跑失败的 batch。`.part` 的 glob 是 `ds*.part`，与 `merged.part` 不冲突——命名即隔离。
 
-  **在形态 A 落地前**，现状是 batch 级 merge 直接写 SWIN + "同实验按时间序串行"（`usage.md` 原则 2）——单节点串行 batch 时正确，多节点并行 batch 时静默错数据。
+  **`merged.part` 的重跑语义与 `.part` 相同**：一次运行写一次、**第一次写截断**（重跑 batch 级 merge 得到新内容，不与上一次叠加）。
+
+  **形态 A 之前**（2026-09-28 起成为历史）：batch 级 merge 直接写 SWIN + "同实验按时间序串行"（`usage.md` 原则 2 的旧版）——单节点串行 batch 时正确，多节点并行 batch 时静默错数据。
 
 ---
 
@@ -378,8 +391,8 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 | `<batch>` | 整 batch 的 x（**不分片**模式） | `fxcorr-x <batch> [workdir]` |
 | `<batch>-<g>` | 第 g 个 **ds 组**（**分片**模式，见 5.9） | `fxcorr-x <batch> [workdir] <g>` |
 | `<batch>-<station>-<ds>` | 某站某 ds 的 f 任务 | `fxcorr-f <batch> <station> [workdir] <ds>` |
-| `<batch>-merge` | **batch 级**归并：本 batch 全部分片 → `merged.part`（⚠ 未实施，现状是直接写 SWIN） | `fxcorr-x merge <batch> [workdir]` |
-| `<exp>-merge` | **实验级**归并：全部 batch 的 `merged.part` → D10 SWIN（⚠ 未实施；形态 A 下**它是 SWIN 的唯一写入者**） | `fxcorr-x merge --experiment [workdir]` |
+| `<batch>-merge` | **batch 级**归并：本 batch 全部分片 → `merged.part`（2026-09-28 起实施） | `fxcorr-x merge <batch> [workdir]` |
+| `<exp>-merge` | **实验级**归并：全部 batch 的 `merged.part` → D10 SWIN（2026-09-28 起实施；**它是 SWIN 的唯一写入者**） | `fxcorr-x merge --experiment [workdir]` |
 
 后两行是 **V6 的两级 merge（形态 A）**，见 5.9 末条与 `v6-plan.md` S4.1；`<exp>` = 实验标识
 （`OUTPUT FILENAME` 的 `.difx` 目录名），**不是** batch_id——实验级任务跨全部 batch。
@@ -471,7 +484,7 @@ D10 (vis/<experiment>.difx/ SWIN) + D9
 D11 (.FITS) 或 D12 (Mark4)
 ```
 
-分片模式（**2026-09-27 已实施**，见 `data-volume.md` §7 与 5.9 节）：fxcorr-x 按 datastream 切分后，分片任务**不直接写 SWIN**，而是产出 D16 局部记录，再由 `fxcorr-x merge` 归并写出 D10——SWIN 的追加顺序必须严格按时间，写入者只能有一个。**V6 起 merge 分为两级**（⚠ 未实施，见 5.9 末条与 `v6-plan.md` S4.1）：batch 级归并在**计算节点本地**完成、只写 `merged.part`，**实验级**才写 SWIN：
+分片模式（**2026-09-27 已实施**，见 `data-volume.md` §7 与 5.9 节）：fxcorr-x 按 datastream 切分后，分片任务**不直接写 SWIN**，而是产出 D16 局部记录，再由 `fxcorr-x merge` 归并写出 D10——SWIN 的追加顺序必须严格按时间，写入者只能有一个。**2026-09-28 起 merge 分为两级**（见 5.9 末条与 `v6-plan.md` S4.1）：batch 级归并在**计算节点本地**完成、只写 `merged.part`，**实验级**才写 SWIN：
 
 ```
 D8 (fengine) + D9
@@ -489,8 +502,9 @@ D16 (vis-parts/<batch_id>/merged.part)
 D10 (vis/<experiment>.difx/ SWIN)
 ```
 
-**在形态 A 落地前**，现状是上图少了实验级那一层——`fxcorr-x merge <batch>` 直接写 SWIN，靠
-"同实验 batch 按时间序串行"（第 12 节）保证单调，**多节点并行 batch 时会静默错数据**。
+**形态 A 之前**（2026-09-28 起成为历史）：上图少了实验级那一层——`fxcorr-x merge <batch>` 直接
+写 SWIN，靠"同实验 batch 按时间序串行"（第 12 节）保证单调，**多节点并行 batch 时会静默错数据**。
+实验级那一层正是为此加的。
 
 仿真数据分支（D7 的仿真来源，fxcorr-sim）：
 
@@ -562,7 +576,7 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
   | D8 `fengine/` | batch × station | 该 batch 的 **x 完成**（`data-volume.md` §1.3） | 重跑 f，需 D7 在 | = D7 的 16 倍（2bit），中间数据里最大 |
   | D14 `beam/` | batch | 随该 batch 的 x 完成（D14 由 x 产出） | 重跑 x，需 D8 在 | MB 级；仅相位阵实验有 |
   | D10 `vis/` | **实验**（跨 batch 追加） | **FITS 通过 QC 且不再需要重处理** | 重跑 f + x，需 D7 在 | 实验级，**不能按 batch 删** |
-  | D16 `vis-parts/` | batch × ds 组 | 该实验的 **`merge` 写出 SWIN 之后**——现状是 batch 级 merge 之后；**形态 A（V6，⚠ 未实施）下是实验级 `merge --experiment` 之后** | 重跑该分片的 x，需 D8 在 | 纯中转数据，归并成功即无用；**归并前必须集齐**，缺一片则报错不写 |
+  | D16 `vis-parts/` | batch × ds 组 | 该实验的**实验级 `merge --experiment` 写出 SWIN 之后**（2026-09-28 起实施）——**整目录**删，`ds*.part` 与 `merged.part` 同去（5.9 末条） | 重跑该分片的 x + batch 级 merge，需 D8 在（**不需要重生成 raw**） | 纯中转数据，归并成功即无用；**归并前必须集齐**（缺 `ds*.part` 报错、缺 batch 报错），两个层级各查各的 |
   | D11/D12 `product/` | 实验 | **终态保留**（归档到长期存储为止） | 重跑 difx2fits，需 D10 在 | 最终科学产品 |
   | D1–D6/D9/D13 `config/`、`batches/`、`meta/` | 实验 / batch | **终态保留** | 前处理可重跑（vex2difx/difxcalc） | KB~MB；删了就没有"当初怎么跑的"的追溯依据 |
 
@@ -573,8 +587,8 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
 
   | 文件 | 并发语义 |
   |---|---|
-  | **SWIN**（D10） | **已由形态 A 解决**（写入收敛到实验级 `merge --experiment` 一次），见 5.9 末条（⚠ 未实施） |
-  | **`PCAL_*` / `SWITCHEDPOWER_*`** | **仍待确认**——两者都是 `ios::app` 追加（`visibility.cpp:122`），文件名含**实验起点**（`config->getStartMJD/getStartSeconds`，**不是 batch 起点**），所以同一实验的全部 batch 写同一批文件。POSIX 的 `O_APPEND` 对 `PIPE_BUF`（4096 B）以内的写是原子的，短行**不会截断交错**；但**行序不再等于时间序**，且每次打开都会重写一遍注释头（串行下同样如此）。**V6 实施前要核实 difx2fits 对行序与重复注释头的容忍度**（`v6-plan.md` S4.1 的待确认项） |
+  | **SWIN**（D10） | **已由形态 A 解决**——写入收敛到实验级 `merge --experiment` 一次（它才是唯一写入者），互斥检查随之移交、作用范围从"本 batch"扩为"本次写出的全部 batch"。实施细则见 5.9 末条 |
+  | **`PCAL_*` / `SWITCHEDPOWER_*`** | **与形态 A 无关，但存在独立的并发缺陷（2026-09-28 核实）**——两者都由 **f 侧**写，文件名含**实验起点**（`config->getStartMJD/getStartSeconds`，**不是 batch 起点**），所以同一实验的全部 batch 写同一批文件。**`SWITCHEDPOWER_*`**（`switchedpower.cpp:74`）是 `ios::app` 追加、文件名尾带 ds 序号，并发只让**行序**偏离时间序、不丢行。**`PCAL_*`**（`pcaltextwriter.cpp`）是**`ios::trunc` 整文件重写**（读入 → 替换本 ds 本 intTime 的行 → 重写），并发时**后写者丢掉先写者新增的行**——**数据丢失**；而 difx2fits 读它（`fitsPH.c` 出 PC 表）。x 侧 `visibility.cpp` 的对应代码**不产出任何行**（由 `if(nonzero)` 门控，而 x 不填充 `results` 的 pcal 段）。处置见 `v6-plan.md` S5 |
 
 ---
 
