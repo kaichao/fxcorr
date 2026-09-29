@@ -22,6 +22,8 @@
 | `wrap_vex2difx.sh` / `wrap_difxcalc.sh` | 前处理封装（V5 P5）：在 config/ 内调用原程序 + 把产物里的绝对路径规范化回相对 |
 | `wrap_difx2fits.sh` | 后处理封装（V5 P5）：SWIN → FITS，产物落 `FXCORR_PRODUCT_ROOT`；实验级 |
 | `roots.sh` | 上面三个脚本 source 的目录根解析（与库内 `FxcorrPath` 同规则） |
+| `make_testdata.sh` / `run_batch.sh` | 两个编排脚本（V7 P6 起进镜像，此前留在宿主，容器化调用必须 `--bind` 源码目录才能跑） |
+| `fxinput.py` | **`run_batch.sh` 的运行期依赖**（2026-09-29 起）：`.input` 解析、三条前置校验、DATA TABLE 软链、ds 组划分都从它的内嵌段搬到了这里。`run_batch.sh` 按 `$SCRIPTDIR/fxinput.py` 找，**两者必须同目录**——漏了它，容器里每次跑批都以 "No such file or directory" 立刻失败 |
 
 `mpifxcorr` 不进镜像（MPI 环境不进容器，`run_bench.sh` 对拍仍宿主直跑）。
 

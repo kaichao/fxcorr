@@ -24,6 +24,7 @@ fxcorr-x merge --experiment [workdir]      # 实验级归并 → SWIN（唯一�
 > **分片模式（2026-09-27 定并实施）**：目标计算节点装不下一个 batch 的 `fengine`，故 x 要能按 **ds 组**分片——每组 = **跨站、含全部极化**的若干 datastream，覆盖同一频段组（**互相关**的要求：两站同一 freq 必须同时在场，且要算全极化组合）。**分组成员从 `.input` 的 BASELINE TABLE 推导，不是按 ds 序号**——每条 baseline 条目绑定一对具体的 ds、只出一个极化产品；实测映射见 `data-volume.md` §7.3，机理见 `data-spec` 第 8 节。分片任务写 `vis-parts/<batch_id>/ds<G>.part`（D16）而**不写 SWIN**，由 `merge` 子命令按时间归并写出。规范见 `data-spec` 5.9 与第 6 节「任务标识」；改造清单见 `v5-plan.md` 末节第 6 条。
 
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
+- **`FXCORR_X_GROUPS_ONLY=1`**（2026-09-29 加，V7 P3 前）：分片模式下**只打印全部 ds 组划分就退出**，不读任何数据、不写盘。存在的理由是 `/fxcorr/fxinput.py` 有一份同规则的组划分实现（编排脚本按它算分片边界），两处之间没有编译器兜底，而漂移的症状是"每片少算或多算 ds、产物看起来完全正常"——判据 `fxcorr/test/input/run_consistency.sh` 拿这里当真值对拍，所以它必须能在**没有 raw/fengine** 的机器上跑。**刻意放在组号范围检查之前**：传任意组号（含越界值如 `0`）都能拿到全部组。诊断上也有用：想只问"这个 batch 分几组、组里是谁"，不必先造 fengine。输出与运行期那行 `fxcorr-x: shard mode, ds group G of N = {...}` 同前缀（差一个 ` -> path`），一条 sed 同时读得懂。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。
 - 数据源 `workdir/fengine/<batch_id>/<station>/ds_<N>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream；N = 站内 datastream 序号（按 .input datastream 序累计，多 datastream 站每记录线程一个 f 任务，见 fxcorr-f 的 ds_index）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘沿用 config 语义，difx2fits 零改造），batch.json 的 difx_dir 仅为元数据。

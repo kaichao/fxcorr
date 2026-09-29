@@ -844,6 +844,12 @@ int main(int argc, char **argv)
 		}
 	}
 	bool sharded = (dsgroup >= 0);
+	// FXCORR_X_GROUPS_ONLY（见下面它的用法）是**纯诊断出口**：只读 .input 与
+	// batch.json，不碰任何根。所以它必须跳过下面那道根一致性检查——否则在换过根
+	// 布局的 workdir 上，一个只想问"这个 batch 分几组"的问题会被"这个 batch 当初
+	// 是用别的根跑的"挡住（对照测试实测遇到：meta/roots/00000002.json 里留着上一
+	// 次容器实验的 /dev/shm，而当前解析出的是 workdir/fengine）。
+	bool groupsonly = (sharded && getenv("FXCORR_X_GROUPS_ONLY") != NULL);
 	// hand the resolved workdir to the shared root resolver (V5 P5): the
 	// library opens .input/.calc/.im paths through it, so every relative path
 	// in the config set lands on the same roots this tool uses below
@@ -859,7 +865,11 @@ int main(int argc, char **argv)
 		FxcorrPath::ROOT_FENGINE };
 	static const FxcorrPath::Root usedroots_merge[] = {
 		FxcorrPath::ROOT_VIS };
-	if(merge)
+	if(groupsonly)
+	{
+		// 纯诊断，不碰根，见 groupsonly 的定义处
+	}
+	else if(merge)
 	{
 		if(!FxcorrPath::checkRoots(batchid, usedroots_merge, 1, "fxcorr-x"))
 			return EXIT_FAILURE;
@@ -976,6 +986,31 @@ int main(int argc, char **argv)
 			oss << "fxcorr-x: intTime " << config.getIntTime(configindex) << " s is not an integer multiple of subintNS " << subintns << " ns (required in V1)";
 			return fail(monitor, oss.str());
 		}
+	}
+
+	// 只报分组即退出（V7 P3 前加，2026-09-29）：一个**无数据依赖、无副作用**的 C++
+	// 真值出口。bash 侧 `fxcorr/fxinput.py` 有一份同规则的组划分实现，两处之间没有
+	// 编译器兜底，漂移的后果是分片边界算错——每片少算或多算 ds，而产物看起来完全
+	// 正常。判据 `fxcorr/test/input/run_consistency.sh` 拿这里当真值对拍，所以它必须
+	// 能在没有 raw/fengine 的机器上跑。
+	//
+	// **位置在下面那道 SWIN 互斥检查之前**，并且跳过了上面的根一致性检查：它不读
+	// 数据、不写盘，不该被"这个 batch 已经写过了"之类的 workdir 状态拦住——对照
+	// 测试恰恰常跑在已经跑过的 workdir 上（两道检查实测各拦了一次）。诊断上也有
+	// 用：想只问"这个 batch 分几组、组里是谁"，不必先造 fengine。
+	if(groupsonly)
+	{
+		vector<vector<int> > groups = deriveDsGroups(config, configindex);
+		for(size_t g = 0; g < groups.size(); g++)
+		{
+			ostringstream oss;
+			oss << "fxcorr-x: shard mode, ds group " << g << " of " << groups.size() << " = {";
+			for(size_t k = 0; k < groups[g].size(); k++)
+				oss << (k ? "," : "") << groups[g][k];
+			oss << "}";
+			FXLOG(FXLOG_INFO) << oss.str() << endl;
+		}
+		return EXIT_SUCCESS;
 	}
 
 	// 互斥检查：只有**会写 SWIN 的路径**需要它。全量模式与分片模式走这里——本 batch 的

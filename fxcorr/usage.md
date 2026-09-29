@@ -1,6 +1,6 @@
 # fxcorr 工具命令行手册
 
-**最后更新**：2026-09-28（**V6 的两级 `merge`（形态 A）已实施并验证**，其余 V6 项仍标 ⚠：`fxcorr-x merge <batch>` 现在只写 `vis-parts/<batch_id>/merged.part`、**新增的** `merge --experiment` 才写 SWIN 且是唯一写入者；四条定则（实验的认定与 config 来源、缺 batch 的判据取 `batches/*.json` 而非 `meta/batches.index`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）见 `data-spec` 5.9 末条，判据见 `fxcorr/test/multids/README.md` 判据 13–15。2026-09-27 补：两级 `merge`（形态 A）命令行形态、环境变量作用域说明与"其它实验级文件的并发语义（已核实，见 `v6-plan.md` S4.1 末表）"小节。路线见 `v6-plan.md`。**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
+**最后更新**：2026-09-29（**V7 P3 前**：`fxcorr-x` 增 `FXCORR_X_GROUPS_ONLY=1`——只报 ds 组划分就退出、无副作用的诊断出口，供 `test/input/run_consistency.sh` 对拍"两处 ds 组实现"；**此前 2026-09-28**（**V6 的两级 `merge`（形态 A）已实施并验证**，其余 V6 项仍标 ⚠：`fxcorr-x merge <batch>` 现在只写 `vis-parts/<batch_id>/merged.part`、**新增的** `merge --experiment` 才写 SWIN 且是唯一写入者；四条定则（实验的认定与 config 来源、缺 batch 的判据取 `batches/*.json` 而非 `meta/batches.index`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）见 `data-spec` 5.9 末条，判据见 `fxcorr/test/multids/README.md` 判据 13–15。2026-09-27 补：两级 `merge`（形态 A）命令行形态、环境变量作用域说明与"其它实验级文件的并发语义（已核实，见 `v6-plan.md` S4.1 末表）"小节。路线见 `v6-plan.md`。**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
 
 覆盖三个改造应用的命令行接口：`fxcorr-sim`（仿真数据生成器）、`fxcorr-f`（Station-based）、`fxcorr-x`（Baseline-based，含 `merge` 子命令）。目录布局、batch.json 格式与 D16 `vis-parts/` 规范见 `data-spec.md`，容量与分片方案的论证见 `data-volume.md` §7。
 
@@ -188,6 +188,7 @@ fxcorr-x merge --experiment [workdir]            # ② 实验级归并 → SWIN�
 | `DIFX_MESSAGE_GROUP` / `DIFX_MESSAGE_PORT` | 未设（静默） | host 模式组播目标（setup.bash 默认 224.2.2.1:50201）；未设时不发状态消息 |
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
 | `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：基线循环并行线程数（scratch 按线程私有化，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
+| `FXCORR_X_GROUPS_ONLY` | 未设 | **`1` = 只报 ds 组划分就退出**（2026-09-29 加，V7 P3 前）：分片模式下打印全部组的成员（格式与运行期那行 `fxcorr-x: shard mode, ds group G of N = {...}` 同前缀，差一个 ` -> path`），**不读 raw/fengine、不写盘、不建目录**。用途是给"两处 ds 组实现"的对照判据（`test/input/run_consistency.sh`）提供一个**无数据依赖**的 C++ 真值出口——它**刻意跳过了根一致性与 SWIN 互斥两道 workdir 状态检查**（只读 `.input` 与 `batch.json`，不碰任何根、不写 SWIN，而对照测试常跑在已经跑过的 workdir 上）。诊断上也可用：想只问"这个 batch 分几组、组里是谁"，不必先造 fengine。传任意组号（含越界值）都能拿到全部组 |
 | `FXCORR_X_MERGE_FORCE` | 未设（严格） | **两个层级的 `merge` 都认**：batch 级是"ds 组不齐"、实验级是"batch 不齐"，语义相同——强制写出已到齐的部分（缺失者留空洞 + stderr 列明缺了哪些），未设 = 报错退出不写 |
 | `FXCORR_X_SWIN_CONFLICT` | 未设（严格） | **三种写 SWIN 的模式共用（全量 / 分片 / 实验级 `merge`）**：目标 SWIN 里若已有**本 batch 时间范围内**的记录（说明这个 batch 已经被另一次运行写过），默认报错退出——再写会追加重复记录、破坏 SWIN 的时间单调（difx2fits 顺序读、时间回退的记录被静默丢弃）。设 `allow` 强制继续。**重跑分片与 batch 级 `merge` 不受影响**（两者都不写 SWIN），被拦的是"`merge` 之后又跑全量、或又 `merge`"。**2026-09-28 起移交实验级**：检查由 `merge --experiment` 做，范围扩为"**本次将写出的全部 batch**"；batch 级 `merge` 与分片任务都不写 SWIN、**都不查** |
 | `FXCORR_X_ALLOW_EMPTY` | 未设（严格） | **空输入 / 空产物防呆（2026-09-28，`v6-plan.md`「进行中的发现」2）**。两条互补的检查，挡的是同一种最坏的静默——每个程序都退 0、日志照报 "N integrations written"，产物却是空文件：① **整个 batch 一块有效数据都没有**（`.sp` 的 valid flags 全 0；那是 f 写的"这些块没有数据"，x 以前完全不用它，只靠 weight 门控间接判断，于是"数据根本没读到"与"读到了但权重为 0"分不开）；② 全量模式下 batch 算完却**一条记录都没进 SWIN**（数据有效，但每条基线的 weight 都成了 0）。两者都可能由 **raw 与 `batch.json` 的时间轴不符**引起（软链指错 batch、VDIF 幂等跳过而重新规划改了 batch 时长……）。设 `1`（或 `allow`）跳过检查。**正常数据不触发**：部分 subint 无效是常态（gap / filler / 真实观测丢帧），只有**全无效**才报；分片模式写 `.part`，只做① |
@@ -223,7 +224,7 @@ fxcorr-x merge --experiment [workdir]            # ② 实验级归并 → SWIN�
 
 `vis-parts/` 的目录规范（与 `vis/` 的隔离边界、生命周期）见 data-spec 5.9。
 
-**实现要点（2026-09-27 落地）**：ds 组由 `fxcorr-x` 从 `.input` 的 BASELINE TABLE 用并查集推导（连通分量 = 一组，组序 = 组内最小 ds 序）；`run_batch.sh` 的 `FXCORR_X_SHARD=1` 走分片路径（逐组 + 一次 `merge`），它自己也算一遍组数——**两处实现必须同改**（同 `roots.sh` 与 `FxcorrPath` 的关系）。
+**实现要点（2026-09-27 落地）**：ds 组由 `fxcorr-x` 从 `.input` 的 BASELINE TABLE 用并查集推导（连通分量 = 一组，组序 = 组内最小 ds 序）；`run_batch.sh` 的 `FXCORR_X_SHARD=1` 走分片路径（逐组 + 一次 `merge`），它自己也算一遍组数——**两处实现必须同改**（同 `roots.sh` 与 `FxcorrPath` 的关系）。**2026-09-29 起编排侧那份挪到了 `fxcorr/fxinput.py`**（从 `run_batch.sh` 的内嵌 python 段抽出），并有了机械保障：对照判据 `fxcorr/test/input/run_consistency.sh` 拿 `FXCORR_X_GROUPS_ONLY` 当真值出口，逐组逐成员比对两处实现。
 
 #### 两级 `merge`（形态 A，2026-09-28 实施）
 

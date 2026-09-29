@@ -6,6 +6,9 @@
 # 程序内校验；不通过直接报错退出，不依赖工具兜底）
 # → ② DATA TABLE 软链重指本 batch 的 VDIF（make_testdata.sh 多 batch 时软链停在
 # 最后 batch，跑其他 batch 前必须重做；raw 数据不存在即报错）
+#
+# ①② 的实现都在 fxinput.py（2026-09-29 抽出，V7 P3 前）——解析 .input、前置校验、
+# 软链、ds 组划分都在那里，本脚本只剩编排。
 # → ③ 置 status=running（batch.json status 字段）→ ④ 逐站 fxcorr-f（任一失败 →
 # status=failed、非 0 退出，不跑后续站）→ ⑤ mkdir .input OUTPUT FILENAME 所在目录
 # → ⑥ fxcorr-x（失败同 ④）→ ⑦ 成功 → status=done，追加 meta/batches.index 一行
@@ -103,124 +106,14 @@ fxcorr_mkroots	# Q19：四个根由编排层建齐，程序遇根不存在只报
 # ---- ①② 读 batch.json + .input、前置校验、DATA TABLE 软链重做 ----
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
-python3 - "$WORKDIR" "$BID" "$FXCORR_ROOT_RAW" "$FXCORR_ROOT_VIS" <<'PYEOF' > "$OUT"
-import json, math, os, re, sys
-
-workdir, bid, rawroot, visroot = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-bjpath = os.path.join(workdir, 'batches', bid + '.json')
-bj = json.load(open(bjpath))
-cfgrel = bj['config_file']
-cfg = os.path.join(workdir, cfgrel)
-if not os.path.exists(cfg):
-    sys.exit('run_batch.sh: config_file %s not found' % cfgrel)
-text = open(cfg).read()
-
-def one(key):
-    m = re.search(r'^%s:\s*(.*)$' % re.escape(key), text, re.M)
-    if not m:
-        sys.exit('run_batch.sh: %s not found in %s' % (key, cfgrel))
-    return m.group(1).strip()
-
-# ① 前置校验（与 fxcorr-f/x 程序内校验同语义，提前挡）：
-#   - batch 起点在 subint 边界（1µs 容差，同 fxcorr-f main.cpp:175-182，
-#     吸收 start_mjd 的 f64 表示误差）
-#   - batch 时长为 INT TIME 整数倍（跨 batch 追加不碎片化，data-spec 12）
-#   - INT TIME 为 subint 整数倍（fxcorr-x 的 offsetnsperintegration==0 硬校验）
-mjd0 = int(one('START MJD'))
-sec0 = float(one('START SECONDS'))
-subint = int(bj['subint_ns'])
-inttime = float(bj['integration_sec'])
-initsec = (bj['start_mjd'] - mjd0 - sec0 / 86400.0) * 86400.0
-batchstartns = int(math.floor(initsec * 1.0e9 + 0.5))
-rem = batchstartns % subint
-if rem > 1000 and (subint - rem) > 1000:
-    sys.exit('run_batch.sh: batch start is not on a subint boundary (%d ns into a %d ns subint)' % (rem, subint))
-batchdur = int(bj['n_subints']) * subint / 1.0e9
-nint = round(batchdur / inttime)
-if abs(nint * inttime - batchdur) > 1e-6:
-    sys.exit('run_batch.sh: batch duration %g is not an integer multiple of INT TIME %g' % (batchdur, inttime))
-trem = inttime * 1.0e9 % subint
-if min(trem, subint - trem) > 1.0:
-    sys.exit('run_batch.sh: INT TIME %g is not a multiple of SUBINT %d ns' % (inttime, subint))
-
-# f 任务展开按 .input datastream 序（TELESCOPE INDEX 逐个；多 datastream 站
-# 重复出现，每 datastream 一个 f 任务带站内序号 dsidx）；batch.json 的
-# stations 是去重元数据（data-spec 5.3），仅作交叉校验
-telnames = re.findall(r'^TELESCOPE NAME \d+:\s*(\S+)\s*$', text, re.M)
-ds_tel = re.findall(r'^TELESCOPE INDEX:\s*(\d+)\s*$', text, re.M)
-stations = [telnames[int(t)] for t in ds_tel]
-if bj.get('stations') is not None and set(bj['stations']) != set(stations):
-    sys.exit('run_batch.sh: batch.json stations do not match .input datastreams')
-dsidx = []
-seen = {}
-for st in stations:
-    dsidx.append(seen.get(st, 0))
-    seen[st] = dsidx[-1] + 1
-datafiles = re.findall(r'^FILE \d+/\d+:\s*(\S+)\s*$', text, re.M)
-if len(stations) != len(datafiles):
-    sys.exit('run_batch.sh: station/file count mismatch in %s (%d stations, %d files)' % (cfgrel, len(stations), len(datafiles)))
-
-# ② DATA TABLE 软链重指本 batch 的 VDIF（fxcorr-f 按 DATA TABLE 文件名读数据）。
-# make_testdata.sh 布局（raw/<st>/<st>_<bid>.vdif）下软链重指本 batch，落在
-# RAW 根下（Q2）；真实观测场景 FILE 行已是数据文件路径（绝对路径或直接可见），
-# 不软链。
-# 每站有几个 datastream：多 ds 站的文件名带 `_ds<N>` 后缀（N = 站内序号，
-# data-spec 5.2），单 ds 站没有后缀——与 fxcorr-sim 的 stationOutPath、
-# make_testdata.sh 的 vdifrel **同一规则，三处必须同改**。少了这个后缀时
-# 多 ds 站的 src 永远不存在，软链就停在 make_testdata.sh 建的最后那个 batch
-# 上：单 batch 场景看不出来（软链本来就是对的），多 batch 才现形，而 f 读的是
-# 别的 batch 的数据却按本 batch 的时间轴解，全程没有任何报错。
-nds_of = {}
-for st in stations:
-    nds_of[st] = nds_of.get(st, 0) + 1
-
-for st, di, fn in zip(stations, dsidx, datafiles):
-    base = '%s_%s' % (st, bid)
-    if nds_of[st] > 1:
-        base += '_ds%d' % di
-    src = os.path.join(rawroot, st, base + '.vdif')
-    if os.path.isfile(src):
-        tgt = os.path.join(rawroot, fn)
-        if os.path.islink(tgt) or os.path.exists(tgt):
-            os.unlink(tgt)
-        # absolute target: a relative one breaks across filesystems, which is
-        # the whole point of pointing the raw root at a different disk (Q2)
-        os.symlink(src, tgt)
-    elif fn == os.path.basename(fn):
-        # 裸文件名 = make_testdata 布局（DATA TABLE 直接写文件名，由 RAW 根解析）,
-        # 文件必须在；真实观测的 FILE 行是路径（绝对或已可见），走不到这里
-        sys.exit('run_batch.sh: %s not found (batch %s, station %s datastream %d)'
-                 % (src, bid, st, di))
-
-# OUTPUT FILENAME resolves against the vis root (Q20); an absolute value wins,
-# os.path.join drops the prefix for it - same rule as the programs
-# ds 组推导（分片模式用）：与 fxcorr-x 的 deriveDsGroups **同规则**——每条
-# baseline 绑定一对 ds，把全部条目并查集合并，连通分量就是一组（覆盖同一频段
-# 组的那些 ds）。两处实现没有编译器兜底，改一处要改两处（data-spec 5.9）。
-blka = re.findall(r'^D/STREAM A INDEX \d+:\s*(\d+)\s*$', text, re.M)
-blkb = re.findall(r'^D/STREAM B INDEX \d+:\s*(\d+)\s*$', text, re.M)
-parent = list(range(len(stations)))
-def _find(x):
-    while parent[x] != x:
-        parent[x] = parent[parent[x]]
-        x = parent[x]
-    return x
-for xa, xb in zip(blka, blkb):
-    ra, rb = _find(int(xa)), _find(int(xb))
-    if ra < rb:
-        parent[rb] = ra
-    elif rb < ra:
-        parent[ra] = rb
-ngroups = len({_find(i) for i in range(len(stations))})
-
-outdir = os.path.join(visroot, one('OUTPUT FILENAME').rstrip('/'))
-print('CFGIN=%s' % cfgrel)
-print('NGRP=%d' % ngroups)
-print('OUTDIR=%s' % outdir)
-print('--')
-for st, di, fn in zip(stations, dsidx, datafiles):
-    print('%s %s %s' % (st, di, fn))
-PYEOF
+# 解析 .input、前置校验、DATA TABLE 软链、ds 组推导**都在 fxinput.py 里**：
+# 那是"逻辑"而不是"编排"，且其中的 ds 组划分与 fxcorr-x 的 C++ 侧
+# deriveDsGroups 是同一条规则的两处实现（对照判据 test/input/run_consistency.sh），
+# 藏在 heredoc 里既不能单测、也不能被别的脚本复用。失败时它自己打印
+# `run_batch.sh:` 前缀的消息并以非 0 退出——与抽出前逐字一致，所以这里只让它
+# 的退出码经 set -e 传出去，不再包一层。
+python3 "$SCRIPTDIR/fxinput.py" prepare "$WORKDIR" "$BID" \
+	"$FXCORR_ROOT_RAW" "$FXCORR_ROOT_VIS" > "$OUT"
 
 CFGIN= OUTDIR= NGRP=1
 while IFS= read -r line && [ "$line" != "--" ]; do
@@ -234,8 +127,11 @@ while IFS= read -r line && [ "$line" != "--" ]; do
 	esac
 done < "$OUT"
 [ -n "$CFGIN" ] || { echo "run_batch.sh: failed to parse batch $BID" >&2; exit 2; }
+# 站表：<station> <站内 ds 序号> <ds 组号> <数据文件>。组号由 fxinput.py 推出，与
+# fxcorr-x 分片模式的组号一一对应（C++ 侧按 ds 序号打掩码，同一条规则）——P3 的
+# 按组调度消费它，这里暂时只取前两列。
 declare -a DSTATION
-while read -r st di fn; do
+while read -r st di g fn; do
 	DSTATION+=("$st $di")
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
 

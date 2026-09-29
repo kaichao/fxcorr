@@ -67,6 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgslcblas0 \
         libgfortran5 \
         libcfitsio10t64 \
+        python3 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
@@ -96,3 +97,18 @@ COPY --from=builder /src/fxcorr/roots.sh /usr/local/difx/bin/
 COPY --from=builder /src/fxcorr/wrap_vex2difx.sh /usr/local/difx/bin/
 COPY --from=builder /src/fxcorr/wrap_difxcalc.sh /usr/local/difx/bin/
 COPY --from=builder /src/fxcorr/wrap_difx2fits.sh /usr/local/difx/bin/
+
+# 两个编排脚本也进镜像（2026-09-29，V7 P6）：此前镜像里只有上面四个适配脚本，
+# run_batch.sh / make_testdata.sh 留在宿主，于是容器化调用必须 --bind 源码目录才能跑。
+# 它们都需要 python3（校验段要解析 batch.json），所以上面 runtime 段的依赖里加了
+# python3——否则会以 "line 106: python3: command not found" 立刻失败（V7 实测）。
+# 两者都 source 同目录的 roots.sh，放这里即可（$SCRIPTDIR 取同目录）。
+COPY --from=builder /src/fxcorr/make_testdata.sh /usr/local/difx/bin/
+COPY --from=builder /src/fxcorr/run_batch.sh /usr/local/difx/bin/
+
+# fxinput.py 是 run_batch.sh 的**运行期依赖**（2026-09-29 起，V7 P3 前）：`.input`
+# 解析、前置校验、DATA TABLE 软链、ds 组划分都从 run_batch.sh 的内嵌段搬到了这里，
+# 它按 `$SCRIPTDIR/fxinput.py` 找——所以两者必须同目录，漏了这个 COPY 会让容器里
+# 每一次跑批都以 "No such file or directory" 立刻失败。三个 wrap_*.sh 与
+# roots.sh 不依赖它（它们是独立命令），只有 run_batch.sh 依赖。
+COPY --from=builder /src/fxcorr/fxinput.py /usr/local/difx/bin/
