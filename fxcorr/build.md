@@ -1,6 +1,6 @@
 # fxcorr 构建手册
 
-**最后更新**：2026-09-20（V5 P4：容器镜像合并为单镜像）
+**最后更新**：2026-09-29（V7：新增「目标集群构建（V7，Slurm）」一节——Slurm 集群上实测的**七个坑**与一键脚本 `build.sh`/`env.sh`；此前 2026-09-20 V5 P4 容器镜像合并为单镜像）
 
 覆盖本仓库全部组件的两种构建方式：**集成构建**（`install-difx` 编排器，推荐）与**独立构建**（单包 autotools，调试/重编译常用）。
 
@@ -132,6 +132,78 @@ bash -c 'source /root/fxcorr/setup.bash && export LD_LIBRARY_PATH=/usr/local/dif
 - **`difx` 上安装要 `sudo -n make install`**：`make` 不需要，只有装到 `/usr/local/difx/bin`（属 root）需要。`install-difx` 在这里会以 `Permission denied` 中断——**构建已完成，补一次安装即可**；但 `--doonly` 列多个组件时它会在第一个组件的安装段就停住，后面的组件不会被构建，**一次一个组件**。
 
 工具链实测记录：gcc 11.5、automake 1.16.2、fftw/expat 由 dnf 装、无 IPP（须 --noipp）。
+
+## 目标集群构建（V7，Slurm）
+
+V7 的部署与多核验证在**另一套 Slurm 集群**上做（与上面两台机器都不同）。节点经 Slurm 申请，
+登录节点 `ssh p419-n1` → `ssh -p 50022 <计算节点ip>`；实测节点 **30 核 / 123.5 GiB / 62 GB tmpfs**。
+
+| 项 | 值 |
+|---|---|
+| 源码 | `/public/home/cstu0036/fxcorr/src`（rsync 自 mac，排除 `.git`，217 MB） |
+| **构建脚本** | **`/public/home/cstu0036/fxcorr/build.sh`**——七项修复已固化，一键重建 |
+| **运行环境** | **`/public/home/cstu0036/fxcorr/env.sh`**（`source` 后用） |
+| 安装前缀 | **`/public/home/cstu0036/fxcorr/install`**——**不用 `/usr/local/difx`**：那是 root 的，且计算节点是临时作业，产物放共享盘下次申请节点还在 |
+| MPI | `/opt/hpc/software/mpi/hpcx/v2.7.4/gcc-7.3.1`（`DIFXMPIDIR` 要指向它，`setup.bash` 默认的 `/usr` 不对） |
+| 共享存储 | `/public/home/cstu0036/fxcorr`（4 TB）与 `/work2/cstu0036/fxcorr`（250 GB），均为 ParaStor 并行文件系统 |
+
+```bash
+# 本地：同步源码（经两级 ProxyJump 直连计算节点）
+rsync -az --exclude='.git/' -e 'ssh -o ProxyCommand="ssh -W %h:%p p419-n1" -p 50022' \
+      ./ cstu0036@<节点IP>:/public/home/cstu0036/fxcorr/src/
+
+# 计算节点：一键构建
+cd /public/home/cstu0036/fxcorr && bash build.sh
+
+# 使用
+source /public/home/cstu0036/fxcorr/env.sh && fxcorr-f <batch_id> <station>
+```
+
+**八个实测坑**（2026-09-29）。**前七个根因是同一个**：这台机器的 FFTW **只装了单精度、且开发
+文件不规范**（`/public/software/mathlib/fftw`），而 DiFX 的构建系统假设 `fftw3` / `fftw3f` 都有
+标准开发包（头 + `.so` + `.pc`）；**第八个（GSL）是同一个模式**，在补构建前处理程序时撞到：
+
+| # | 现象 | 处理 |
+|---|---|---|
+| 1 | `/usr/bin/python3` 是 **2.7.5**（RHEL 7），而 `install-difx` 是 Python 3 脚本 | PATH 前置 miniforge 的 3.12（`/public/software/apps/miniforge3-25.3.1-0/bin`） |
+| 2 | 只有 `fftw-libs-double` 运行时（`/usr/lib64/libfftw3.so.3`），无 `.so` 软链与 `.pc` → `PKG_CHECK_MODULES(fftw3)` 失败 | 自建 patch 目录：软链 `libfftw3.so` + 写 `fftw3.pc` |
+| 3 | `install-difx` 默认要生成 `ipp.pc`，而 `/opt/intel` 不存在（`ValueError: invalid literal for int(): 'unknown'`） | **`--noipp`** |
+| 4 | `ld: cannot find -lfftw3f`——pc 里声明的 `-L` 没进链接命令 | 把 `libfftw3f.so` 也软链进 patch 目录（链接器会在**所有** `-L` 路径里找） |
+| 5 | `vdifPhase.c: fftw3.h: No such file`——编译只带 `-I$DIFXROOT/include` | 把 `fftw3.h` 软链进 `$DIFXROOT/include` |
+| 6 | **单精度 pc 叫 `fftwf.pc`**（非标准命名），而 DiFX 的 configure 找 `fftw3f.pc` | 补一个 `fftw3f.pc` 指向 patch 目录 |
+| 7 | 运行时报 `libfftw3f.so.3.5.7: cannot open shared object file`——**那个库没有标准 SONAME**，链接器把完整文件名记进了 DT_NEEDED | `LD_LIBRARY_PATH` 必须含 `/public/software/mathlib/fftw/lib64` |
+| 8 | **补构建前处理程序时**：`difxcalc11` 报 `Package requirements (gsl) were not met` | GSL 也只在 `/public/software/mathlib/gsl/2.7`（系统仅有 `.so.0` 运行时）→ 它的 `lib/pkgconfig` 进 `PKG_CONFIG_PATH`、`lib` 进 `LD_LIBRARY_PATH`。**与坑 2 是同一个模式** |
+
+> **坑 8 不是"额外的"——它说明这台机器上非系统路径的库不止 FFTW 一个**。以后遇到
+> `Package requirements (X) were not met`，先去 `/public/software/mathlib/` 找同名目录。
+
+**排查顺序**：先看 `pkg-config --modversion fftw3 fftw3f` 与 `--libs` 的输出——第 2 / 4 / 6 都是
+它的输出不对；第 7 是链接产物记的 SONAME，与 configure 无关，只能靠运行时库路径解。
+
+**实测构建命令与结果**（2026-09-29，退出码 0）：
+
+```bash
+# ① fxcorr 三程序 + 依赖（落在 install/bin/）
+python3 install-difx --noipp \
+  --doonly=difxio,codifio,difxmessage,mark5access,vdifio,fxcorrcommon,fxcorr-f,fxcorr-x,fxcorr-sim
+
+# ② 前处理程序（P1 造数要用 make_testdata.sh，它走 vex2difx + difxcalc；dirlist 是
+#    vex2difx 的依赖，容易漏）
+python3 install-difx --noipp --doonly=dirlist,vex2difx
+python3 install-difx --noipp --doonly=difxcalc11      # 需要 GSL，见坑 8
+```
+
+**运行期差异**（与构建无关，但同样耗时）：
+
+- **`env.sh` 必须把 miniforge 的 `python3` 前置**：编排脚本（`make_testdata.sh` /
+  `run_batch.sh`）与 `gen_vex.py` 都是 Python 3，而 `/usr/bin/python3` 是 **2.7.5**，
+  不前置就在语法错误上打转。
+- **bash 是 4.2.46**（RHEL 7），测试机是 5.x：`set -u` 下展开**空数组**（`${ARR[*]}`）在
+  bash < 4.4 会报 unbound variable。`make_testdata.sh` 撞到过两处（`${TONES[*]}`、`${ENVS[*]}`），
+  **已修**（加 `:-`）。写新脚本时记住这条。
+
+**不要改 DiFX 源码来绕这些坑**——七项全是环境事实，补软链与 pc 文件即可；改源码会让本仓库与
+上游分叉，而这些差异换一台装齐 FFTW 的机器就不存在。
 
 ## 相关
 

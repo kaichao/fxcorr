@@ -1136,15 +1136,20 @@ private:
   string configdir;
   mutable string infilekey, infileval;
   mutable bool infilekeyunconsumed;
-  int * numprocessthreads;
-  int * scanconfigindices;
-  configdata * configs;
-  ruledata * rules;
-  freqdata * freqtable;
-  telescopedata * telescopetable;
-  baselinedata * baselinetable;
-  datastreamdata * datastreamtable;
-  Model * model;
+  // 全部初始化为 NULL（2026-09-29，目标集群上实测到的 UB）：析构函数**无条件** delete
+  // 它们，而分配都藏在"文件能打开"的分支里——例如 numprocessthreads 只在 .threads 存在时
+  // 才 new（configuration.cpp:1798），没有 .threads 的配置下它一直是未初始化的垃圾值。
+  // -O0 下栈上恰好是 0，`delete [] NULL` 合法，所以一路看不出来；-O2 下直接段错误，
+  // 且崩在自由退出时（main.cpp 的 Configuration 栈对象析构），把真实错误全盖住。
+  int * numprocessthreads = NULL;
+  int * scanconfigindices = NULL;
+  configdata * configs = NULL;
+  ruledata * rules = NULL;
+  freqdata * freqtable = NULL;
+  telescopedata * telescopetable = NULL;
+  baselinedata * baselinetable = NULL;
+  datastreamdata * datastreamtable = NULL;
+  Model * model = NULL;
   outputformat outformat;
 };
 

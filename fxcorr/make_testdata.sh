@@ -449,10 +449,12 @@ stationcmd()
 {
 	local bid=$1 st=$2 ds=$3
 	local host=${NODE_OF[$st]:-}
-	local args="station '$bid' '$st' '$WORKDIR' '$ds' ${TONES[*]}"
+	# `${TONES[*]:-}` 的 `:-` 不是多余的：bash < 4.4（RHEL 7 是 4.2）在 `set -u` 下
+	# 展开**空数组**会报 unbound variable，而"无 tone"正是空数组。见 build.md
+	local args="station '$bid' '$st' '$WORKDIR' '$ds' ${TONES[*]:-}"
 	if [ -n "$host" ]; then
 		printf 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new %q %q\n' \
-			"$host" "cd '$WORKDIR' && env ${ENVS[*]} LD_LIBRARY_PATH=${DIFXROOT:-/usr/local/difx}/lib:\"\$LD_LIBRARY_PATH\" '$FXCSIM' $args"
+			"$host" "cd '$WORKDIR' && env ${ENVS[*]:-} LD_LIBRARY_PATH=${DIFXROOT:-/usr/local/difx}/lib:\"\$LD_LIBRARY_PATH\" '$FXCSIM' $args"
 	elif [ "$FXCORR_RUN_MODE" = "container" ]; then
 		local -a cprefix=(docker run --rm)
 		local e

@@ -48,3 +48,4 @@ DiFX 2.9.1 的 clone（分支 fxcorr），正在实施"去 MPI、按 batch 拆�
 - build 过程在测试机运行
 - 测试机登录：`ssh fxcoor`
 - 同步文件至测试机：在 fxcorr目录下，运行`make sync`
+- **V7 目标集群（Slurm，另一套机器）**：登录节点 `ssh p419-n1` → 计算节点 `ssh -p 50022 <节点IP>`；源码经 `rsync` 直传（不经 `make sync`），构建与七个实测坑见 `fxcorr/build.md` 的「目标集群构建（V7，Slurm）」节
