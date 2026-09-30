@@ -5,7 +5,7 @@
 # → ② 从 batch.json + .input 推导 EXECUTE TIME（整秒字段，取 floor(initsec + N*intTime)
 # + 1——多留一个整秒，mpifxcorr 才把 N 个积分都写完整，见下方 ② 的注释）
 # → ③ 复制 config .input → bench/，sed EXECUTE TIME / OUTPUT FILENAME → bench/<exp>.difx
-# → ④ mpirun mpifxcorr 出基准 SWIN → ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分
+# → ④ mpirun mpifxcorr 出基准 SWIN（含内存峰值采集）→ ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分
 # → ⑤ 打印 cmp_swin.py 对拍提示。
 #
 # 用法：./run_bench.sh [workdir]
@@ -62,7 +62,8 @@ fi
 # ---- ①② 定位 batch、推导 EXECUTE TIME 截断 ----
 # python3：json 读取 + .input 解析 + 浮点（bash 无浮点算术）
 OUT=$(mktemp)
-trap 'rm -f "${OUT:-}"' EXIT
+MEMOUT=$(mktemp)
+trap 'rm -f "${OUT:-}" "${MEMOUT:-}"' EXIT
 python3 - "$WORKDIR" "$FXCORR_ROOT_RAW" <<'PYEOF' > "$OUT"
 import glob, json, math, os, re, sys
 
@@ -205,15 +206,23 @@ CALCBASE=$(basename "$CALCIN")
 sed -e "s|^EXECUTE TIME (SEC):[[:space:]]*[0-9]*$|EXECUTE TIME (SEC): $EXEC|" \
     -e "s|^OUTPUT FILENAME:[[:space:]]*.*$|OUTPUT FILENAME:    $OUTDIR|" \
     -e "s|^CALC FILENAME:[[:space:]]*.*$|CALC FILENAME:      $WORKDIR/bench/$CALCBASE|" \
-    -e "s|^FILE \([0-9]*/[0-9]*\):[[:space:]]*\([^/].*\)$|FILE \1:           $FXCORR_ROOT_RAW/\2|" \
+    -e "s|^\(FILE [0-9]*/[0-9]*:[[:space:]]*\)\([^/[:space:]].*\)$|\1$FXCORR_ROOT_RAW/\2|" \
     "$WORKDIR/$CFGIN" > "$WORKDIR/bench/$(basename "$CFGIN")"
-sed -e "s|^IM FILENAME:[[:space:]]*\([^/].*\)$|IM FILENAME:        $CFGDIR/\1|" \
-    -e "s|^FLAG FILENAME:[[:space:]]*\([^/].*\)$|FLAG FILENAME:      $CFGDIR/\1|" \
+# 捕获组用 `[^/[:space:]]` 而不是 `[^/]`：BRE 的 `[[:space:]]*` 会**回溯**——当值本来是
+# 绝对路径（`/work2/...`）时，`[[:space:]]*` 少匹配一个空格、让 `[^/]` 去吃那个空格，
+# 于是"相对路径才拼 $CFGDIR"的意图失效，拼成 `$CFGDIR/ /work2/...`（中间一个空格），
+# mpifxcorr 报 `FATAL Error opening IM file .../config/ /work2/...` 而**不退出**，继续用
+# 空模型算完——结果看着像"跑通了"，其实 UVW 全错。把空白也排除出捕获组就没有回溯余地。
+# （2026-09-30 实测踩到：2 站的 .calc 没经过 wrap_difxcalc.sh 规范化，值仍是绝对路径。）
+# 值**已经是**绝对路径时这两条 sed 不匹配、原样保留，正是想要的：CALC/IM 的绝对路径由
+# 各自的根规则处理，与这里的拼接是两件事。
+sed -e "s|^IM FILENAME:[[:space:]]*\([^/[:space:]].*\)$|IM FILENAME:        $CFGDIR/\1|" \
+    -e "s|^FLAG FILENAME:[[:space:]]*\([^/[:space:]].*\)$|FLAG FILENAME:      $CFGDIR/\1|" \
     "$CFGDIR/$CALCBASE" > "$WORKDIR/bench/$CALCBASE"
 rm -rf "$OUTDIR"    # 幂等重跑
 mkdir -p "$OUTDIR"
 
-# ---- ④ mpirun mpifxcorr ----
+# ---- ④ mpirun mpifxcorr（含内存峰值采集） ----
 # DATA TABLE 文件名为相对路径（软链在 workdir 根），故 cwd 在 workdir 内跑。
 # mpifxcorr 需要 LD_LIBRARY_PATH 找 libmark5access（install-difx 的 bin/lib 目录）。
 cd "$WORKDIR"
@@ -222,7 +231,106 @@ MPIARGS=()
 if [ "$(id -u)" = 0 ]; then
 	MPIARGS+=(--allow-run-as-root)
 fi
+# --oversubscribe：允许 NP 大于核数。P4 的 4 站配置是**有意**超订的（34 进程 / 30 核，
+# v7-plan §11 拿它压边界），不加这个 Open MPI 会以 "not enough slots" 直接拒绝启动。
+# 核数够时它不改变行为，所以常开。
+MPIARGS+=(--oversubscribe)
+
+# 内存峰值采集（V7 P4 的 Q6）：V6 S3 只记了 wall 与 CPU，没记内存峰值，于是"目标
+# 节点装不装得下 mpifxcorr"这一问没法回答。现成手段都不行——`mpirun` 自己报不了子
+# 进程内存，`/usr/bin/time -v` 量的又只是 launcher 一个进程。所以自己采：后台按
+# /proc 轮询，**先等 mpifxcorr 出现、再等它们全部消失**就退出（不用赌 kill 信号
+# 的时机），mpirun 返回后再 kill 一次兜底。
+python3 - "$MEMOUT" <<'PYEOF' &
+import os, signal, sys, time
+
+out = sys.argv[1]
+# 只认进程名恰好是 mpifxcorr 的（/proc/<pid>/status 的 Name 字段）。mpirun 与 orted
+# 不计：它们不持有 F 数据，算进去会把 launcher 的内存混进"相关器占了多少"。
+def snapshot():
+	procs = []
+	for d in os.listdir('/proc'):
+		if not d.isdigit():
+			continue
+		try:
+			with open('/proc/%s/status' % d) as f:
+				st = f.read()
+		except (IOError, OSError):
+			continue	# 采样瞬间进程退出，正常
+		# Name 是 /proc/<pid>/status 的**第一个**字段，所以比首行就行。这里曾经写成
+		# '\nName:\tmpifxcorr\n'——以为它前面还有别的字段，于是永远匹配不上：采样器
+		# 一路空转到 6 小时兜底，外面看起来就是"卡住不返回"（实测踩过）。
+		if st.split('\n', 1)[0] != 'Name:\tmpifxcorr':
+			continue
+		hwm = rss = 0
+		for line in st.splitlines():
+			if line.startswith('VmHWM:'):
+				hwm = int(line.split()[1])
+			elif line.startswith('VmRSS:'):
+				rss = int(line.split()[1])
+		procs.append((hwm, rss))
+	return procs
+
+def report(peak_proc, peak_sum_rss, peak_sum_hwm, nrank):
+	# /proc 的字段是 kB，报 MB（整除，够用）
+	with open(out, 'w') as f:
+		f.write('PEAK_PROC_MB=%d\n' % (peak_proc // 1024))
+		f.write('PEAK_SUM_RSS_MB=%d\n' % (peak_sum_rss // 1024))
+		f.write('SUM_HWM_MB=%d\n' % (peak_sum_hwm // 1024))
+		f.write('NRANK=%d\n' % nrank)
+
+peak_proc = peak_sum_rss = peak_sum_hwm = nrank = 0
+started = False
+deadline = time.time() + 6 * 3600	# 兜底：真挂住了也不让采样器永久驻留
+
+def bail(signum, frame):
+	report(peak_proc, peak_sum_rss, peak_sum_hwm, nrank)
+	sys.exit(0)
+
+signal.signal(signal.SIGTERM, bail)
+signal.signal(signal.SIGINT, bail)
+
+while time.time() < deadline:
+	procs = snapshot()
+	if procs:
+		started = True
+		# VmHWM 是内核记的**历史最高**常驻集、只增不减，同一个 rank 采到一次即可；
+		# VmRSS 是当前值，同刻求和取最大——答"跑起来时节点上同时占了多少"。
+		# 三个数各有用处：单 rank 峰值看单进程吃多少，同刻总和看节点装不装得下，
+		# "各 rank 峰值之和"是各进程峰值不同时出现时的上界（保守值）。
+		peak_proc = max(peak_proc, max(p[0] for p in procs))
+		peak_sum_rss = max(peak_sum_rss, sum(p[1] for p in procs))
+		peak_sum_hwm = max(peak_sum_hwm, sum(p[0] for p in procs))
+		nrank = max(nrank, len(procs))
+	elif started:
+		break
+	time.sleep(0.2)
+
+report(peak_proc, peak_sum_rss, peak_sum_hwm, nrank)
+PYEOF
+MEMPID=$!
+
 mpirun "${MPIARGS[@]}" -np "${NP:-4}" mpifxcorr "bench/$(basename "$CFGIN")"
+
+PEAK_PROC_MB= PEAK_SUM_RSS_MB= SUM_HWM_MB= NRANK=
+kill "$MEMPID" 2>/dev/null || true
+wait "$MEMPID" 2>/dev/null || true
+if [ -s "$MEMOUT" ]; then
+	while IFS='=' read -r k v; do
+		case "$k" in
+			PEAK_PROC_MB)    PEAK_PROC_MB=$v ;;
+			PEAK_SUM_RSS_MB) PEAK_SUM_RSS_MB=$v ;;
+			SUM_HWM_MB)      SUM_HWM_MB=$v ;;
+			NRANK)           NRANK=$v ;;
+		esac
+	done < "$MEMOUT"
+	echo "run_bench.sh: memory peak over $NRANK rank(s): single rank $PEAK_PROC_MB MB," \
+	     "concurrent sum $PEAK_SUM_RSS_MB MB, per-rank peaks summed $SUM_HWM_MB MB"
+else
+	# mpirun 压根没起来（找不到 mpifxcorr、参数错等）：内存数据无从谈起，但不是
+	# 本脚本的失败——真正的失败 mpirun 已经用非零退出码报了
+	echo "run_bench.sh: memory sampler produced no data (mpifxcorr never started?)" >&2
+fi
 
 # ---- ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分 ----
 # ② 多留一个整秒的代价：mpifxcorr 会多写一个积分（起终点都在 batch 窗口之外，fxcorr

@@ -73,13 +73,25 @@ for v2d in "$@"; do
 	(cd "$CFG" && fxc vex2difx "$v2d")
 done
 
-# 规范化：绝对路径 -> 相对 config 目录。程序侧对这些字段一律"相对才拼根、
-# 绝对原样"，所以不改也不会读错；改是为了让整个 config/ 目录可以整体搬走。
-python3 - "$CFG" <<'PYEOF'
+# 规范化：绝对路径 -> 相对路径。程序侧对这些字段一律"相对才拼根、绝对原样"，
+# 所以不改也不会读错；改是为了让 workdir 整体可以搬走。
+#
+# **相对谁，取决于谁消费它**：
+#   * CALC/OUTPUT FILENAME 由 fxcorr 三工具（FxcorrPath）与 difx2fits 链路消费，
+#     它们按各自根拼路径，所以相对 config/ 即可；
+#   * **CORE CONF FILENAME 由 mpifxcorr 消费，而它按 cwd 解析**（run_bench.sh 在
+#     workdir 里跑 mpirun），所以必须相对 **workdir** ——相对 config/ 会指错地方。
+#     这条 2026-09-30 补：漏掉它时，workdir 一搬（/public/... → /work2/...）这个
+#     字段就指向不存在的 .threads，mpifxcorr 只 cwarn 一行继续跑，但
+#     Configuration::mpiGetFileContent 的 manager 打开失败会直接 return NULL
+#     （不参与 MPI_Bcast），从 rank 于是全部错位一格、.calc 与 .im 内容互换，
+#     表现为满屏 "We thought we were reading something starting with ..."。
+python3 - "$CFG" "$WORKDIR" <<'PYEOF'
 import glob, os, re, sys
 
-cfg = sys.argv[1]
-keys = ('CALC FILENAME', 'OUTPUT FILENAME')
+cfg, workdir = sys.argv[1], sys.argv[2]
+groups = ((('CALC FILENAME', 'OUTPUT FILENAME'), cfg),
+          (('CORE CONF FILENAME',), workdir))
 changed = 0
 for path in sorted(glob.glob(os.path.join(cfg, '*.input'))):
     with open(path) as f:
@@ -87,11 +99,13 @@ for path in sorted(glob.glob(os.path.join(cfg, '*.input'))):
     out = []
     touched = False
     for line in lines:
-        m = re.match(r'^(%s):(\s*)(\S+)\s*$' % '|'.join(re.escape(k) for k in keys), line)
-        if m and m.group(3).startswith('/'):
-            rel = os.path.relpath(m.group(3), cfg)
-            line = '%s:%s%s\n' % (m.group(1), m.group(2), rel)
-            touched = True
+        for keys, base in groups:
+            m = re.match(r'^(%s):(\s*)(\S+)\s*$' % '|'.join(re.escape(k) for k in keys), line)
+            if m and m.group(3).startswith('/'):
+                rel = os.path.relpath(m.group(3), base)
+                line = '%s:%s%s\n' % (m.group(1), m.group(2), rel)
+                touched = True
+                break
         out.append(line)
     if touched:
         with open(path, 'w') as f:
