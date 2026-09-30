@@ -475,10 +475,103 @@ C++ 后跑容器会**拿到旧行为**（实测 A 的 md5 与修复前一字不�
 与全量的记录**顺序本来就不一一对应**。实测 A vs P2 基准：逐字节 944/1024 条"不同"，按 key
 **1024/1024 全等**。
 
-**下一步**：① 修 `fxcorr-x` 的 SWIN 互斥检查误拦分片模式（重跑已有 batch 必卡，真 bug）；
-② 定失败时的 purge 策略（不 purge 会让残留 fengine 挤爆 tmpfs，实测已连锁）；③ 三个标定：
-**实测 TFLOPS（Q1）**、tmpfs 组数上限、`/work2` 撑得住的并行度；④ 矩阵 B/C/D —— **差距已定位在
-x 的并行度而非线程划分，可略**。
+**第三步：修 `fxcorr-x` 的 SWIN 互斥检查（2026-09-30，真 bug）**
+
+**症状**：一个 batch 只要被 merge 写过 SWIN，它的**任何一个 ds 组都再也重跑不了**——报
+`already holds 1024 record(s) inside this batch's time range`。P3 实测被它拦住（要重跑 batch 1
+做标定，只能先把 SWIN 手工挪到 `vis/_p2_swin_backup/` 绕过）。
+
+**根因**：`main.cpp` 里这条检查的条件是 `!merge`，把**分片模式**也圈了进来。而 `data-spec` 5.9
+末条写的是"batch 级 `merge` 与分片任务都不写 SWIN，**两者都不查**"。**代码与文档的背离可以
+精确地指到一句话**：同一节里 2026-09-27 的旧措辞"**全量模式与分片模式**启动时都读目标 SWIN"
+被当成了实现依据，而**同一段后半句已经写明"重跑分片不会被拦"**——两句不可兼得，实现选了错的
+那个。现为 `!merge && !sharded`，并把那半句订正为"只有全量模式"（`data-spec` 5.9 + 一条
+背离说明、`usage.md` 的环境变量行、`fxcorr-x/CLAUDE.md`、`workdir-template/vis/README.md`、
+`test/input/README.md`）。
+
+**判据**（用"越界组号"当探针：互斥检查在 `main.cpp:1027`、组号越界检查在 `:1087`，两者
+报错不同，一眼能看出越过了哪一道）：
+
+| 探针 | 期望 | 实测 |
+|---|---|---|
+| `fxcorr-x <bid> <wd> 99`（分片模式 + 越界组号） | 报 `ds_group 99 is out of range`（= 越过了互斥检查） | ✓ |
+| `fxcorr-x <bid> <wd>`（全量模式） | 报 `already holds 1024 record(s)` | ✓ **全量照旧拦** |
+
+两个探针都在**已经写过 SWIN 的 batch 1** 上跑，秒级完成（互斥检查只读 74 字节记录头，组号
+越界在算完分组后立即返回，都不读数据）。**绕过 workaround 已撤**：SWIN 移回
+`vis/test_1.difx/`、`_p2_swin_backup/` 删除——修复后不再需要它。
+
+> **顺带发现的两处 workdir 状态**（都是容器实验遗留，与本次修复无关，留给标定阶段处理）：
+> ① `meta/roots/00000001.json` 记的 `fengine` 是 `/dev/shm/fxcorr`（容器布局），与实际落在
+> `$W/fengine` 的 63 GB 不符 → 直接调 `fxcorr-x` 会先被**根一致性检查**拦下。**不挡
+> `run_batch.sh`**：它每次都 `cat >` 重写这份记录（`roots.sh:60`），且 bash 侧的
+> `fxcorr_check_roots` **只比 vis/product、不比 fengine**（`roots.sh:93`）——所以跑一次批就自动
+> 对齐了。② `fengine/00000001/` 这 63 GB 还留在共享盘上（上次没开 purge）。
+
+**第四步：失败路径也 purge（2026-09-30 定案，附端到端注入验证）**
+
+`FXCORR_PURGE_FENGINE=1` 的语义从"x 分片**成功后**删"改为"**该组用完即删，无论成败**"——
+`run_group` 的三处 `return` 收成一条路径，末尾统一 purge。
+
+**为什么**：失败组的 fengine **注定无人消费**（`run_group` 在 f 失败后不再调 x），却仍占
+16.8 GB；62 GB 的 tmpfs 少一组就少跑一组，实测连锁把整批拖垮（x 全失败 → 残留 48 GB →
+后续组写爆）。而"保留现场"的收益本就很低：f 只依赖 `raw`、不依赖别的中间产物，**重跑 f 就能
+再生**；`FEngineWriter` 的写失败原因也在日志里，不随 purge 消失。
+
+**注入验证**（batch 1，A 矩阵配置，4 组 × 8 ds，2026-09-30）：
+
+| 步骤 | 做法与理由 |
+|---|---|
+| 注入 | `chmod 000 raw/SX/SX_00000001_ds0.vdif`。**改名与删除都不行**——`fxinput.py` 的 `relink_data_table` 拿 `os.path.isfile()` 校验源文件，缺文件会在 **prepare 阶段**就报 `not found`、根本进不到 `run_group`；`chmod 000` 让校验通过而 `fxcorr-f` 打不开（`DataReader: cannot read the first frame`） |
+
+实测（2m30s，rc=1）：
+
+| 观察点 | 结果 |
+|---|---|
+| 失败点名 | `fxcorr-f failed for station SX ds0 (batch 00000001, ds group 0)`；`ds group 0 has failed f task(s): SX:ds0; its x shard is skipped`；`batch 00000001 failed in ds group(s): 0` |
+| **组 0 的 x 确未运行** | `x-g0.log` 的 mtime 停在上一轮（07:30），而 `x-g1/x-g3.log` 是本次（08:20）——日志文件只在命令真的执行时才会被重定向创建 |
+| **失败组与成功组的 fengine 都删** | `fengine/` 63 GB → **24 KB**（四个站目录全空），tmpfs 20 MB、无残留 |
+| batch 状态 | `failed`（`meta/batches.index` 不追加） |
+
+**顺带**：这次跑同时验证了第三步（**重跑已有 SWIN 的 batch 1 畅通**，不再被互斥检查拦），并把
+上一节记的两处容器遗留状态理顺了——`meta/roots/00000001.json` 的 `fengine` 已重写为
+`$W/fengine`，那 63 GB 也随 purge 清掉。
+
+> **标定前要注意的一处差异**：这次整批 **150 s**，而 P3 的 A 矩阵是 **104 s**。两次的差别不止
+> 一处（这次 fengine 落**共享盘**而非 tmpfs、且组 0 中途失败），**不能据此归因**。但标定必须
+> **统一落点**——跑之前先 `export FXCORR_FENGINE_ROOT=/dev/shm/fxcorr`。§17.1 记过同一件事：
+> 裸机跑时四个根靠默认值、把 fengine 落到了共享存储，测出 899 s/batch。
+
+**第五步：三个标定（2026-09-30 实测）**
+
+**① Q1：实测算力**。跑**单个 ds** 的 `fxcorr-f`（batch 1，BA 站 ds1，1.024 s 数据 = 262.1 M 采样点）：
+
+| 配置 | wall | 加速比 |
+|---|---|---|
+| `OMP_NUM_THREADS=1` | **18.24 s** | — |
+| `OMP_NUM_THREADS=8` | **9.40 s** | **1.94×** |
+
+- **单核吞吐 14.4 M 采样/s**。batch 1 的实时需求是 **32 ds × 256 M = 8.192 G 采样/s**——每 ds 绑 **8 个 freq 条目**（`NUM RECORDED FREQS: 8`）× 32 MHz，与 raw 体积吻合：131.6 MB ÷ 1.024 s ÷ 4 bit = 257 M ✓
+- **30 核 = 431 M 采样/s，只能实时处理 1.69 个 ds；追上实时要 570 核 ≈ 19 个节点**
+- **§5.1 的推算（需求 1.7 TFLOPS vs 30 核供给 0.15~0.6，差 3~11×）偏乐观，实测 19×**
+- **OpenMP 扩展性差（8 线程仅 1.94×）**——这是矩阵 E 不如 A 的直接原因，也是 §19"任务级并行优于线程级"的量化依据
+
+**② Q3：tmpfs 组数上限**
+
+| 并行度 | wall | tmpfs 峰值 | 结果 |
+|---|---|---|---|
+| 3 组 | 109.6 s | **47.2 GB** | ✓ 稳（轨迹 `49.5G → 13.9G → 1.7G → 16.5G → 0`） |
+| **4 组** | 63 s | **62.7 GB** | ✗ **写爆**，`SX ds7` 失败 |
+
+- **上限 = 3 组 = 24 任务**（4 组 × 16.8 GB = 67.4 GB > 63 GB 的 tmpfs），**与 §10.1 的推导 N=3 完全一致** ✓
+- **§17.2 的落盘校验同场验证**：写爆时 `FEngineWriter` 逐文件报 `No space left on device`、收尾报 `station products in .../SX/ds_7 are INCOMPLETE (filesystem full?)`、`fxcorr-f` 以非 0 退出——**不再是"32 个任务全报成功、要等 x 读到 subint 86 才发现"**
+- **第四步的"失败即 purge"同场验证**：写爆后 `du -sh /dev/shm/fxcorr` = **0**、tmpfs 回到 20 MB、无残留
+
+**③ Q4（`/work2` 撑得住的并行度）：未单独采集**——① ② 的实验里 fengine 落 tmpfs，x 不读 `/work2`，采不到。已有证据是 §2.2 的 raw 并发曲线（32 并发 4.13 GB/s，正好接住实时峰值 4.11 GB/s、无余量）加"3 组并行下未见存储瓶颈迹象"（f 占 31%、x 占 66%，都是计算）。**要硬数据需再跑一次带采集的批**。
+
+> **顺带得到落点差异**：同一配置、只换 `FXCORR_FENGINE_ROOT`——**tmpfs 109.6 s vs 共享盘 150 s（1.37×）**。这是 §17.1-§17.2 那条"fengine 必须落 tmpfs"的定量补充。
+
+**下一步**：P3 收尾完成，转 **P4**（mpifxcorr 对照）。矩阵 B/C/D 略——差距已定位在 x 的并行度而非线程划分。
 
 ## 11. P4：mpifxcorr 对照
 

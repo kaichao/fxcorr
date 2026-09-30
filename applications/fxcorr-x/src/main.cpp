@@ -1013,13 +1013,18 @@ int main(int argc, char **argv)
 		return EXIT_SUCCESS;
 	}
 
-	// 互斥检查：只有**会写 SWIN 的路径**需要它。全量模式与分片模式走这里——本 batch 的
-	// 时间范围若已经在 SWIN 里，说明它被另一次运行写过（全量、或过去的 merge），再写一遍
-	// 就是追加重复记录、破坏时间单调。**分片任务自身不写 SWIN，所以正常重跑分片不会被
-	// 拦**；会被拦的是"merge 之后又跑全量/又跑分片"。**两个层级的 merge 都不在这里查**：
-	// batch 级不碰 SWIN（无需查），实验级在 doMergeExperiment 内按"本次写出的全部 batch
-	// 的总时间范围"查——那里才有 batch 清单。
-	if(!merge)
+	// 互斥检查：只有**会写 SWIN 的路径**需要它，也就是全量模式（不传 ds_group、直写
+	// SWIN）。本 batch 的时间范围若已经在 SWIN 里，说明它被另一次运行写过（全量、或
+	// 过去的实验级 merge），再写一遍就是追加重复记录、破坏时间单调。
+	//
+	// **分片模式不走这里**——`data-spec` 5.9 末条："batch 级 merge 与分片任务都不写
+	// SWIN，**两者都不查**"。原先这里的条件是 `!merge`，把分片也圈了进来：后果不是
+	// "多一道保护"，而是**卡住正常重跑**——一个 batch 只要被 merge 写过 SWIN，它的
+	// 任何一个 ds 组就再也重跑不了，而重跑分片恰恰是并行调度里最常做的事（调并行度、
+	// 补失败组、换线程数做对照）。分片与已有 SWIN 混跑的重复风险由**实验级 merge**
+	// 兜住：doMergeExperiment 按"本次将写出的全部 batch 的总时间范围"查，那里才有
+	// batch 清单（本函数里只有当前这一个 batch 的信息，够不着）。
+	if(!merge && !sharded)
 	{
 		char swinpath[4096];
 		snprintf(swinpath, sizeof(swinpath), "%s/DIFX_%05d_%06d.s0000.b0000",

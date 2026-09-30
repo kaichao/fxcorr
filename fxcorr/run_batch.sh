@@ -37,10 +37,13 @@
 #   FXCORR_GROUP_JOBS=M（P3，默认 1）：组内同时跑几个 f 任务。矩阵 A 用 8
 #             （4 站 × 2 ds 一次铺开、OMP_NUM_THREADS=1），矩阵 E 用 1（组内
 #             串行、每个 f 任务 OMP_NUM_THREADS=8），两者在 3 组时都占 24 核。
-#   FXCORR_PURGE_FENGINE=1（P3）：该组 x 分片成功后删掉该组的 fengine 目录。
-#             **fengine 落 tmpfs 时这是硬需求而不是优化**——62 GB 只装得下 3
-#             组，不删上一波下一波就进不来（v7-plan 10.1）。失败路径不删，
-#             保留现场供定位。
+#   FXCORR_PURGE_FENGINE=1（P3）：**该组用完即删，无论成败**（2026-09-30 起
+#             ——原先只在 x 分片成功后删，失败路径"保留现场"）。**fengine 落
+#             tmpfs 时这是硬需求而不是优化**——62 GB 只装得下 3 组，不删上一
+#             波下一波就进不来（v7-plan 10.1）。失败路径不删的代价实测是**连
+#             锁**：失败组的 fengine 注定无人消费（x 已跳过），却仍占着 16.8 GB
+#             把后续组挤爆；而"留现场"的收益本就低——f 只依赖 raw，重跑即可再
+#             生，日志（含 FEngineWriter 的写失败原因）都在 meta/logs/<batch_id>/。
 set -euo pipefail
 
 # 四个可重定向的根（V5 P5）：容器透传与解析共用一份清单
@@ -223,6 +226,7 @@ run_group()
 {
 	local g=$1 t st di
 	local failed=""
+	local rc=0
 	local -a pids tasks
 	local n=0 i
 
@@ -250,20 +254,25 @@ run_group()
 	done
 
 	if [ -n "$failed" ]; then
-		# 本组数据不全，x 分片没有意义：不跑，也不 purge——保留现场供定位
+		# 本组数据不全，x 分片没有意义：不跑
 		echo "run_batch.sh: ds group $g has failed f task(s):$failed; its x shard is skipped" >&2
-		return 1
-	fi
-
-	if ! fxc fxcorr-x "$BID" "$WORKDIR" "$g" > "$LOGDIR/x-g$g.log" 2>&1; then
+		rc=1
+	elif ! fxc fxcorr-x "$BID" "$WORKDIR" "$g" > "$LOGDIR/x-g$g.log" 2>&1; then
 		echo "run_batch.sh: fxcorr-x shard $g failed for batch $BID; log: meta/logs/$BID/x-g$g.log" >&2
-		return 1
+		rc=1
 	fi
 
+	# **purge 不看成败（2026-09-30 定）**：`FXCORR_PURGE_FENGINE=1` 的语义是"该组
+	# 用完即删"，不是"成功才删"。失败路径原先刻意保留现场，实际代价是**连锁**——
+	# 失败组的 fengine 注定无人消费（x 已跳过），却继续占着 tmpfs；一组 16.8 GB，
+	# 62 GB 的 tmpfs 少一组就少跑一组，实测把整批拖垮（x 全失败 → 残留 48 GB →
+	# 后续组写爆）。而"留现场"的收益本来就很低：f 只依赖 raw、不依赖别的中间产物，
+	# **重跑 f 就能再生**，且日志（含 FEngineWriter 的写失败原因）都在
+	# meta/logs/$BID/ 里，不随 purge 消失。
 	if [ "$PURGE" = "1" ]; then
 		purge_group "$g"
 	fi
-	return 0
+	return $rc
 }
 
 # ---- 根记录与实验级一致性检查（Q18、Q4）：开跑前先挡不一致，再记下本 batch 的根 ----

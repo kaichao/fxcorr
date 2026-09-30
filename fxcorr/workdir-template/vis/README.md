@@ -43,9 +43,10 @@ SWIN 文件名里的 MJD / 秒是**实验级**的（`.input` 的 `START MJD`/`ST
 | **单级** `merge` 逐 batch 写（旧行为） | ✗ 多节点并行时回退 → 静默丢数据 |
 | 同一 batch 混跑不分片与分片 | ✗ 重复记录 + 回退 |
 
-- **防呆**：`fxcorr-x` 在**全量/分片**模式启动时读目标 SWIN 的记录头，若本 batch 的时间范围内
-  已有记录就**报错退出**（`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续）；**实验级 `merge`** 另查
-  "**本次将写出的全部 batch 的总时间范围**"；
+- **防呆**：`fxcorr-x` 的**全量模式**（不传 `ds_group`）启动时读目标 SWIN 的记录头，若本 batch
+  的时间范围内已有记录就**报错退出**（`FXCORR_X_SWIN_CONFLICT=allow` 可强制继续）；
+  **分片模式与 batch 级 `merge` 不查**（两者都不写 SWIN）；**实验级 `merge`** 另查
+  "**本次将写出的全部 batch 的总时间范围**"——上表最后一行的混跑就是由它拦下的；
 - **SWIN 的写入收敛到实验级 `merge --experiment` 一次**（`fxcorr/v6-plan.md` S4.1，2026-09-28
   实施）——batch 级只产出 `vis-parts/<batch_id>/merged.part`，不碰 SWIN。
 
