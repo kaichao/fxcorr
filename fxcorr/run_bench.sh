@@ -11,6 +11,10 @@
 # 用法：./run_bench.sh [workdir]
 #   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
 #   环境变量：NP（mpirun 进程数，默认 4）；FXCORR_WORKDIR（项目根目录，位置参数优先）
+#             跨节点（V7 P5，见 v7-plan.md §16）：
+#               FXCORR_MPI_PPN   每节点 rank 数，节点列表由 Slurm 分配自动展开
+#               FXCORR_MPI_HOSTS 直接给 mpirun 的 -host 串（`a:17,b:17`），绕开自动展开
+#               FXCORR_MPI_MAPBY 给 mpirun 的 --map-by（如 node）
 set -euo pipefail
 
 SCRIPTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -34,6 +38,9 @@ usage()
 用法：./run_bench.sh [workdir]
   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
   环境变量：NP（mpirun 进程数，默认 4）；FXCORR_WORKDIR（项目根目录，位置参数优先）
+            FXCORR_MPI_PPN   每节点 rank 数，节点从 Slurm 分配展开（跨节点，V7 P5）
+            FXCORR_MPI_HOSTS 直接给 mpirun 的 -host 串，如 "n1:17,n2:17"
+            FXCORR_MPI_MAPBY 给 mpirun 的 --map-by，如 node
 EOF
 	exit "${1:-2}"
 }
@@ -58,12 +65,19 @@ if ! [[ ${NP:-4} =~ ^[1-9][0-9]*$ ]]; then
 	echo "run_bench.sh: NP must be a positive integer" >&2
 	exit 2
 fi
+# python3 必须是 3：目标集群的 /usr/bin/python3 是 RHEL 7 的 **2.7.5**，得先 source
+# env.sh 让 PATH 前置 miniforge（fxcorr/build.md 坑 1）。本脚本一直依赖 python3 解析
+# batch.json，但 P5 多了一个**后台**起的 mpi_sampler.py——它语法错会静默退出，外面只
+# 看到"sampler produced no data"，连不到真正的原因上。所以提前卡在这里。
+python3 -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' 2>/dev/null || {
+	echo "run_bench.sh: python3 is not Python 3 ($(python3 --version 2>&1)) — source env.sh first" >&2
+	exit 2
+}
 
 # ---- ①② 定位 batch、推导 EXECUTE TIME 截断 ----
 # python3：json 读取 + .input 解析 + 浮点（bash 无浮点算术）
 OUT=$(mktemp)
-MEMOUT=$(mktemp)
-trap 'rm -f "${OUT:-}" "${MEMOUT:-}"' EXIT
+trap 'rm -f "${OUT:-}"' EXIT
 python3 - "$WORKDIR" "$FXCORR_ROOT_RAW" <<'PYEOF' > "$OUT"
 import glob, json, math, os, re, sys
 
@@ -222,7 +236,7 @@ sed -e "s|^IM FILENAME:[[:space:]]*\([^/[:space:]].*\)$|IM FILENAME:        $CFG
 rm -rf "$OUTDIR"    # 幂等重跑
 mkdir -p "$OUTDIR"
 
-# ---- ④ mpirun mpifxcorr（含内存峰值采集） ----
+# ---- ④ mpirun mpifxcorr（含内存峰值与跨节点流量采集） ----
 # DATA TABLE 文件名为相对路径（软链在 workdir 根），故 cwd 在 workdir 内跑。
 # mpifxcorr 需要 LD_LIBRARY_PATH 找 libmark5access（install-difx 的 bin/lib 目录）。
 cd "$WORKDIR"
@@ -231,106 +245,121 @@ MPIARGS=()
 if [ "$(id -u)" = 0 ]; then
 	MPIARGS+=(--allow-run-as-root)
 fi
+
+# ---- 跨节点映射（V7 P5）----
+# **跨节点必须显式指定**：mpirun 默认按 slot 把 rank 填满一台再用下一台，34 rank 会
+# 全挤进第一台，跨节点流量根本不发生——测出来的还是"单节点"的结论，而且看不出错。
+# FXCORR_MPI_PPN 是最省事的写法：节点列表从 Slurm 分配取，每台加 slot 数，拼成
+# mpirun 的 -host 串（`a:17,b:17`，等于 `scontrol show hostnames` 那句的展开）。
+if [ -n "${FXCORR_MPI_PPN:-}" ]; then
+	if ! [[ ${FXCORR_MPI_PPN} =~ ^[1-9][0-9]*$ ]]; then
+		echo "run_bench.sh: FXCORR_MPI_PPN must be a positive integer" >&2
+		exit 2
+	fi
+	[ -n "${SLURM_JOB_NODELIST:-}" ] || {
+		echo "run_bench.sh: FXCORR_MPI_PPN needs SLURM_JOB_NODELIST (submit under Slurm, or give FXCORR_MPI_HOSTS)" >&2
+		exit 2
+	}
+	command -v scontrol >/dev/null 2>&1 || { echo "run_bench.sh: scontrol not found (use FXCORR_MPI_HOSTS)" >&2; exit 2; }
+	hosts=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | paste -sd,)
+	FXCORR_MPI_HOSTS=$(printf '%s' "$hosts" | tr ',' '\n' | sed "s/\$/:$FXCORR_MPI_PPN/" | paste -sd,)
+	echo "run_bench.sh: FXCORR_MPI_PPN=$FXCORR_MPI_PPN -> -host $FXCORR_MPI_HOSTS" >&2
+fi
+if [ -n "${FXCORR_MPI_HOSTS:-}" ]; then
+	MPIARGS+=(-host "$FXCORR_MPI_HOSTS")
+	# 跨节点要显式转发两个环境变量——**少了哪个都起不来，而 Open MPI 两次报的是同一句
+	# "unable to find the specified executable file"，指的方向都是错的**（2026-09-30
+	# 在目标集群上逐个复现过）：
+	#   PATH            可执行文件写的是**裸名** `mpifxcorr`，本机靠 PATH 找到，远端 orted
+	#                   的 PATH 里没有 install/bin——于是"找不到文件本身"
+	#   LD_LIBRARY_PATH mpifxcorr 依赖 libfftw3f.so.3.5.7，而那个库**没有 SONAME**
+	#                   （build.md 坑 7），只能靠这个变量找到；Open MPI 不转发它，远端一条
+	#                   fxcorr/fftw 路径都没有——实测远端 `ldd` 有 7 个 not found、本机 0 个
+	# 两次报错都会把人往"共享盘没挂载 / 权限 / 路径拼写"上引，其实都在环境变量上。
+	MPIARGS+=(-x PATH)
+	MPIARGS+=(-x LD_LIBRARY_PATH)
+fi
+if [ -n "${FXCORR_MPI_MAPBY:-}" ]; then
+	MPIARGS+=(--map-by "$FXCORR_MPI_MAPBY")
+fi
+
 # --oversubscribe：允许 NP 大于核数。P4 的 4 站配置是**有意**超订的（34 进程 / 30 核，
 # v7-plan §11 拿它压边界），不加这个 Open MPI 会以 "not enough slots" 直接拒绝启动。
 # 核数够时它不改变行为，所以常开。
-MPIARGS+=(--oversubscribe)
+# **跨节点时不给**：--oversubscribe 就是 --map-by :OVERSUBSCRIBE，与上面的 -host /
+# --map-by 属于同一类映射指令，同时给会争；跨节点的 slot 数已由 host:slots 写明。
+if [ -z "${FXCORR_MPI_HOSTS:-}${FXCORR_MPI_MAPBY:-}" ]; then
+	MPIARGS+=(--oversubscribe)
+fi
 
-# 内存峰值采集（V7 P4 的 Q6）：V6 S3 只记了 wall 与 CPU，没记内存峰值，于是"目标
-# 节点装不装得下 mpifxcorr"这一问没法回答。现成手段都不行——`mpirun` 自己报不了子
-# 进程内存，`/usr/bin/time -v` 量的又只是 launcher 一个进程。所以自己采：后台按
-# /proc 轮询，**先等 mpifxcorr 出现、再等它们全部消失**就退出（不用赌 kill 信号
-# 的时机），mpirun 返回后再 kill 一次兜底。
-python3 - "$MEMOUT" <<'PYEOF' &
-import os, signal, sys, time
-
-out = sys.argv[1]
-# 只认进程名恰好是 mpifxcorr 的（/proc/<pid>/status 的 Name 字段）。mpirun 与 orted
-# 不计：它们不持有 F 数据，算进去会把 launcher 的内存混进"相关器占了多少"。
-def snapshot():
-	procs = []
-	for d in os.listdir('/proc'):
-		if not d.isdigit():
-			continue
-		try:
-			with open('/proc/%s/status' % d) as f:
-				st = f.read()
-		except (IOError, OSError):
-			continue	# 采样瞬间进程退出，正常
-		# Name 是 /proc/<pid>/status 的**第一个**字段，所以比首行就行。这里曾经写成
-		# '\nName:\tmpifxcorr\n'——以为它前面还有别的字段，于是永远匹配不上：采样器
-		# 一路空转到 6 小时兜底，外面看起来就是"卡住不返回"（实测踩过）。
-		if st.split('\n', 1)[0] != 'Name:\tmpifxcorr':
-			continue
-		hwm = rss = 0
-		for line in st.splitlines():
-			if line.startswith('VmHWM:'):
-				hwm = int(line.split()[1])
-			elif line.startswith('VmRSS:'):
-				rss = int(line.split()[1])
-		procs.append((hwm, rss))
-	return procs
-
-def report(peak_proc, peak_sum_rss, peak_sum_hwm, nrank):
-	# /proc 的字段是 kB，报 MB（整除，够用）
-	with open(out, 'w') as f:
-		f.write('PEAK_PROC_MB=%d\n' % (peak_proc // 1024))
-		f.write('PEAK_SUM_RSS_MB=%d\n' % (peak_sum_rss // 1024))
-		f.write('SUM_HWM_MB=%d\n' % (peak_sum_hwm // 1024))
-		f.write('NRANK=%d\n' % nrank)
-
-peak_proc = peak_sum_rss = peak_sum_hwm = nrank = 0
-started = False
-deadline = time.time() + 6 * 3600	# 兜底：真挂住了也不让采样器永久驻留
-
-def bail(signum, frame):
-	report(peak_proc, peak_sum_rss, peak_sum_hwm, nrank)
-	sys.exit(0)
-
-signal.signal(signal.SIGTERM, bail)
-signal.signal(signal.SIGINT, bail)
-
-while time.time() < deadline:
-	procs = snapshot()
-	if procs:
-		started = True
-		# VmHWM 是内核记的**历史最高**常驻集、只增不减，同一个 rank 采到一次即可；
-		# VmRSS 是当前值，同刻求和取最大——答"跑起来时节点上同时占了多少"。
-		# 三个数各有用处：单 rank 峰值看单进程吃多少，同刻总和看节点装不装得下，
-		# "各 rank 峰值之和"是各进程峰值不同时出现时的上界（保守值）。
-		peak_proc = max(peak_proc, max(p[0] for p in procs))
-		peak_sum_rss = max(peak_sum_rss, sum(p[1] for p in procs))
-		peak_sum_hwm = max(peak_sum_hwm, sum(p[0] for p in procs))
-		nrank = max(nrank, len(procs))
-	elif started:
-		break
-	time.sleep(0.2)
-
-report(peak_proc, peak_sum_rss, peak_sum_hwm, nrank)
-PYEOF
-MEMPID=$!
+# ---- 内存峰值 + 跨节点流量采集（每节点一份）----
+# P4 的 Q6：V6 S3 只记了 wall 与 CPU，没记内存峰值，于是"目标节点装不装得下
+# mpifxcorr"这一问没法回答。现成手段都不行——`mpirun` 自己报不了子进程内存，
+# `/usr/bin/time -v` 量的又只是 launcher 一个进程。所以自己采。采样逻辑（后台按
+# /proc 轮询，**先等 mpifxcorr 出现、再等它们全部消失**就退出，不用赌 kill 信号的
+# 时机）在 mpi_sampler.py：P4 时它内联在这里，P5 抽出去并加了网络计数。
+#
+# **P5 起每节点起一份**：内联那份只看得到启动节点，跨节点时其余节点的内存与流量
+# 全漏掉，而那两个数正是 P5 要的。Slurm 多节点分配下用 srun 分发（--overlap：与
+# mpirun 并存、不排队等资源），单节点直接后台跑——两条路走同一个脚本，口径不漂。
+SAMPLEDIR="$WORKDIR/bench/.p5-sample.$$"
+rm -rf "$SAMPLEDIR"; mkdir -p "$SAMPLEDIR"
+# mpirun 失败时 set -e 会直接跳出，采样器与临时目录得由 trap 收——P4 那份内联采集器
+# 没有这条，mpirun 报错时它会一直挂到 6 小时兜底才走
+trap 'rm -f "${OUT:-}"; if [ -n "${SAMPID:-}" ]; then kill "$SAMPID" 2>/dev/null; fi; rm -rf "${SAMPLEDIR:-}"' EXIT
+NNODES=${SLURM_JOB_NUM_NODES:-1}
+if [ "$NNODES" -gt 1 ] && command -v srun >/dev/null 2>&1; then
+	srun --nodes="$NNODES" --ntasks-per-node=1 --overlap \
+		python3 "$SCRIPTDIR/mpi_sampler.py" "$SAMPLEDIR" &
+	echo "run_bench.sh: sampler dispatched to $NNODES node(s) via srun" >&2
+else
+	python3 "$SCRIPTDIR/mpi_sampler.py" "$SAMPLEDIR" &
+fi
+SAMPID=$!
 
 mpirun "${MPIARGS[@]}" -np "${NP:-4}" mpifxcorr "bench/$(basename "$CFGIN")"
 
-PEAK_PROC_MB= PEAK_SUM_RSS_MB= SUM_HWM_MB= NRANK=
-kill "$MEMPID" 2>/dev/null || true
-wait "$MEMPID" 2>/dev/null || true
-if [ -s "$MEMOUT" ]; then
-	while IFS='=' read -r k v; do
-		case "$k" in
-			PEAK_PROC_MB)    PEAK_PROC_MB=$v ;;
-			PEAK_SUM_RSS_MB) PEAK_SUM_RSS_MB=$v ;;
-			SUM_HWM_MB)      SUM_HWM_MB=$v ;;
-			NRANK)           NRANK=$v ;;
-		esac
-	done < "$MEMOUT"
-	echo "run_bench.sh: memory peak over $NRANK rank(s): single rank $PEAK_PROC_MB MB," \
-	     "concurrent sum $PEAK_SUM_RSS_MB MB, per-rank peaks summed $SUM_HWM_MB MB"
+kill "$SAMPID" 2>/dev/null || true
+wait "$SAMPID" 2>/dev/null || true
+
+# 汇总：每节点一行 + 合计。**别只看启动节点**——P4 那份内联采集器的盲区就在这儿。
+SAMPLES=("$SAMPLEDIR"/*.txt)
+if [ -s "${SAMPLES[0]:-/nonexistent}" ]; then
+	TOT_NRANK=0 TOT_RSS=0 TOT_HWM=0 TOT_RX=0 TOT_TX=0
+	for f in "${SAMPLES[@]}"; do
+		HOST= PEAK_PROC_MB=0 PEAK_SUM_RSS_MB=0 SUM_HWM_MB=0 NRANK=0 NET_RX_MB=0 NET_TX_MB=0
+		while IFS='=' read -r k v; do
+			case "$k" in
+				HOST)            HOST=$v ;;
+				PEAK_PROC_MB)    PEAK_PROC_MB=$v ;;
+				PEAK_SUM_RSS_MB) PEAK_SUM_RSS_MB=$v ;;
+				SUM_HWM_MB)      SUM_HWM_MB=$v ;;
+				NRANK)           NRANK=$v ;;
+				NET_RX_MB)       NET_RX_MB=$v ;;
+				NET_TX_MB)       NET_TX_MB=$v ;;
+			esac
+		done < "$f"
+		echo "run_bench.sh: $HOST: $NRANK rank(s), single rank $PEAK_PROC_MB MB," \
+		     "concurrent sum $PEAK_SUM_RSS_MB MB, net rx $NET_RX_MB MB / tx $NET_TX_MB MB"
+		TOT_NRANK=$((TOT_NRANK + NRANK))
+		TOT_RSS=$((TOT_RSS + PEAK_SUM_RSS_MB))
+		TOT_HWM=$((TOT_HWM + SUM_HWM_MB))
+		TOT_RX=$((TOT_RX + NET_RX_MB))
+		TOT_TX=$((TOT_TX + NET_TX_MB))
+	done
+	if [ "${#SAMPLES[@]}" -gt 1 ]; then
+		echo "run_bench.sh: totals over ${#SAMPLES[@]} node(s): $TOT_NRANK rank(s)," \
+		     "concurrent sum $TOT_RSS MB (per-rank peaks summed $TOT_HWM MB)," \
+		     "net rx $TOT_RX MB / tx $TOT_TX MB"
+		echo "run_bench.sh:   跨节点流量取 Σtx 或 Σrx（同一份数据的两端），不是两者之和；" \
+		     "共享盘的读写也在这两个数里，要的是与 fxcorr 侧之差"
+	fi
 else
-	# mpirun 压根没起来（找不到 mpifxcorr、参数错等）：内存数据无从谈起，但不是
+	# mpirun 压根没起来（找不到 mpifxcorr、参数错等）：采样数据无从谈起，但不是
 	# 本脚本的失败——真正的失败 mpirun 已经用非零退出码报了
-	echo "run_bench.sh: memory sampler produced no data (mpifxcorr never started?)" >&2
+	echo "run_bench.sh: sampler produced no data (mpifxcorr never started?)" >&2
 fi
+rm -rf "$SAMPLEDIR"
 
 # ---- ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分 ----
 # ② 多留一个整秒的代价：mpifxcorr 会多写一个积分（起终点都在 batch 窗口之外，fxcorr
