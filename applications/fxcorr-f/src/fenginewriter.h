@@ -55,6 +55,18 @@ public:
 	 */
 	void writeAutocorrelationBatch(Mode *mode, bool datastreamsaveraged = false);
 
+	/**
+	 * Flushes and closes every product file, verifying that the writes
+	 * actually landed.  Returns false if any of them failed, in which case
+	 * the products are incomplete and the caller must exit non-zero --
+	 * a full filesystem must be reported here, not discovered later by
+	 * fxcorr-x reading a truncated band_XX.sp (v7-plan 17.2).
+	 *
+	 * The destructor still closes whatever is left, but silently: it cannot
+	 * report anything to the caller, so it must not be the one to notice.
+	 */
+	bool finalise();
+
 private:
 	void writeSpHeader(int band);
 	void writePcalHeader();
@@ -64,6 +76,8 @@ private:
 	int configindex;
 	int dsindex;
 	int nsubints;
+	std::string outdir;	// kept for finalise()'s error messages
+	bool finalised;		// finalise() ran: the dtor has nothing left to close
 
 	int nrecordedbands;
 	int ntotalbands;	// recorded + zoom (autocorr.bin covers all of them)

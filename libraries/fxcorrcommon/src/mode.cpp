@@ -32,6 +32,13 @@ pthread_mutex_t FFTinitMutex = PTHREAD_MUTEX_INITIALIZER;
 Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int chanstoavg, int bpersend, int gsamples, int nrecordedfreqs, double recordedbw, double * recordedfreqclkoffs, double * recordedfreqclkoffsdelta, double * recordedfreqphaseoffs, double * recordedfreqlooffs, int nrecordedbands, int nzoombands, int nbits, Configuration::datasampling sampling, Configuration::complextype tcomplex, int unpacksamp, bool fbank, bool linear2circular, int fringerotorder, int arraystridelen, bool cacorrs, double bclock)
   : config(conf), configindex(confindex), datastreamindex(dsindex), recordedbandchannels(recordedbandchan), channelstoaverage(chanstoavg), blockspersend(bpersend), guardsamples(gsamples), fftchannels(recordedbandchan*2), numrecordedfreqs(nrecordedfreqs), numrecordedbands(nrecordedbands), numzoombands(nzoombands), numbits(nbits), unpacksamples(unpacksamp), fringerotationorder(fringerotorder), arraystridelength(arraystridelen), recordedbandwidth(recordedbw), blockclock(bclock), filterbank(fbank), linear2circular(linear2circular), calccrosspolautocorrs(cacorrs), recordedfreqclockoffsets(recordedfreqclkoffs), recordedfreqclockoffsetsdelta(recordedfreqclkoffsdelta), recordedfreqphaseoffset(recordedfreqphaseoffs), recordedfreqlooffsets(recordedfreqlooffs)
 {
+  // P3: per-block accumulators are opt-in (see mode.h).  Off by default so
+  // that mpifxcorr and every serial consumer keep the original code path.
+  blockac = 0;
+  blockweight = 0;
+  blockacblocks = 0;
+  currentblock = 0;
+
   int status, localfreqindex, parentfreqindex;
   int decimationfactor = config->getDDecimationFactor(configindex, datastreamindex);
   estimatedbytes = 0;
@@ -569,9 +576,25 @@ Mode::~Mode()
       vectorFree(autocorrelations[i][j]);
     delete [] autocorrelations[i];
     delete [] weights[i];
+    if(blockacblocks > 0)
+    {
+      for(int b=0;b<blockacblocks;b++)
+      {
+        for(int j=0;j<numrecordedbands;j++)
+          vectorFree(blockac[i][b][j]);
+        delete [] blockac[i][b];
+      }
+      delete [] blockac[i];
+      delete [] blockweight[i];
+    }
   }
   delete [] weights;
   delete [] autocorrelations;
+  if(blockacblocks > 0)
+  {
+    delete [] blockac;
+    delete [] blockweight;
+  }
 
   if(config->getDPhaseCalIntervalHz(configindex, datastreamindex) > 0)
   {
@@ -635,8 +658,16 @@ float Mode::unpack(int sampleoffset, int subloopindex)
   return 1.0;
 }
 
-void Mode::process(int index, int subloopindex)  //frac sample error is in microseconds 
+void Mode::process(int index, int subloopindex)  //frac sample error is in microseconds
 {
+  // block index for the per-block accumulators (no-op when they are off);
+  // index is the FFT position within the subint, which is exactly the slot
+  currentblock = index;
+  // each block is processed exactly once per subint, so clearing its slots
+  // here is both correct and N times cheaper than zeroing every slot of every
+  // Mode up front (see clearBlockAccumulators)
+  clearBlockAccumulators(index);
+
   double phaserotation, averagedelay, nearestsampletime, starttime, lofreq, walltimesecs, fracwalltime, fftcentre, d0, d1, d2, fraclooffset;
   f32 phaserotationfloat, fracsampleerror;
   int status, count, nearestsample, integerdelay, RcpIndex, LcpIndex, intwalltime;
@@ -1273,18 +1304,18 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
 
 	if (!linear2circular) {
 	  //do the autocorrelation (skipping Nyquist channel)
-	  status = vectorAddProduct_cf32(fftoutputs[j][subloopindex], conjfftoutputs[j][subloopindex], autocorrelations[0][j], recordedbandchannels);
+	  status = vectorAddProduct_cf32(fftoutputs[j][subloopindex], conjfftoutputs[j][subloopindex], acTarget(0, j), recordedbandchannels);
 	  if(status != vecNoErr)
 	    csevere << startl << "Error in autocorrelation!!!" << status << endl;
 
 	  //store the weight for the autocorrelations
           if(perbandweights)
           {
-	    weights[0][j] += perbandweights[subloopindex][j];
+	    addWeight(false, j, perbandweights[subloopindex][j]);
           }
           else
           {
-	    weights[0][j] += dataweight[subloopindex];
+	    addWeight(false, j, dataweight[subloopindex]);
           }
 	}
       }
@@ -1335,23 +1366,23 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
 
       //if we need to, do the cross-polar autocorrelations
       if(calccrosspolautocorrs) {
-	status = vectorAddProduct_cf32(fftoutputs[indices[0]][subloopindex], conjfftoutputs[indices[1]][subloopindex], autocorrelations[1][indices[0]], recordedbandchannels);
+	status = vectorAddProduct_cf32(fftoutputs[indices[0]][subloopindex], conjfftoutputs[indices[1]][subloopindex], acTarget(1, indices[0]), recordedbandchannels);
 	if(status != vecNoErr)
 	  csevere << startl << "Error in cross-polar autocorrelation!!!" << status << endl;
-	status = vectorAddProduct_cf32(fftoutputs[indices[1]][subloopindex], conjfftoutputs[indices[0]][subloopindex], autocorrelations[1][indices[1]], recordedbandchannels);
+	status = vectorAddProduct_cf32(fftoutputs[indices[1]][subloopindex], conjfftoutputs[indices[0]][subloopindex], acTarget(1, indices[1]), recordedbandchannels);
 	if(status != vecNoErr)
 	  csevere << startl << "Error in cross-polar autocorrelation!!!" << status << endl;
       
 	//store the weights
         if(perbandweights)
         {
-	  weights[1][indices[0]] += perbandweights[subloopindex][indices[0]]*perbandweights[subloopindex][indices[1]];
-	  weights[1][indices[1]] += perbandweights[subloopindex][indices[0]]*perbandweights[subloopindex][indices[1]];
+	  addWeight(true, indices[0], perbandweights[subloopindex][indices[0]]*perbandweights[subloopindex][indices[1]]);
+	  addWeight(true, indices[1], perbandweights[subloopindex][indices[0]]*perbandweights[subloopindex][indices[1]]);
         }
         else
         {
-	  weights[1][indices[0]] += dataweight[subloopindex];
-	  weights[1][indices[1]] += dataweight[subloopindex];
+	  addWeight(true, indices[0], dataweight[subloopindex]);
+	  addWeight(true, indices[1], dataweight[subloopindex]);
         }
       }
     }
@@ -1359,18 +1390,18 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
     if (linear2circular) {// Delay this as it is possible for linear2circular to be active, but just one pol present
       for (int k=0; k<count; k++) {
 	//do the autocorrelation (skipping Nyquist channel)
-	status = vectorAddProduct_cf32(fftoutputs[indices[k]][subloopindex], conjfftoutputs[indices[k]][subloopindex], autocorrelations[0][indices[k]], recordedbandchannels);
+	status = vectorAddProduct_cf32(fftoutputs[indices[k]][subloopindex], conjfftoutputs[indices[k]][subloopindex], acTarget(0, indices[k]), recordedbandchannels);
 	if(status != vecNoErr)
 	  csevere << startl << "Error in autocorrelation!!!" << status << endl;
 
 	//store the weight
         if(perbandweights)
         {
-	  weights[0][indices[k]] += perbandweights[subloopindex][indices[k]];
+	  addWeight(false, indices[k], perbandweights[subloopindex][indices[k]]);
         }
         else
         {
-	  weights[0][indices[k]] += dataweight[subloopindex];
+	  addWeight(false, indices[k], dataweight[subloopindex]);
         }
       }
     }
@@ -1458,6 +1489,37 @@ bool Mode::calculateAndAverageKurtosis(int numblocks, int maxchannels)
   return nonzero;
 }
 
+// P3: allocate the per-block accumulators (see mode.h).  Only the fxcorr-f
+// parallel form calls this; everything else leaves them off and behaves
+// exactly as before.  blockspersend slots per band -- the whole subint's worth
+// of blocks, because a thread may be given any contiguous stretch of them.
+void Mode::enableBlockAccumulators()
+{
+  if(blockacblocks > 0)
+    return;	// already enabled
+
+  blockacblocks = blockspersend;
+  blockac = new cf32***[autocorrwidth];
+  blockweight = new f32*[autocorrwidth];
+  for(int i=0;i<autocorrwidth;i++)
+  {
+    blockac[i] = new cf32**[blockacblocks];
+    blockweight[i] = new f32[blockacblocks*numrecordedbands];
+    for(int b=0;b<blockacblocks;b++)
+    {
+      blockac[i][b] = new cf32*[numrecordedbands];
+      for(int j=0;j<numrecordedbands;j++)
+      {
+        blockac[i][b][j] = vectorAlloc_cf32(recordedbandchannels);
+        vectorZero_cf32(blockac[i][b][j], recordedbandchannels);
+      }
+    }
+    for(int k=0;k<blockacblocks*numrecordedbands;k++)
+      blockweight[i][k] = 0.0f;
+  }
+  currentblock = 0;
+}
+
 void Mode::zeroAutocorrelations()
 {
   int status;
@@ -1471,6 +1533,27 @@ void Mode::zeroAutocorrelations()
         cerror << startl << "Error trying to zero autocorrelations!" << endl;
       weights[i][j] = 0.0;
     }
+  }
+  // Note: the per-block slots are NOT zeroed here.  They belong to a single
+  // block of one subint and the parallel form clears each one just before the
+  // block that fills it (clearBlockAccumulators), so only the slots actually
+  // used are touched.  Zeroing them here would write every slot of every Mode
+  // every subint for nothing.
+}
+
+// P3: zero one block's slots (all bands, both polarisations).  Cheap: the
+// block arrays are per-thread private, so no synchronisation is involved.
+void Mode::clearBlockAccumulators(int block)
+{
+  if(blockacblocks <= 0 || block < 0 || block >= blockacblocks)
+    return;
+
+  for(int i=0;i<autocorrwidth;i++)
+  {
+    for(int j=0;j<numrecordedbands;j++)
+      vectorZero_cf32(blockac[i][block][j], recordedbandchannels);
+    for(int j=0;j<numrecordedbands;j++)
+      blockweight[i][block*numrecordedbands + j] = 0.0f;
   }
 }
 

@@ -45,7 +45,9 @@ fxcorr-x merge --experiment [workdir]      # 实验级归并 → SWIN（唯一�
 - **`.part` 的第一次写截断、后续追加**（`Visibility::wroteoutputpath`）：`writeSWIN` 每积分周期调一次，同一次运行内是追加；而重跑分片必须覆盖自己的 `.part`（data-spec 5.9），所以由第一次写负责截断。
 - **`readPart` 必须读 `.input`**：记录长度不在头里，由 `freqindex` 查 FREQ 表得到。sync word 与长度不符即报错退出（宁可停，也不要写出看着正常实则残缺的 SWIN）。
 
-**判据**（`fxcorr/test/multids/README.md` 有可复现步骤）：单组分片与不分片逐字节相同；多组分片 + merge 与不分片逐字节相同；缺片默认不写、`FXCORR_X_MERGE_FORCE=1` 强制并告警。
+**判据**（`fxcorr/test/multids/README.md` 有可复现步骤）：**分片与不分片"记录集合相同"**（用 `cmp_swin.py`，**默认按 key 配对**，`--by-position` 才是逐条比）；缺片默认不写、`FXCORR_X_MERGE_FORCE=1` 强制并告警。
+
+> **"逐字节相同"这个旧说法要降级（2026-09-30，V7 P3 订正）**：分片 + `merge` 与全量的**记录顺序本来就不一一对应**——`merge` 按 `(整数纳秒, autocorr, baseline, freq, pulsarbin)` 做 stable_sort，全量按 baseline/freq 的**处理顺序**直接写，两者都时间单调但**同一条时间戳内的排列不同**（data-spec 只规定"按整数纳秒归并"，未规定组内次序）。V6 S4.1 之所以测出"逐字节相同"（`v6-plan.md:549`），是因为那次配置是 **4 ds / 1 组 / 3 batch**——**只有 1 个 ds 组**，没有组间交错，顺序恰好一致。V7 P3 在 4 个组的真实规模上实测：逐字节 **944/1024 条"不同"**、按 key **1024/1024 全等**。
 
 ## 文件与 mpifxcorr 对照
 

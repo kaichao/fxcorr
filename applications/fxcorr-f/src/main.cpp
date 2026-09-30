@@ -408,6 +408,16 @@ int main(int argc, char **argv)
 		replicas.push_back(m);
 	}
 
+	// P3: per-block accumulators on every Mode, the primary included (it is
+	// worker 0).  Each block's autocorrelation and weight land in their own
+	// slot, and the reduction below adds the slots up in block order -- the
+	// serial accumulation sequence -- instead of summing per-thread segment
+	// totals, which reorders the floating point additions.  Cost: ~21 MB per
+	// Mode for a 1310-block, 8-band, 128-channel, dual-polarisation config.
+	mode->enableBlockAccumulators();
+	for(size_t rt=0;rt<replicas.size();rt++)
+		replicas[rt]->enableBlockAccumulators();
+
 	// autocorrelation averaging batch, same formula as core.cpp:769-783
 	int numbufferedffts = config.getNumBufferedFFTs(0);
 	double blockns = (double)config.getSubintNS(0)/(double)reader.getBlocksPerSend();
@@ -639,32 +649,63 @@ int main(int argc, char **argv)
 				// primary Mode's -- disjoint memory, no races.
 				if(t == 0)
 				{
+					// P3: reduce in **block order** across every Mode, the
+					// primary included (it is worker 0).  Each Mode parked
+					// every block's autocorrelation in its own slot, so
+					// walking the blocks in sequence reproduces the serial
+					// accumulation order bit for bit.  Summing the per-thread
+					// segment totals -- what this did before -- puts a
+					// rounding in between the segments and shifts the low
+					// bits of every value: measured on the V7 target cluster
+					// as the whole autocorrelation section of the SWIN
+					// disagreeing between OMP_NUM_THREADS=1 and 8.
+					int crosspols = mode->writeCrossAutoCorrs() ? 2 : 1;
+					for(int wt=0;wt<nthreads;wt++)
+					{
+						Mode *wm = (wt == 0) ? mode : replicas[wt-1];
+						int bstart = (int)((long long)wt*numffts/nthreads);
+						int bend = (int)((long long)(wt+1)*numffts/nthreads);
+						for(int b=bstart;b<bend;b++)
+						{
+							int ib = fftloop*numbufferedffts + b;
+							for(int cp=0;cp<crosspols;cp++)
+							{
+								for(int j=0;j<nrecordedbands;j++)
+								{
+									int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
+									int nchan = config.getFNumChannels(freqindex);
+									const cf32 *src = wm->getBlockAc(cp, ib, j);
+									cf32 *dst = mode->getAutocorrelation(cp, j);
+									for(int k=0;k<nchan;k++)
+									{
+										dst[k].re += src[k].re;
+										dst[k].im += src[k].im;
+									}
+									// addWeightReduced, not addWeight: the
+									// primary has the block slots on too, so
+									// addWeight() would divert into them
+									mode->addWeightReduced(cp, j, wm->getBlockWeight(cp, ib, j));
+								}
+							}
+						}
+					}
+
+					// kurtosis and pcal are NOT per-block yet (mode.h), so
+					// they keep the old segment-wise reduction -- and it stays
+					// copies-only, because the primary already accumulated its
+					// own share inside process().
 					for(size_t rt=0;rt<replicas.size();rt++)
 					{
 						Mode *rm = replicas[rt];
-
-						// accumulate this replica's autocorrelations/weights/kurtosis
-						int crosspols = mode->writeCrossAutoCorrs() ? 2 : 1;
-						for(int i=0;i<crosspols;i++)
+						if(dokurtosis)
 						{
 							for(int j=0;j<nrecordedbands;j++)
 							{
 								int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
 								int nchan = config.getFNumChannels(freqindex);
-								const cf32 *src = rm->getAutocorrelation(i, j);
-								cf32 *dst = mode->getAutocorrelation(i, j);
-								for(int k=0;k<nchan;k++)
-								{
-									dst[k].re += src[k].re;
-									dst[k].im += src[k].im;
-								}
-								mode->addWeight(i, j, rm->getWeight(i, j));
-								if(dokurtosis)
-									mode->addKurtosisProducts(j, rm->getKurtosisProducts1(j), rm->getKurtosisProducts2(j), nchan);
+								mode->addKurtosisProducts(j, rm->getKurtosisProducts1(j), rm->getKurtosisProducts2(j), nchan);
 							}
 						}
-
-						// accumulate this replica's raw pcal tone accumulations
 						if(haspcal)
 						{
 							for(int j=0;j<nrecordedbands;j++)
@@ -796,6 +837,15 @@ int main(int argc, char **argv)
 	delete mode;
 	for(Mode *m : replicas)
 		delete m;
+
+	// Products must be on disk before this task calls itself done: a full
+	// filesystem has to fail HERE, while this process still knows which file
+	// it was writing, rather than surface later as fxcorr-x reading a
+	// truncated band_XX.sp (v7-plan 17.2).  Under the P3 layout fengine
+	// lives on tmpfs, whose capacity is a hard wall, so this is the expected
+	// failure mode, not a rare one.
+	if(!writer.finalise())
+		return fail(monitor, "fxcorr-f: station products for batch " + batchid + " are incomplete (see above)");
 
 	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
 	monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);

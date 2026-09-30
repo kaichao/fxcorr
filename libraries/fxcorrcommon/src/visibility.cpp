@@ -103,6 +103,14 @@ Visibility::Visibility(Configuration * conf, int id, int numvis, char * dbuffer,
 }
 
 // Note: not to be called until .difx/ dir is created.
+//
+// NO CALLER in fxcorr: after the split, PCAL is written by the f side alone
+// (applications/fxcorr-f/src/pcaltextwriter.cpp), which creates the file and
+// its comment header itself.  Kept as an upstream-faithful copy.  If it is
+// ever wired up, note that (a) the filename needs the same _ds<N> suffix the
+// other two sites use, and (b) `completedstations` below de-duplicates by
+// station name only -- with per-datastream files the key must become
+// (station, datastream), or one datastream's file never gets created.
 void Visibility::initialisePcalFiles()
 {
   char pcalfilename[MAX_PATH];
@@ -1069,7 +1077,13 @@ The four columns are:
       } // end of recorded band loop
       if(nonzero) // If at least one tone had non-zero amplitude, write the line to the file
       {
-        sprintf(pcalfilename, "%s/PCAL_%05d_%06d_%s", config->getOutputFilename().c_str(), config->getStartMJD(), config->getStartSeconds(), config->getDStationName(currentconfigindex, i).c_str());
+        // _ds<N> suffix: one file per (station, datastream), matching
+        // applications/fxcorr-f/src/pcaltextwriter.cpp.  fxcorr-x does not
+        // currently fill the pcal section of `results`, so `nonzero` stays
+        // false and no line is written here (data-spec 12); the name is kept
+        // in sync so that enabling it later cannot silently write to the
+        // wrong file.
+        sprintf(pcalfilename, "%s/PCAL_%05d_%06d_%s_ds%d", config->getOutputFilename().c_str(), config->getStartMJD(), config->getStartSeconds(), config->getDStationName(currentconfigindex, i).c_str(), i);
         pcaloutput.open(pcalfilename, ios::app);
         pcaloutput << pcalline << endl;
         pcaloutput.close();

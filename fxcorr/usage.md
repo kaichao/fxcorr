@@ -18,6 +18,8 @@
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
 - 任务粒度：f 任务 = (batch_id, station, ds_index)（fxcorr-f 的 station/ds_index 参数即该两维；多 datastream 站每记录线程一个 f 任务）；x 任务 = (batch_id) 全站全基线（fxcorr-x 无站参数，站列表由 .input 枚举）。**分片模式下 x 任务细化为 (batch_id, ds_group)**——`ds_group` 是**一组 ds（跨站、含全部极化）**，不是单个 ds，见 fxcorr-x 节。**任务 ID 规范**（`<batch>-<station>-<ds>` / `<batch>-<g>` / `<batch>-merge`）见 data-spec 第 6 节。并行模型见 data-spec 第 12 节。
 - 错误行为：参数不足或校验失败时打印原因到 stderr 并以非 0 退出；成功退出 0。
+- **`run_batch.sh` 的并行调度（V7 P3，2026-09-30）**：`FXCORR_PARALLEL=N` 启用**按 ds 组并行**——调度单元下沉到 `(batch, ds 组)`，同时最多 N 个组在跑；每组内部再并行 `FXCORR_GROUP_JOBS` 个 f 任务（默认 1），该组的 x 分片跑完后按 **`FXCORR_PURGE_FENGINE=1`** 删掉这组 fengine（tmpfs 能滚波的**前提**）。**N 从配置推导**（`N = min(tmpfs ÷ 单组 fengine, 可用核 ÷ 每组任务数, 带宽 ÷ 单任务读速率 ÷ 每组任务数)`，见 `v7-plan.md` 10.1），不是拍脑袋定的。**设了它就是分片路径**（自带 `FXCORR_X_SHARD` 的语义），末了仍做 batch 级 merge；**不设 = 现行行为**（逐站串行 f）。失败语义随之改为**跑完全部、点名失败者**（不再"任一失败即停"），逐任务日志落 `meta/logs/<batch_id>/`。
+  实测（4 站 × 8 ds，30 核 / 62 GB tmpfs）：`FXCORR_PARALLEL=3 FXCORR_GROUP_JOBS=8 OMP_NUM_THREADS=1` 用 **104 s**，而 `3×1×OMP8` 用 135 s 且总 CPU 多用 2/3——**多任务单线程优于少任务多线程**。
 - 前置安装：各工具与 `fxcorrcommon` 库，构建见 `build.md`。
 
 ---

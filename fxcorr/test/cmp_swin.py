@@ -4,12 +4,24 @@
 解析两个 SWIN 文件（74 字节二进制头 + nchan*8 数据/记录，见
 visibility.cpp appendSWINHeaderBuffered），逐记录比较头字段与可见度复数。
 
-用法: cmp_swin.py <file_a> <file_b> <nchan> [maxrecords] [--by-key]
+用法: cmp_swin.py <file_a> <file_b> <nchan> [maxrecords] [--by-position]
 
-默认按记录序号逐条比。多 datastream / 分片合并的场景下两侧的记录**顺序**不再
-一一对应（各自按自己的 baseline 集合写），要加 --by-key：按
-(基线号, freq 索引, 极化对, 整数纳秒时间) 配对，比的是"记录集合相同"，顺序
-不参与。时间用整数纳秒作 key，不用浮点秒——浮点相等比较不可靠。
+**默认按 key 配对**：按 (基线号, freq 索引, 极化对, 整数纳秒时间) 配对，比的是
+"**记录集合相同**"，记录顺序不参与。**这是 P3（2026-09-30）起的默认判据**——
+理由见下。
+
+--by-position 保留旧的"按记录序号逐条比"行为，只适用于**两边走的是同一个写出
+路径**的场合（例如改动前后跑同一条串行链）。
+
+**为什么默认要按 key**：分片 + `merge` 与全量写出的记录**顺序本来就不一一对应**。
+`merge` 按 (整数纳秒, autocorr, baseline, freq 索引, pulsarbin) 做 stable_sort，
+全量模式按 baseline/freq 的**处理顺序**直接写——两者都保证时间单调，但**同一条
+时间戳内的排列各自不同**，而 data-spec 只规定"按整数纳秒归并"、没有规定组内次序。
+逐条比会把这个差异报成"944/1024 条记录不同"（实测 V7 P3），**看着像灾难，实际
+集合一条不差**。反过来，曾经在测试机上验证过的"多组分片 + merge 与不分片逐字节
+相同"，只是因为那个小配置里同时间戳内的记录少、恰好同序，**属于偶然成立**。
+
+时间用整数纳秒作 key，不用浮点秒——浮点相等比较不可靠。
 """
 import struct
 import sys
@@ -71,8 +83,9 @@ def keyof(r):
 
 
 if __name__ == '__main__':
-    argv = [a for a in sys.argv[1:] if a != '--by-key']
-    bykey = '--by-key' in sys.argv
+    argv = [a for a in sys.argv[1:] if not a.startswith('--')]
+    # P3 起默认按 key 配对（集合判据）；--by-position 回到逐条比
+    bykey = '--by-position' not in sys.argv
     if len(argv) < 3:
         print(__doc__)
         sys.exit(2)

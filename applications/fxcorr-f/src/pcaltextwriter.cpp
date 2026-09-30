@@ -66,10 +66,21 @@ PcalTextWriter::PcalTextWriter(const string &pcaldir, Configuration *conf, int c
 	chanstoavg = config->getFChannelsToAverage(config->getDRecordedFreqIndex(configindex, dsindex, config->getDLocalRecordedFreqIndex(configindex, dsindex, 0)));
 	blockspersend = config->getBlocksPerSend(configindex);
 
+	// One file per (station, datastream) -- the _ds<N> suffix keeps the
+	// concurrent writers apart.  Before V7 P3 every datastream of a station
+	// wrote the SAME file (upstream layout, shared by a station's
+	// datastreams), which was fine while they ran one after another but
+	// loses rows once they overlap: the update below is a read-modify-write
+	// and the later writer drops the earlier one's new lines.  The suffix is
+	// the GLOBAL datastream index (the same one visibility.cpp uses), not the
+	// station-local one -- both sides must keep agreeing on it.
+	// The single-file, timestamp-sorted `PCAL_%05d_%06d_%s` of the product
+	// contract is to be recovered by a merge step (V7 P5, not implemented
+	// yet), the same way vis-parts/*.part is merged into the SWIN.
 	char filename[1024];
-	snprintf(filename, sizeof(filename), "%s/PCAL_%05d_%06d_%s",
+	snprintf(filename, sizeof(filename), "%s/PCAL_%05d_%06d_%s_ds%d",
 	         pcaldir.c_str(), config->getStartMJD(), config->getStartSeconds(),
-	         config->getDStationName(configindex, dsindex).c_str());
+	         config->getDStationName(configindex, dsindex).c_str(), dsindex);
 	filepath = filename;
 }
 

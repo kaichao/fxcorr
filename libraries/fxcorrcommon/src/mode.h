@@ -213,7 +213,56 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   }
 
  /** Accumulates a replica's band weight into this Mode's weight. */
-  inline void addWeight(bool crosspol, int outputband, f32 w) { weights[(crosspol)?1:0][outputband] += w; }
+  inline void addWeight(bool crosspol, int outputband, f32 w)
+  {
+    if(blockacblocks > 0)
+      blockweight[(crosspol)?1:0][currentblock*numrecordedbands + outputband] += w;
+    else
+      weights[(crosspol)?1:0][outputband] += w;
+  }
+
+  /**
+   * Adds to the running weight directly, bypassing the per-block slots.
+   * Needed because the Mode doing the block-order reduction has the slots on
+   * too (it is also a worker), so addWeight() would divert into them.
+   */
+  inline void addWeightReduced(bool crosspol, int outputband, f32 w) { weights[(crosspol)?1:0][outputband] += w; }
+
+  /**
+   * Turns on the per-block accumulators (see blockac).  Allocates
+   * blockspersend slots per band, so it must be called before any process()
+   * and only for a Mode that is going to be accumulated block-wise -- i.e.
+   * the fxcorr-f parallel form.  Costs ~21 MB for a 1310-block, 8-band,
+   * 128-channel, dual-polarisation configuration.
+   */
+  void enableBlockAccumulators();
+
+  /**
+   * Zeroes the per-block slots of one block.  The parallel form calls this
+   * immediately before process() for the blocks a thread owns, which is both
+   * correct (each block is processed exactly once per subint) and much
+   * cheaper than zeroing every slot up front -- a worker touches only 1/N of
+   * them, and zeroing all of them for all N Modes costs ~50 GB of writes per
+   * batch on a 1310-block configuration.
+   */
+  void clearBlockAccumulators(int block);
+
+  /**
+   * Where process() should accumulate the autocorrelation of the block it is
+   * working on: the per-block slot when the accumulators are on, the shared
+   * per-band array otherwise (the original behaviour).
+   */
+  inline cf32* acTarget(int crosspol, int outputband) const
+  {
+    return (blockacblocks > 0) ? blockac[crosspol][currentblock][outputband]
+                               : autocorrelations[crosspol][outputband];
+  }
+
+  /** Per-block autocorrelation slot; only valid after enableBlockAccumulators(). */
+  inline cf32* getBlockAc(bool crosspol, int block, int outputband) const { return blockac[(crosspol)?1:0][block][outputband]; }
+
+  /** Per-block weight slot; only valid after enableBlockAccumulators(). */
+  inline f32 getBlockWeight(bool crosspol, int block, int outputband) const { return blockweight[(crosspol)?1:0][block*numrecordedbands + outputband]; }
 
  /** Accumulates a replica's raw pcal tone accumulation into this Mode's. */
   inline void addPcal(int outputband, int tone, cf32 v)
@@ -300,6 +349,34 @@ protected:
   f32 **  weights;
   s32 *   validflags;
   cf32*** autocorrelations;
+
+  // P3 (fxcorr-f parallel form): per-block accumulators.
+  //
+  // The autocorrelation and its weight are the only *reduction*-type products
+  // of process(): every FFT block adds into them, so the result depends on the
+  // order the additions happen in.  The other products (fftoutputs, pcal,
+  // kurtosis) are either position-indexed or small enough to ignore.
+  //
+  // fxcorr-f's parallel form gives each thread a different stretch of blocks,
+  // so summing the per-thread totals reorders those additions relative to the
+  // serial run and changes the last bits -- measured on the V7 target cluster
+  // as ~0.5% of the autocorrelation values, which is exactly what SWIN's
+  // autocorrelation section then disagreed on.  With these enabled, process()
+  // parks each block's contribution in its own slot instead, and the primary
+  // thread adds the slots up in block order -- the serial sequence again.
+  //
+  // NULL/0 (the default, and what mpifxcorr along with the serial form use)
+  // keeps the original accumulation path untouched.
+  //
+  // Layout note for the GPU question: [crosspol][block][outputband][chan] is
+  // already the flat, branch-free form a baseline-by-baseline kernel wants --
+  // the natural parallel axes are (block, band, chan) and every lane does the
+  // same multiply-accumulate.  Kept block-major so that a future accelerator
+  // path can consume it without a transpose.
+  cf32**** blockac;	// [crosspol][block][outputband] -> cf32*
+  f32 **  blockweight;	// [crosspol][block][outputband]
+  int     blockacblocks;	// blocks allocated; 0 = disabled
+  int     currentblock;	// block process() is accumulating into
   vecFFTSpecR_f32 * pFFTSpecR;
   vecFFTSpecC_cf32 * pFFTSpecC;
   vecDFTSpecR_f32 * pDFTSpecR;

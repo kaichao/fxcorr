@@ -22,8 +22,25 @@
 #             vis-parts/<bid>/merged.part（**不写 SWIN**：SWIN 由实验级的
 #             `fxcorr-x merge --experiment` 单点写出，那是实验级操作、不在本
 #             脚本里——见 data-spec 5.9 末条）。
-#             组数由本脚本从 .input 的 BASELINE TABLE 推导（与程序内
+#             组数由 fxinput.py 从 .input 的 BASELINE TABLE 推导（与程序内
 #             deriveDsGroups 同规则，两处必须同改）。不设 = 现行行为。
+#
+#   FXCORR_PARALLEL=N（P3，按 ds 组并行调度）：把调度单元下沉到 **(batch, ds
+#             组)**——同时最多 N 个组在跑，每组内部先并行跑完该组的全部 f
+#             任务（FXCORR_GROUP_JOBS 个同时），再跑该组的 x 分片，最后按
+#             FXCORR_PURGE_FENGINE 决定是否删掉该组 fengine。**组数 N 由配置
+#             推导、不是拍脑袋**：N = min(tmpfs ÷ 单组 fengine, 可用核 ÷ 每组
+#             任务数, 带宽 ÷ 单任务读速率 ÷ 每组任务数)，见 v7-plan 10.1。
+#             **设了它就是分片路径**（自带 FXCORR_X_SHARD 的语义），末了仍做
+#             batch 级 merge；与 FXCORR_X_SHARD 同时设时不冲突，只是后者被
+#             吸收。不设 = 现行行为（逐站串行 f，x 全量或按 FXCORR_X_SHARD）。
+#   FXCORR_GROUP_JOBS=M（P3，默认 1）：组内同时跑几个 f 任务。矩阵 A 用 8
+#             （4 站 × 2 ds 一次铺开、OMP_NUM_THREADS=1），矩阵 E 用 1（组内
+#             串行、每个 f 任务 OMP_NUM_THREADS=8），两者在 3 组时都占 24 核。
+#   FXCORR_PURGE_FENGINE=1（P3）：该组 x 分片成功后删掉该组的 fengine 目录。
+#             **fengine 落 tmpfs 时这是硬需求而不是优化**——62 GB 只装得下 3
+#             组，不删上一波下一波就进不来（v7-plan 10.1）。失败路径不删，
+#             保留现场供定位。
 set -euo pipefail
 
 # 四个可重定向的根（V5 P5）：容器透传与解析共用一份清单
@@ -103,6 +120,23 @@ fi
 mkdir -p "$WORKDIR/meta"
 fxcorr_mkroots	# Q19：四个根由编排层建齐，程序遇根不存在只报错
 
+# ---- P3 并行度参数：**校验必须在任何副作用之前** ----
+# 放在这里而不是调度分支里：那边已经在 mark_status running 之后，参数写错会把
+# batch 卡在 running 上（status 改了、活没干），重跑还得先手工改回来。
+if [ -n "${FXCORR_PARALLEL:-}" ]; then
+	PARALLEL=$FXCORR_PARALLEL
+	GROUP_JOBS=${FXCORR_GROUP_JOBS:-1}
+	PURGE=${FXCORR_PURGE_FENGINE:-0}
+	case "$PARALLEL" in
+		''|*[!0-9]*) echo "run_batch.sh: FXCORR_PARALLEL must be a positive integer (got '$PARALLEL')" >&2; exit 2 ;;
+	esac
+	[ "$PARALLEL" -ge 1 ] || { echo "run_batch.sh: FXCORR_PARALLEL must be >= 1 (got $PARALLEL)" >&2; exit 2; }
+	case "$GROUP_JOBS" in
+		''|*[!0-9]*) echo "run_batch.sh: FXCORR_GROUP_JOBS must be a positive integer (got '$GROUP_JOBS')" >&2; exit 2 ;;
+	esac
+	[ "$GROUP_JOBS" -ge 1 ] || { echo "run_batch.sh: FXCORR_GROUP_JOBS must be >= 1 (got $GROUP_JOBS)" >&2; exit 2; }
+fi
+
 # ---- ①② 读 batch.json + .input、前置校验、DATA TABLE 软链重做 ----
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
@@ -129,10 +163,10 @@ done < "$OUT"
 [ -n "$CFGIN" ] || { echo "run_batch.sh: failed to parse batch $BID" >&2; exit 2; }
 # 站表：<station> <站内 ds 序号> <ds 组号> <数据文件>。组号由 fxinput.py 推出，与
 # fxcorr-x 分片模式的组号一一对应（C++ 侧按 ds 序号打掩码，同一条规则）——P3 的
-# 按组调度消费它，这里暂时只取前两列。
-declare -a DSTATION
+# 按组调度正消费它（DSGROUP 列），FXCORR_PARALLEL 未设时只取前两列。
+declare -a DSTATION	# "<station> <站内 ds 序号> <ds 组号>"
 while read -r st di g fn; do
-	DSTATION+=("$st $di")
+	DSTATION+=("$st $di $g")
 done < <(awk 'f{print} /^--$/{f=1}' "$OUT")
 
 # ---- ③④⑤⑥⑦ status 流转与逐站/基线执行 ----
@@ -155,6 +189,83 @@ if st == "done":
 		f.write("%s,done,%s\n" % (bid, datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")))
 ' "$WORKDIR" "$BID" "$1"
 }
+# ---- P3 并行调度的三个辅助（FXCORR_PARALLEL 未设时不参与执行）----
+
+# 等到池里有空位：**bash 4.2 没有 wait -n**（目标集群实测 4.2.46），而
+# `${#arr[@]}` / `"${arr[@]}"` 对空数组在 set -u 下会报 unbound。作业表绕开两者——
+# `jobs -rp` 只列**正在运行**的后台作业（已完成但未 wait 的不计入），正好是"当前
+# 有几个任务在跑"；组函数在后台子 shell 里执行，所以组间、组内两层池各看各自的
+# 作业表，互不干扰。
+pool_wait()
+{
+	while [ "$(jobs -rp | wc -l)" -ge "$1" ]; do
+		sleep 1
+	done
+}
+
+# 删掉一个 ds 组的 fengine（只在它的 x 分片成功之后调用）。fengine 落 tmpfs 时
+# 容量是硬墙：不删上一波，下一波就进不来（v7-plan 10.1）。失败路径刻意不调用。
+purge_group()
+{
+	local t st di
+	local root=${FXCORR_ROOT_FENGINE:?}
+	for t in ${GROUP_TASKS[$1]:-}; do
+		st=${t%%:*}
+		di=${t#*:}
+		rm -rf "$root/$BID/$st/ds_$di"
+	done
+}
+
+# 跑一个 ds 组：组内 f 并行 → 该组 x 分片 → 按开关 purge。在后台子 shell 里调用
+# （run_group N &），退出码 0 = 该组完整成功。组内顺序固定（.input 的站序），
+# 并行只改变"谁先跑"，不改变任何任务的输入。
+run_group()
+{
+	local g=$1 t st di
+	local failed=""
+	local -a pids tasks
+	local n=0 i
+
+	for t in ${GROUP_TASKS[$g]:-}; do
+		st=${t%%:*}
+		di=${t#*:}
+		pool_wait "$GROUP_JOBS"
+		fxc fxcorr-f "$BID" "$st" "$WORKDIR" "$di" > "$LOGDIR/f-$st-ds$di.log" 2>&1 &
+		pids[$n]=$!
+		tasks[$n]="$st:$di"
+		n=$((n + 1))
+	done
+
+	# **失败语义（P3 起）**：不再是"任一失败即停、不跑后续"，而是**跑完该组
+	# 全部任务再判**——并行下"第一个失败"的位置本身不携带信息，要点名才有用。
+	# `wait <pid>` 在作业结束后仍返回它的退出码，所以可以逐个回收。
+	for ((i = 0; i < n; i++)); do
+		if wait "${pids[$i]}"; then
+			continue
+		fi
+		st=${tasks[$i]%%:*}
+		di=${tasks[$i]#*:}
+		echo "run_batch.sh: fxcorr-f failed for station $st ds$di (batch $BID, ds group $g); log: meta/logs/$BID/f-$st-ds$di.log" >&2
+		failed="$failed $st:ds$di"
+	done
+
+	if [ -n "$failed" ]; then
+		# 本组数据不全，x 分片没有意义：不跑，也不 purge——保留现场供定位
+		echo "run_batch.sh: ds group $g has failed f task(s):$failed; its x shard is skipped" >&2
+		return 1
+	fi
+
+	if ! fxc fxcorr-x "$BID" "$WORKDIR" "$g" > "$LOGDIR/x-g$g.log" 2>&1; then
+		echo "run_batch.sh: fxcorr-x shard $g failed for batch $BID; log: meta/logs/$BID/x-g$g.log" >&2
+		return 1
+	fi
+
+	if [ "$PURGE" = "1" ]; then
+		purge_group "$g"
+	fi
+	return 0
+}
+
 # ---- 根记录与实验级一致性检查（Q18、Q4）：开跑前先挡不一致，再记下本 batch 的根 ----
 # 检查先于写入：两者的 roots.json 都在 meta/roots/ 下，写过的不能再当"已有记录"
 fxcorr_check_roots "$BID"
@@ -162,49 +273,107 @@ fxcorr_write_roots "$BID"
 
 mark_status running
 
-# 逐 datastream fxcorr-f（多 datastream 站每流一个 f 任务，带站内序号）：
-# 任一失败 → status=failed、非 0 退出，不跑后续站（规格③④）
-for entry in "${DSTATION[@]}"; do
-	st=${entry%% *}
-	di=${entry#* }
-	echo "run_batch.sh: fxcorr-f $BID $st ds$di" >&2
-	if ! fxc fxcorr-f "$BID" "$st" "$WORKDIR" "$di"; then
-		echo "run_batch.sh: fxcorr-f failed for station $st ds$di" >&2
+# 逐任务日志目录（P3）：并行后各任务的 stdout/stderr 交错，不分离就没法定位
+LOGDIR="$WORKDIR/meta/logs/$BID"
+
+if [ -n "${FXCORR_PARALLEL:-}" ]; then
+	# ========= P3：按 ds 组并行调度（计算单元 = (batch, ds 组)）=========
+	# PARALLEL / GROUP_JOBS / PURGE 已在前面校验过（那段必须早于任何副作用）
+	mkdir -p "$LOGDIR"
+
+	# 组号 → 该组的 f 任务（"<station>:<站内 ds 序号>"），组内保持 .input 的站序。
+	# 组号来自 fxinput.py，与 fxcorr-x 分片模式的组号同一条规则。
+	declare -A GROUP_TASKS
+	for entry in "${DSTATION[@]}"; do
+		st=${entry%% *}
+		rest=${entry#* }
+		di=${rest%% *}
+		grp=${rest#* }
+		GROUP_TASKS[$grp]="${GROUP_TASKS[$grp]:-} $st:$di"
+	done
+
+	echo "run_batch.sh: parallel mode, $NGRP ds group(s), FXCORR_PARALLEL=$PARALLEL FXCORR_GROUP_JOBS=$GROUP_JOBS FXCORR_PURGE_FENGINE=$PURGE" >&2
+
+	# 组间由池限制同时在跑的个数；组内部再由 run_group 的池限制任务数。
+	# 组的启动顺序 = 组号顺序，运行顺序取决于谁先空出来（这正是并行的意义）。
+	declare -a gpids
+	grp=0
+	while [ "$grp" -lt "$NGRP" ]; do
+		pool_wait "$PARALLEL"
+		run_group "$grp" &
+		gpids[$grp]=$!
+		grp=$((grp + 1))
+	done
+
+	# 全部组跑完再判——与组内同一套失败语义
+	gfail=""
+	for ((grp = 0; grp < NGRP; grp++)); do
+		if ! wait "${gpids[$grp]}"; then
+			gfail="$gfail $grp"
+		fi
+	done
+	if [ -n "$gfail" ]; then
+		echo "run_batch.sh: batch $BID failed in ds group(s):$gfail (logs in meta/logs/$BID)" >&2
 		mark_status failed
 		exit 1
 	fi
-done
 
-mkdir -p "$OUTDIR"    # 规格⑤（fxcorr-x 自身也会建，先建无害）
-# FXCORR_X_SHARD=1：按 ds 组分片（每片一个 x 任务），再由 **batch 级** merge 归并成
-# vis-parts/<bid>/merged.part。分片与 batch 级 merge 都**不写 SWIN**（D16 落
-# vis-parts/）——分片各自追加 SWIN 必然时间回退、被 difx2fits 静默丢弃，所以 SWIN 的
-# 写出收敛到实验级的 `fxcorr-x merge --experiment` 一次（形态 A，data-spec 5.9 末条）。
-# 组数由上面的 python 段从 .input 推导（与程序内同一规则）。
-if [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
-	echo "run_batch.sh: shard mode, $NGRP ds group(s)" >&2
-	g=0
-	while [ "$g" -lt "$NGRP" ]; do
-		if ! fxc fxcorr-x "$BID" "$WORKDIR" "$g"; then
-			echo "run_batch.sh: fxcorr-x shard $g failed for batch $BID" >&2
+	# batch 级 merge：本 batch 各组的 ds<G>.part → merged.part。**不写 SWIN**：SWIN 的
+	# 唯一写入者是实验级的 `fxcorr-x merge --experiment`（data-spec 5.9 末条）。
+	if ! fxc fxcorr-x merge "$BID" "$WORKDIR" > "$LOGDIR/merge.log" 2>&1; then
+		echo "run_batch.sh: fxcorr-x merge failed for batch $BID; log: meta/logs/$BID/merge.log" >&2
+		mark_status failed
+		exit 1
+	fi
+else
+	# 逐 datastream fxcorr-f（多 datastream 站每流一个 f 任务，带站内序号）：
+	# 任一失败 → status=failed、非 0 退出，不跑后续站（规格③④）
+	for entry in "${DSTATION[@]}"; do
+		st=${entry%% *}
+		rest=${entry#* }
+		di=${rest%% *}
+		echo "run_batch.sh: fxcorr-f $BID $st ds$di" >&2
+		if ! fxc fxcorr-f "$BID" "$st" "$WORKDIR" "$di"; then
+			echo "run_batch.sh: fxcorr-f failed for station $st ds$di" >&2
 			mark_status failed
 			exit 1
 		fi
-		g=$((g + 1))
 	done
-	if ! fxc fxcorr-x merge "$BID" "$WORKDIR"; then
-		echo "run_batch.sh: fxcorr-x merge failed for batch $BID" >&2
+
+	mkdir -p "$OUTDIR"    # 规格⑤（fxcorr-x 自身也会建，先建无害）
+	# FXCORR_X_SHARD=1：按 ds 组分片（每片一个 x 任务），再由 **batch 级** merge 归并成
+	# vis-parts/<bid>/merged.part。分片与 batch 级 merge 都**不写 SWIN**（D16 落
+	# vis-parts/）——分片各自追加 SWIN 必然时间回退、被 difx2fits 静默丢弃，所以 SWIN 的
+	# 写出收敛到实验级的 `fxcorr-x merge --experiment` 一次（形态 A，data-spec 5.9 末条）。
+	# 组数由 fxinput.py 从 .input 推导（与程序内同一规则）。此路径不并发，失败语义
+	# 维持原样（任一失败即停），P3 起只在 FXCORR_PARALLEL 那条路径上改成"跑完再判"。
+	if [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
+		echo "run_batch.sh: shard mode, $NGRP ds group(s)" >&2
+		grp=0
+		while [ "$grp" -lt "$NGRP" ]; do
+			if ! fxc fxcorr-x "$BID" "$WORKDIR" "$grp"; then
+				echo "run_batch.sh: fxcorr-x shard $grp failed for batch $BID" >&2
+				mark_status failed
+				exit 1
+			fi
+			grp=$((grp + 1))
+		done
+		if ! fxc fxcorr-x merge "$BID" "$WORKDIR"; then
+			echo "run_batch.sh: fxcorr-x merge failed for batch $BID" >&2
+			mark_status failed
+			exit 1
+		fi
+	elif ! fxc fxcorr-x "$BID" "$WORKDIR"; then
+		echo "run_batch.sh: fxcorr-x failed for batch $BID" >&2
 		mark_status failed
 		exit 1
 	fi
-elif ! fxc fxcorr-x "$BID" "$WORKDIR"; then
-	echo "run_batch.sh: fxcorr-x failed for batch $BID" >&2
-	mark_status failed
-	exit 1
 fi
 
 mark_status done
-if [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
+if [ -n "${FXCORR_PARALLEL:-}" ]; then
+	echo "run_batch.sh: batch $BID done, $NGRP ds group(s) merged into vis-parts/$BID/merged.part"
+elif [ "${FXCORR_X_SHARD:-0}" = "1" ]; then
 	echo "run_batch.sh: batch $BID done, shards merged into vis-parts/$BID/merged.part"
 else
 	echo "run_batch.sh: batch $BID done, SWIN in $(basename "$OUTDIR")"

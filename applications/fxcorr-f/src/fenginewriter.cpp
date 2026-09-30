@@ -1,5 +1,6 @@
 #include "fenginewriter.h"
 
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -15,8 +16,9 @@ using namespace std;
 FEngineWriter::FEngineWriter(const string &outdir, Configuration *conf, int confindex, int ds, int nsubs, int acb) :
 	config(conf), configindex(confindex), dsindex(ds), nsubints(nsubs),
 	nrecordedbands(0), ntotalbands(0), blockspersend(0), flagwords(0), acblocks(acb),
-	haspcal(false), pcalfile(0), autocorrfile(0)
+	haspcal(false), finalised(false), pcalfile(0), autocorrfile(0)
 {
+	this->outdir = outdir;
 	nrecordedbands = config->getDNumRecordedBands(configindex, dsindex);
 	ntotalbands = config->getDNumTotalBands(configindex, dsindex);
 	blockspersend = config->getBlocksPerSend(configindex);
@@ -93,6 +95,62 @@ FEngineWriter::~FEngineWriter()
 		fclose(pcalfile);
 	if(autocorrfile != NULL)
 		fclose(autocorrfile);
+}
+
+// Flush and close one file, reporting whether the bytes actually landed.
+// The write* methods never check fwrite(), so a full filesystem only shows up
+// here: write() fails with ENOSPC, stdio latches it in the stream's error
+// flag, and nothing upstream notices until the file is read back.  That is
+// exactly v7-plan 17.2 -- tmpfs filled up, all 32 f tasks reported success,
+// and fxcorr-x was the one to discover the truncated band_XX.sp.
+static bool closeChecked(FILE *f, const string &name)
+{
+	if(f == NULL)
+		return true;
+
+	bool ok = true;
+	if(fflush(f) != 0 || ferror(f))
+	{
+		cerr << "FEngineWriter: write to " << name << " failed: " << strerror(errno) << endl;
+		ok = false;
+	}
+	if(fclose(f) != 0)
+	{
+		cerr << "FEngineWriter: close of " << name << " failed: " << strerror(errno) << endl;
+		ok = false;
+	}
+	return ok;
+}
+
+bool FEngineWriter::finalise()
+{
+	bool ok = true;
+
+	for(int j=0;j<nrecordedbands;j++)
+	{
+		if(spfiles[j] == NULL)
+			continue;
+		if(!closeChecked(spfiles[j], spnames[j]))
+			ok = false;
+		spfiles[j] = NULL;	// the dtor must not close it a second time
+	}
+	if(pcalfile != NULL)
+	{
+		if(!closeChecked(pcalfile, outdir + "/pcal.bin"))
+			ok = false;
+		pcalfile = NULL;
+	}
+	if(autocorrfile != NULL)
+	{
+		if(!closeChecked(autocorrfile, outdir + "/autocorr.bin"))
+			ok = false;
+		autocorrfile = NULL;
+	}
+
+	finalised = true;
+	if(!ok)
+		cerr << "FEngineWriter: station products in " << outdir << " are INCOMPLETE (filesystem full?)" << endl;
+	return ok;
 }
 
 void FEngineWriter::writeSpHeader(int band)
