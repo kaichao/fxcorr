@@ -6,8 +6,9 @@
 # 要点（见 v7-plan.md §17）：
 #  1. FXCORR_RUN_MODE=host —— 我们**已经在容器里**，run_batch.sh 的 fxc() 直调才是对的
 #     （设成 container 会让它再套一层 docker run，那台机器没有 docker）
-#  2. 源码目录要 bind 进去：run_batch.sh / make_testdata.sh 不在镜像里（镜像只有 roots.sh
-#     与三个 wrap_*.sh）
+#  2. 源码目录要 bind 进去：**编排脚本以集群这份为准**。镜像里其实也有一份 run_batch.sh /
+#     fxinput.py / make_testdata.sh（P3 起），但那是冻在构建时刻的快照——bind 之后改了脚本
+#     不用重建 .sif。二进制则相反：取**镜像内**的，那才是"容器化"要验的对象（v7-plan §17.3）
 #  3. 四个根**显式透传并 bind** —— 这是 V7 踩过的坑：缺省时 fengine 会落到共享存储
 #  4. **不是路径的开关只透传、不 bind**（P3 起）：并行度三件套与 OMP_NUM_THREADS
 #     是 run_batch.sh 在容器里要读的环境变量，漏掉白名单里的任何一个，它都会在
