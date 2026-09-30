@@ -71,14 +71,18 @@ V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化�
 
 | stage | 基础 | 内容 |
 |---|---|---|
-| stage 1 `builder` | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen` 全量编译（后两者依赖 mpifxcorr 安装的 fxcorr.pc，须一并跳过）；构建期内容不进运行段 |
+| stage 1 `builder` | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen --makeflags="-j4"` 全量编译（后两者依赖 mpifxcorr 安装的 fxcorr.pc，须一并跳过）；构建期内容不进运行段 |
 | stage 2 `runtime` | debian:13-slim | 运行时依赖 + 从 builder COPY 的 `/usr/local/difx/lib/*.so*`、`/share`（difxcalc 星历）与 `bin/` 下六个可执行：vex2difx、difxcalc、fxcorr-sim、fxcorr-f、fxcorr-x、difx2fits |
 
 构建（在测试机执行，前置 `make sync`）：
 
 ```bash
-ssh fxcorr 'cd /root/fxcorr/fxcorr/docker && make build'    # 一次出镜像，全量编译约 13 分钟（8 核实测）
+ssh fxcorr 'cd /root/fxcorr/fxcorr/docker && make build'    # 一次出镜像，见下方耗时
 ```
+
+**耗时（2026-09-30 实测，8 核）**：**增量重建 3m38s**（apt 依赖层命中缓存）；**首次构建再加约 6 分钟**（apt 层本身约 353s）。`install-difx` 那一层的编译耗时从单线程的 5m51s 降到 `-j4` 的 3m28s——`install-difx` 默认是裸 `make`、各组件单线程，靠它自带的 `--makeflags` 开关并行化，**收益到 4 就饱和**（`-j8` 只快 2.7%）；实测数据与理由见 `fxcorr/docker/README.md`。四组并行度（`-j1/-j4/-j8`/正式镜像）产出的 `fxcorr-f` **md5 完全一致**，并行不影响产物。
+
+> `v5-plan.md:252` 记的"一次构建约 13 分钟（apt 353s + `install-difx` 411s）"是**单线程时代**的数字，两份数量级对得上（411s ≈ 这次的 `-j1` 5m51s），保留原文不改——它是 V5 当时的实测记录。
 
 产物：`fxcorr/fxcorr:latest` 与 `fxcorr/fxcorr:2.9.1`。
 

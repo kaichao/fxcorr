@@ -35,7 +35,29 @@ cd fxcorr/docker && make build    # 测试机上执行（docker host）
 
 构建上下文是仓库根（`../..`），含 `install-difx` 与全部源码；根 `.dockerignore` 排除
 `.git/`、`difx-data/`、运行时数据目录与**编译产物**（`*.o` 等——宿主遗留的会被 `COPY . /src`
-带进去按时间戳复用，必须排掉）。代码变更后需重建，全量重编译约 13 分钟（8 核实测）。
+带进去按时间戳复用，必须排掉）。代码变更后需重建。
+
+### 编译并行度：`--makeflags="-j4"`（2026-09-30 实测）
+
+`install-difx` 的 `MAKEcommand` 默认是裸的 `"make "`，**每个组件都单线程编译**；它自带
+`--makeflags` 开关（`--help` 第 84 行：*"so you can do make -j 4 to speed up compilation"*），
+值会追加到每一次 make 调用上。Dockerfile 现在固定传 `-j4`，依据是 8 核机器上的实测——
+三次串行、同一环境、每次**都从干净源码重编**（用 `ARG CACHEBUST` 传时间戳强制最后一层
+失效；否则同一个 `JOBS` 值会命中上一次的层缓存，`time` 报出来的是接近 0 的假数字）：
+
+| `--makeflags` | real | user | sys | 相对 `-j1` |
+|---|---|---|---|---|
+| `-j1` | 5m50.7s | 5m04.0 | 0m36.6 | 1.00× |
+| **`-j4`** | **3m27.8s** | 6m18.2 | 0m45.1 | **1.69×** |
+| `-j8` | 3m22.3s | 7m41.3 | 0m49.7 | 1.74× |
+
+**收益到 4 就基本饱和**：`-j8` 只比 `-j4` 快 2.7%，user 时间反而多 1m23s。原因是能并行的
+只有**各组件内部的 make**——autoreconf、每组件的 configure、以及 `install-difx` 逐个遍历
+三十多个组件这三段本来就是串行的。实测 CPU 利用率印证：`-j4` 只有 203%、`-j8` 只有 252%
+（8 核里平均 2.5 核在干活）。固定 4 还给构建机留出余量，也不受容器里 `nproc` 口径的影响。
+
+> 上表是**编译那一层**（`RUN install-difx …`）的耗时，不含 apt 依赖层、`COPY` 上下文与
+> runtime 段的组装。
 
 产物：`fxcorr/fxcorr:latest` 与 `fxcorr/fxcorr:2.9.1`（**330MB** 实测）。
 

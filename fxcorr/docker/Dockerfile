@@ -44,7 +44,20 @@ COPY . /src
 
 # install-difx 常规组件构建；mpifxcorr 不进镜像（免装 MPI）；
 # difx2profile/vis2screen 依赖 mpifxcorr 安装的 fxcorr.pc，一并跳过（均不在容器需求清单）
-RUN python3 install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen
+#
+# --makeflags="-j4"：install-difx 的 MAKEcommand 默认是裸的 "make "，各组件都单线程
+# 编译（该脚本 --help 第 84 行正是为这个用途留的开关，值会追加到每次 make 调用上）。
+# **为什么固定 4 而不是 $(nproc)** ——在 8 核机器上实测（2026-09-30，三次串行、同一
+# 环境、每次都从干净源码重编，见 fxcorr/docker/README.md）：
+#
+#     -j1  5m50.7s        -j4  3m27.8s (1.69x)        -j8  3m22.3s (1.74x)
+#
+# 收益到 4 就基本饱和：-j8 只比 -j4 快 2.7%，user 时间反而多 1m23s。因为能并行的只有
+# 各组件内部的 make，而 autoreconf、每组件的 configure、以及 install-difx 逐个遍历
+# 三十多个组件这三段本来就是串行的（实测 CPU 利用率 -j4 仅 203%、-j8 仅 252%）。
+# 固定 4 的另一层好处：给构建机留出余量，且不受容器里 nproc 口径变化的影响。
+RUN python3 install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen \
+        --makeflags="-j4"
 
 # ---------- stage 2：runtime ----------
 FROM debian:13-slim AS runtime
