@@ -7,7 +7,7 @@
 |---|---|
 | **根变量** | `FXCORR_RAW_ROOT`（默认 `$FXCORR_WORKDIR/raw`） |
 | **生产者** | 记录节点（真实观测）/ `fxcorr-sim station`（仿真） |
-| **消费者** | `fxcorr-f`（按 `.input` 的 DATA TABLE 读） |
+| **消费者** | `fxcorr-f`（任务参数定位：headers `real_path` > 命名规则推导，见下） |
 | **生命周期** | 该站该 ds 的 f 任务完成后可删；**真实观测不可再生** |
 | **量级** | TB 级（1 小时 4 站） |
 | **共享 / 本地** | **本地即可**——同 batch 同节点 |
@@ -22,30 +22,35 @@ raw/
 │   └── ...
 ├── S6/
 │   └── ...
-├── BA_ds0.vdif                   # ← DATA TABLE 软链（见下）
-└── S6_ds0.vdif
+└── ...
 ```
 
 命名：`<station>/<station>_<batch_id>[_ds<N>].vdif`。
 **`_ds<N>` 后缀只在多 datastream 站出现**——单 ds 站是
 `<station>_<batch_id>.vdif`，与加多 ds 支持之前的命名逐字相同。
 
-## DATA TABLE 软链（仿真的关键机制）
+## 数据定位（f 怎么找到数据）
 
-`.input` 的 DATA TABLE 写的是 **filelist 里的那个路径**（通常是相对裸名，
-如 `BA_ds0.vdif`）。`fxcorr/make_testdata.sh` 在该路径下建软链，指向 fxcorr-sim 实际
-生成的 `raw/<station>/<station>_<batch_id>_ds<N>.vdif`：
+`fxcorr-f` 定位数据**不经过** `.input` 的 DATA TABLE（2026-10-02 定案，见
+`fxcorr/v8-plan.md` §2），两级：
+
+1. **任务 headers 的 `real_path`**（可选）：数据文件路径，**逗号分隔列表**（容一个 ds
+   多段文件）；相对路径按 `FXCORR_RAW_ROOT` 解析、绝对路径原样——调试直读共享存储
+   （路径不满足上面的命名规则）时用它；
+2. **无 `real_path` → 命名规则推导**：
+   `<RAW_ROOT>/<station>/<station>_<batch_id>[_ds<N>].vdif`
+   （先试带 `_ds<N>` 后缀、再试无后缀）——仿真/本地化数据的正常形态，
+   **数据落规范路径即可**。
 
 ```
-raw/BA_ds0.vdif  →  raw/BA/BA_00000001_ds0.vdif
+raw/BA/BA_00000002_ds0.vdif     ← 数据本体（sim 产物，规范布局）
+f 任务 00000002-BA-0（无 real_path）→ 按命名规则推导命中上面这个文件
 ```
 
-绕这一道是因为**命名口径不同**：DATA TABLE 每个 ds 只有一个固定名字，
-而仿真的文件按 batch 命名。`fxcorr/run_batch.sh` 每跑一个 batch 就把软链重指到
-该 batch 的 VDIF（`fxcorr/make_testdata.sh` 多 batch 时软链停在最后一个 batch）。
-
-**真实观测不软链**——FILE 行直接就是数据文件路径（绝对路径或直接可见）。
-多文件（一个 ds 跨多个 VDIF 文件）也是真实观测的常态。
+**DATA TABLE 软链已退役**：不再需要"把 DATA TABLE 的文件名链到真实文件"这一层——
+多 batch 并行时软链是共享可变状态（同一个文件名要指向不同 batch 的文件，重指即串），
+新机制下每个任务自带定位依据。`make_testdata.sh` 建的旧软链不再被程序使用
+（保留无害，待统一清理）。**多文件**（一个 ds 跨多个 VDIF 文件）只能走 `real_path` 列表。
 
 ## `<N>` 的口径（三处必须一致）
 

@@ -1,6 +1,6 @@
 # fxcorr-f 目录说明
 
-**最后更新**：2026-09-19（V4：reader 拆成三层、真值判据固化；见 `fxcorr/v4-plan.md`）
+**最后更新**：2026-10-02（**V8 数据定位定案**：f 不再读 `.input` 的 DATA TABLE 定位数据，改 `FXCORR_REAL_PATH`（任务 headers `real_path`）> 命名规则推导两级，DATA TABLE 软链退役；**代码实施待做**，见 `fxcorr/v8-plan.md` §2。**此前 2026-09-19**（V4：reader 拆成三层、真值判据固化；见 `fxcorr/v4-plan.md`））
 
 station-based 相关器前端（F-Engine）：无 MPI 串行程序，逐站处理一个 batch 的本地原始数据，产出 band_XX.sp / pcal.bin / autocorr.bin（格式见 `fxcorr/data-spec.md` 5.3）。对拍目标为 mpifxcorr 的 station-based 段，核心算法（解包/条纹旋转/分数采样/FFT/自相关）零改动复用 fxcorrcommon 的 Mode。
 
@@ -15,7 +15,7 @@ fxcorr-f <batch_id> <station> [workdir] [ds_index]
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file。
 - 读 `workdir/<config_file>`（.input，非 MPI 构造），Model 由 .calc 内建（无 .im 依赖）。
 - 输出目录 `workdir/fengine/<batch_id>/<station>/ds_<ds_index>/`（自动创建）。
-- 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd）。
+- **数据文件定位（2026-10-02 定案，`fxcorr/v8-plan.md` §2）**：① 环境变量 `FXCORR_REAL_PATH`（scalebox 封装下由任务 headers 的 `real_path` 转入）——**逗号分隔列表**（容一个 ds 多段文件），相对路径按 `FXCORR_RAW_ROOT` 解析、绝对路径原样；② 未设 → 按命名规则推导 `<RAW_ROOT>/<station>/<station>_<batch>[_ds<N>].vdif`（先试带 `_ds<N>` 后缀、再试无后缀）。**不再读 .input 的 DATA TABLE**（`.input` 仍加载，供频率/时间等元数据），软链机制退役。**代码实施待做**（现行为仍按 DATA TABLE 读）。
 - **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = dsindex+1（datastream/core 角色），identifier = .input basename。节奏：Starting → 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。RUNNING 不发（归 fxcorr-x）。`FXCORR_STA=1` 时每 autocorr 批次（writeAutocorrelationBatch 前、本批次 zeroAutocorrelations 前）发 DifxMessageSTARecord 到 `DIFX_BINARY_GROUP/PORT`（组装照 core.cpp averageAndSendAutocorrs 1195-1253：data = 实部之和×renorm、最低权重门槛 0.333、时间戳当日秒系；**P9 补平均分支**：minpostavfreqchannels ≥ STADumpChannels 时 STA 前先 averageFrequency、renorm/通道数按平均后修正、写盘跳过重复平均，MTU gate 同上游）。`FXCORR_KURTOSIS=1`（P9）时每 subint 末发 STA_KURTOSIS（照 averageAndSendKurtosis 1378-1434：无 weight gate、无 renorm、整 subint 时间戳）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>_<station>.xml/.sta`（构造时截断，重跑幂等）。
 
 ## 文件与 mpifxcorr 对照

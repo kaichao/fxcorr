@@ -1,7 +1,7 @@
 # fxcorr 数据规范文档（完整版）
 
 **版本**：1.2
-**最后更新**：2026-09-28（**V6 S4.1 已实施：两级 `merge` 落地**——batch 级 `merge <batch>` 只写 `vis-parts/<batch_id>/merged.part`、**新增**实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；5.9 末条的四条定则（实验的认定、缺 batch 判据取 `batches/*.json`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）与第 4/6/12 节的相应行同步去 ⚠。**`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义已核实**（2026-09-28，结论与原文不同——见第 12 节表格）。此前 2026-09-27（**V6 S2.5 已实施：D15 整体取消**——`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根、`fxcorr-sim common` 子命令全部删除；公共信号改为每个 `station` 任务在本地合成（算全部、只留自己那段），公共参数只剩 `seed`，随 `batch.json` 走；5.8 节重写为"参数"，第 2/3/4/9/10/12 节的 D15 相关行同步。判据是 raw 与旧路径**逐字节相同**。**注意：以下"未实施"标记指 V6 的其余各项**：5.9 补**两级 merge（形态 A）**——batch 级只写 `merged.part`、实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；第 6 节任务标识加 `<exp>-merge`；第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表同步；**第 12 节的"同实验 batch 串行约定"按多节点部署改写**——SWIN 由形态 A 解决，`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义列为待确认（见该节表格）。路线与验收见 `v6-plan.md`。**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
+**最后更新**：2026-10-02（**数据定位重构定案**（V8 `v8-plan.md` §2）：`fxcorr-f` 不再读 `.input` 的 DATA TABLE 定位数据——任务 headers `real_path`（可选）> 命名规则推导两级，**DATA TABLE 软链机制退役**；5.2 增"数据定位"条、5.2.1 的 `FXCORR_RAW_ROOT` 接管描述与"两类路径的基准"表同步；**代码实施待做**。**同日**（**任务标识去阶段后缀**：第 6 节表格的 `<batch>-merge`/`<exp>-merge` 修订为 `<batch>`/`<exp>`——同一标识在不同阶段对应不同计算任务，区分由编排层承担（投递目标模块 + headers `last_from_module`）；解析建议同步修订）。此前 2026-09-28（**V6 S4.1 已实施：两级 `merge` 落地**——batch 级 `merge <batch>` 只写 `vis-parts/<batch_id>/merged.part`、**新增**实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；5.9 末条的四条定则（实验的认定、缺 batch 判据取 `batches/*.json`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）与第 4/6/12 节的相应行同步去 ⚠。**`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义已核实**（2026-09-28，结论与原文不同——见第 12 节表格）。此前 2026-09-27（**V6 S2.5 已实施：D15 整体取消**——`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根、`fxcorr-sim common` 子命令全部删除；公共信号改为每个 `station` 任务在本地合成（算全部、只留自己那段），公共参数只剩 `seed`，随 `batch.json` 走；5.8 节重写为"参数"，第 2/3/4/9/10/12 节的 D15 相关行同步。判据是 raw 与旧路径**逐字节相同**。**注意：以下"未实施"标记指 V6 的其余各项**：5.9 补**两级 merge（形态 A）**——batch 级只写 `merged.part`、实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；第 6 节任务标识加 `<exp>-merge`；第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表同步；**第 12 节的"同实验 batch 串行约定"按多节点部署改写**——SWIN 由形态 A 解决，`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义列为待确认（见该节表格）。路线与验收见 `v6-plan.md`。**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
 **上一版更新**：2026-09-21（**第 11 节的体积公式移入 `data-volume.md` §1.3**，本节只留速查；V5 P6 讨论：第 12 节补六条——**时间层级表**（FFT 块 / Core 短积分 /
 Manager 最终积分 ↔ fxcorr 的 `.sp` 块 / subint / intTime）、batch 时长与起点约束（`intTime`
 整数倍、下限随配置而变而非固定秒数、**起点须落在积分边界**——并记下当前三层校验都只覆盖
@@ -147,8 +147,15 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 
 > 实物与逐文件说明见 `fxcorr/workdir-template/raw/README.md`。
 
-- 编号：D7；生产者：记录节点（真实观测）/ `fxcorr-sim station`（仿真）；消费者：`fxcorr-f`（按 `.input` 的 DATA TABLE 读）；
+- 编号：D7；生产者：记录节点（真实观测）/ `fxcorr-sim station`（仿真）；消费者：`fxcorr-f`（任务参数定位：headers `real_path` > 命名规则推导，见下条）；
 - 组织：`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`——**多 datastream 站每 ds 一个文件**，`_ds<N>` 后缀只在多 ds 站出现（单 ds 站为 `<station>_<batch_id>.vdif`，与加多 ds 支持之前逐字相同）；
+- **数据定位（2026-10-02 定案，V8 `v8-plan.md` §2）**：`fxcorr-f` **不读** `.input` 的 DATA TABLE 定位数据，两级——
+  ① 任务 headers 的 **`real_path`**（可选）= 数据文件路径（**逗号分隔列表**，容多段）；相对路径按
+  `FXCORR_RAW_ROOT` 解析、绝对路径原样（详见 5.2.1）；② 无 `real_path` → **命名规则推导**
+  （`<RAW_ROOT>/<station>/<station>_<batch_id>[_ds<N>].vdif`，`N` 的口径见下条）。
+  **仿真数据直接落规范路径即可**（sim 的产物本就是这个布局），**DATA TABLE 软链机制退役**——
+  多 batch 并行不再有共享软链这个可变状态；调试直读共享存储（路径不规范）时用 `real_path`。
+  多文件（一个 ds 跨多个 VDIF 文件）只能走 `real_path` 列表。`.input` 仍照常加载（频率/时间等元数据）。
 - **`N` 的口径（三处必须一致）**：站内 datastream 序号（0-based，按 `.input` DATASTREAM 表里该站出现的次序）——`raw/` 文件名、`fengine/<batch_id>/<station>/ds_<N>/` 的目录名、`fxcorr-f` 的 `ds_index` 参数。**不一致就会读错文件**；
 - **文件起点语义**：**不要求**等于 batch 起点（真实观测中各记录系统的帧计数器不同相，文件可以从某一秒的中途开始，起点之前的部分判为无效）；文件中间缺帧（"直接缺帧"与"filler 帧占位"两种形态）同样受支持；**标了 VDIF invalid 位的帧按"在时间轴上在位、数据不可用"处理**——它照常占一个时间槽（帧号参与连续性判断），只是对应的块在 f 侧被标无效，这与"占字节不占时间轴"的 filler 是两回事（实测与定案见 `fxcorr/reader-model.md` 4.12）；
 - **VDIF 时间参考**：帧头秒字段是**当日秒**（对 86400 取模、不带日期），帧号是秒内序号（对帧率取模、每秒回绕；t25362 为 16000 fps）。文件起点由首帧的 (秒, 帧号) 唯一确定，**不保证落在整秒边界**——这也是"文件起点 ≠ batch 起点"的成因；
@@ -171,7 +178,7 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
   | 变量 | 接管 |
   |---|---|
-  | `FXCORR_RAW_ROOT` | `.input` DATA TABLE 的 `FILE d/d:`（相对时）；DATA TABLE 软链的落点 |
+  | `FXCORR_RAW_ROOT` | `fxcorr-f` 的缺省数据定位（命名规则推导，5.2）的基根；headers `real_path` 相对路径的解析根 |
   | `FXCORR_FENGINE_ROOT` | f 写 / x 读的 `.sp` 目录 |
   | `FXCORR_VIS_ROOT` | `.input` 的 `OUTPUT FILENAME`（相对时）；PCAL / SWITCHEDPOWER 文本 |
   | `FXCORR_PRODUCT_ROOT` | difx2fits 的产物（由 wrap_difx2fits.sh 使用） |
@@ -185,12 +192,12 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
   batch 追加同一组文件、difx2fits 一次读整个实验，分裂了没有任何报错。分片模式下 **`VIS_PARTS`
   同理必须全局可见**（在 workdir 下，见 5.9 与第 2 节）。
 
-  **两类路径的基准**——只对**相对**路径拼根，**绝对路径一律原样**（真实观测的 `FILE` 行
+  **两类路径的基准**——只对**相对**路径拼根，**绝对路径一律原样**（真实观测的数据路径
   就是绝对路径）：
 
   | 路径 | 相对谁 |
   |---|---|
-  | DATA TABLE 的 `FILE d/d:` | `FXCORR_RAW_ROOT` |
+  | 任务 headers 的 `real_path`（相对时） | `FXCORR_RAW_ROOT` |
   | `.input` 的 `CALC FILENAME`；`.calc` 的 `IM` / `FLAG FILENAME` | **`.input` 所在目录**（配置是一套，整个 config 目录可搬走） |
   | `.input` 的 `OUTPUT FILENAME` | `FXCORR_VIS_ROOT`——**写 `test.difx`，不要写 `vis/test.difx`**，否则会拼成 `$VIS_ROOT/vis/test.difx` |
 
@@ -389,24 +396,32 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
 **不受影响的约束**：batch 时长必须是 `intTime` 整数倍、起点须落在**积分**边界（第 12 节）——这些是数据正确性要求，与编号格式无关。
 
-**空间维度不进 batch_id**：f 任务 = (batch_id, station, ds_index)（多 datastream 站每记录线程一个，见 5.3），x 任务 = (batch_id)（全站全基线）——**分片模式下细化为 (batch_id, ds_group)**，见 5.9；任务集由调度器从 batch.json 的 `stations` 与 .input 的 datastream 表推导（x 任务取全部基线）。**任务级标识（`<batch>-<station>-<ds>` / `<batch>-<g>` / `<batch>-merge`）见下一节「任务标识（task_id）」**；**为什么频段维度也不该进 batch_id**（即"每个频段组一个 batch"的取舍），见 `data-volume.md` §7.6。
+**空间维度不进 batch_id**：f 任务 = (batch_id, station, ds_index)（多 datastream 站每记录线程一个，见 5.3），x 任务 = (batch_id)（全站全基线）——**分片模式下细化为 (batch_id, ds_group)**，见 5.9；任务集由调度器从 batch.json 的 `stations` 与 .input 的 datastream 表推导（x 任务取全部基线）。**任务级标识（`<batch>` / `<batch>-<g>` / `<batch>-<station>-<ds>`）见下一节「任务标识（task_id）」**；**为什么频段维度也不该进 batch_id**（即"每个频段组一个 batch"的取舍），见 `data-volume.md` §7.6。
 
 > **关于本文档其余各节的示例（2026-09-27 更新）**：目录树与命名汇总里的 batch_id 示例**已全部换成 8 位顺序号**（`00000001`），与推荐格式一致——此前它们写的是时间编码格式（`60512_45000`）并声称"保留只为可读性"，但**示例就是读者会照着写的东西**，现统一。**唯一的例外是 `DIFX_<MJD>_<sec>.s<XX>.b<XX>`**——那里的 MJD+秒是**实验级**标识（SWIN 按实验组织、跨 batch 追加），与 batch_id 无关，不要把它当成"batch_id 也能写成那样"的先例。
 
 ### 任务标识（task_id）规范（2026-09-27 新增）
 
-编排层用**一个字符串**标识每个计算任务，脚本解析成维度值后调用工具。**格式：维度值用 `-` 连接，段数与内容决定任务类型。**
+编排层用**一个字符串**标识每个计算任务，脚本解析成维度值后调用工具。**格式：维度值用 `-` 连接；不含阶段后缀，段数与内容表达数据维度**（同一标识在不同阶段可对应不同任务，由编排层区分，见下方 2026-10-02 修订）。
 
 | task_id | 任务 | 展开为 |
 |---|---|---|
 | `<batch>` | 整 batch 的 x（**不分片**模式） | `fxcorr-x <batch> [workdir]` |
 | `<batch>-<g>` | 第 g 个 **ds 组**（**分片**模式，见 5.9） | `fxcorr-x <batch> [workdir] <g>` |
 | `<batch>-<station>-<ds>` | 某站某 ds 的 f 任务 | `fxcorr-f <batch> <station> [workdir] <ds>` |
-| `<batch>-merge` | **batch 级**归并：本 batch 全部分片 → `merged.part`（2026-09-28 起实施） | `fxcorr-x merge <batch> [workdir]` |
-| `<exp>-merge` | **实验级**归并：全部 batch 的 `merged.part` → D10 SWIN（2026-09-28 起实施；**它是 SWIN 的唯一写入者**） | `fxcorr-x merge --experiment [workdir]` |
+| `<batch>` | **batch 级**归并：本 batch 全部分片 → `merged.part`（2026-09-28 起实施；2026-10-02 修订：去 `-merge` 后缀，与"不分片 x"同用 `<batch>`） | `fxcorr-x merge <batch> [workdir]` |
+| `<exp>` | **实验级**归并：全部 batch 的 `merged.part` → D10 SWIN（2026-09-28 起实施；**它是 SWIN 的唯一写入者**） | `fxcorr-x merge --experiment [workdir]` |
 
 后两行是 **V6 的两级 merge（形态 A）**，见 5.9 末条与 `v6-plan.md` S4.1；`<exp>` = 实验标识
 （`OUTPUT FILENAME` 的 `.difx` 目录名），**不是** batch_id——实验级任务跨全部 batch。
+
+> **2026-10-02 修订（去阶段后缀）**：任务标识是**数据标识（自然键）**，不含阶段
+> 后缀——`<batch>` 同时用于"不分片 x"、"批引导"、"batch 级归并"等任务，`<exp>`
+> 用于实验级归并。同一标识在不同阶段对应**不同计算任务**，区分由**编排层**承担：
+> 投递目标模块 + headers（`from_module` / `last_from_module` = 上一个非主路由模块；
+> 如 `fxcorr-x-merge` 的 batch 级/实验级两形态按 `last_from_module` ∈
+> {`fxcorr-x`, `vtask-tail`} 区分）。`<batch>-merge` / `<exp>-merge` 后缀形态为
+> 历史记录（见文首更新日志）。
 
 **各段含义**：
 
@@ -415,7 +430,10 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 - `<ds>` = **站内** datastream 序号（0-based）——与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<st>/ds_<N>/` **四处同一口径**，详见 5.2。
 - `<g>` = **ds 组序号**（0-based，按频段升序）。**注意它与 `<ds>` 不是同一个维度**：一组 ds 是**跨站、含全部极化**的——互相关要求两站同一 freq 同时在场，且要算全极化组合（RR/LL/RL/LR）。t25362 是 **4 组**，每组 4 个 ds（2 站 × 2 极化）；实测的 ds→(频段, 极化) 映射与分组依据见 `data-volume.md` §7.3。
 
-**解析建议**：按**段数**分派，不要按位置硬编码——1 段 = 整 batch 的 x；2 段且第二段为 `merge` = 归并，2 段且为数字 = x 分片；3 段 = f 分片。
+**解析建议**：按**段数**分派，不要按位置硬编码——1 段（数字）= 整 batch 任务
+（不分片 x 或 batch 级归并，执行模块由编排层指定）；2 段且为数字 = x 分片；
+3 段 = f 分片。**任务标识不含阶段后缀**（2026-10-02 修订），模块侧的形态区分
+（如 `fxcorr-x-merge` 的两种归并）改用 headers `last_from_module`。
 
 **f 与 x 的任务数不同**（这是"任务 ID 不能只有一种形状"的根因）：f 任务 = 站数 × 每站 ds 数（t25362 是 16），x 分片任务 = 频段组数（t25362 是 4）。**编排层要维护任务依赖**——一个 x 分片任务只等"该 batch 中属于该 ds 组的那些 f 任务"完成，不是等全部 f 任务。
 

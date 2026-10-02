@@ -1,6 +1,6 @@
 # fxcorr 工具命令行手册
 
-**最后更新**：2026-09-30（**V7 P5a 开工**：`run_bench.sh` 增跨节点映射三变量与**每节点**的内存/流量采样，见「通用约定」末条；fxcorr 侧的跨节点属 P5b、等 scalebox 编排。**此前 2026-09-29**（**V7 P3 前**：`fxcorr-x` 增 `FXCORR_X_GROUPS_ONLY=1`——只报 ds 组划分就退出、无副作用的诊断出口，供 `test/input/run_consistency.sh` 对拍"两处 ds 组实现"；**此前 2026-09-28**（**V6 的两级 `merge`（形态 A）已实施并验证**，其余 V6 项仍标 ⚠：`fxcorr-x merge <batch>` 现在只写 `vis-parts/<batch_id>/merged.part`、**新增的** `merge --experiment` 才写 SWIN 且是唯一写入者；四条定则（实验的认定与 config 来源、缺 batch 的判据取 `batches/*.json` 而非 `meta/batches.index`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）见 `data-spec` 5.9 末条，判据见 `fxcorr/test/multids/README.md` 判据 13–15。2026-09-27 补：两级 `merge`（形态 A）命令行形态、环境变量作用域说明与"其它实验级文件的并发语义（已核实，见 `v6-plan.md` S4.1 末表）"小节。路线见 `v6-plan.md`。**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
+**最后更新**：2026-10-02（**数据定位两态**（V8 `v8-plan.md` §2）：fxcorr-f 不再读 `.input` 的 DATA TABLE 定位数据——任务 headers `real_path`（可选）> 命名规则推导，DATA TABLE 软链机制退役；本手册的「通用约定」、fxcorr-f 节与端到端示例同步；**代码实施待做**（见 `v8-plan.md` §2.3）。**此前 2026-09-30**（**V7 P5a 开工**：`run_bench.sh` 增跨节点映射三变量与**每节点**的内存/流量采样，见「通用约定」末条；fxcorr 侧的跨节点属 P5b、等 scalebox 编排。**此前 2026-09-29**（**V7 P3 前**：`fxcorr-x` 增 `FXCORR_X_GROUPS_ONLY=1`——只报 ds 组划分就退出、无副作用的诊断出口，供 `test/input/run_consistency.sh` 对拍"两处 ds 组实现"；**此前 2026-09-28**（**V6 的两级 `merge`（形态 A）已实施并验证**，其余 V6 项仍标 ⚠：`fxcorr-x merge <batch>` 现在只写 `vis-parts/<batch_id>/merged.part`、**新增的** `merge --experiment` 才写 SWIN 且是唯一写入者；四条定则（实验的认定与 config 来源、缺 batch 的判据取 `batches/*.json` 而非 `meta/batches.index`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）见 `data-spec` 5.9 末条，判据见 `fxcorr/test/multids/README.md` 判据 13–15。2026-09-27 补：两级 `merge`（形态 A）命令行形态、环境变量作用域说明与"其它实验级文件的并发语义（已核实，见 `v6-plan.md` S4.1 末表）"小节。路线见 `v6-plan.md`。**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
 
 覆盖三个改造应用的命令行接口：`fxcorr-sim`（仿真数据生成器）、`fxcorr-f`（Station-based）、`fxcorr-x`（Baseline-based，含 `merge` 子命令）。目录布局、batch.json 格式与 D16 `vis-parts/` 规范见 `data-spec.md`，容量与分片方案的论证见 `data-volume.md` §7。
 
@@ -13,7 +13,7 @@
   `beam/` **没有独立根**，恒在 workdir 下。**规则权威见 `data-spec.md` 5.2.1**（各类相对
   路径的基准、只对相对路径拼根、`OUTPUT FILENAME` 的写法、根记录与一致性检查）。
   `FXCORR_PRINT_ROOTS=1` 可让工具打印各自解析出的根与来源。
-- 只对**相对**路径拼根，**绝对路径一律原样**——真实观测的 `FILE` 行就是绝对路径，不受根变量影响。
+- 只对**相对**路径拼根，**绝对路径一律原样**——真实观测的数据路径、以及 headers `real_path` 里的绝对路径，都不受根变量影响。
 - **`batch_id`（2026-09-27 修订）**：**8 位零填充顺序号**（`00000001`）——定宽、单调递增、`workdir` 内全局唯一，由切批规划步骤单点分配，规范见 data-spec 第 6 节。**名字不承载时间信息**（起点/时长/band 全在 batch.json 里）。**三工具不校验格式**：`batch_id` 只当不透明字符串用于路径拼接，**旧的时间编码格式（如 `60512_45000`）照常可用**（历史测试资产无需迁移）——但**本手册的示例已统一用 8 位顺序号**，因为示例就是读者会照着写的东西。
 - batch.json 位于 `workdir/batches/<batch_id>.json`（单文件全字段），由编排脚本预写，工具只读不回写（位置语义见 data-spec 5.3）。
 - 任务粒度：f 任务 = (batch_id, station, ds_index)（fxcorr-f 的 station/ds_index 参数即该两维；多 datastream 站每记录线程一个 f 任务）；x 任务 = (batch_id) 全站全基线（fxcorr-x 无站参数，站列表由 .input 枚举）。**分片模式下 x 任务细化为 (batch_id, ds_group)**——`ds_group` 是**一组 ds（跨站、含全部极化）**，不是单个 ds，见 fxcorr-x 节。**任务 ID 规范**（`<batch>-<station>-<ds>` / `<batch>-<g>` / `<batch>-merge`）见 data-spec 第 6 节。并行模型见 data-spec 第 12 节。
@@ -135,12 +135,13 @@ fxcorr-f <batch_id> <station> [workdir] [ds_index]
 | `FXCORR_RUN_MODE` | 未设 | `container` 时状态/STA 降级为落盘 `meta/difxmsg/`（见 data-spec 5.6） |
 | `OMP_NUM_THREADS` | 未设（串行） | **V3 P3**：块级并行线程数（Mode 副本分块并行，结果与串行逐位一致）；未设 = 单线程（V2 行为不变） |
 | `FXCORR_LOGLEVEL` | 未设（`info`） | 诊断输出详略，取 `error`/`warn`/`info`/`verbose`/`debug`（无法识别时报错一行并回落 `info`）。**管住 f/x 的全部输出**：工具自己的打印（`FXLOG` 宏）与 fxcorrcommon 里上游代码的 `Alert` 流（`cinfo`/`cverbose`/`cdebug`，配置加载阶段约 85 行）。`info` 出错误、告警、单行小结（`GAPCHECK summary`）与配置加载进度（约 21 行）；`verbose` 追加逐条 gap/filler/boundary 明细（boundary 上限 40 条）；`warn` 及以下只剩错误与告警。只影响输出，不影响产物 |
+| `FXCORR_REAL_PATH` | 未设 | **数据文件路径**（2026-10-02 定案，`v8-plan.md` §2）：逗号分隔列表（容一个 ds 多段文件）；相对路径按 `FXCORR_RAW_ROOT` 解析、绝对路径原样。设了即用它；未设则按命名规则推导 `<$FXCORR_RAW_ROOT>/<station>/<station>_<batch>[_ds<N>].vdif`（先试带后缀、再试无后缀）。scalebox 封装下由任务 headers 的 `real_path` 转入（模块 run.sh），手工调试可直接设 |
 
 输入输出：
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
 - 读 `workdir/<config_file>`（.input）；Model 由 .calc 内建，无 .im 依赖。
-- 原始数据文件路径直接取自 .input 的 DATA TABLE（相对进程 cwd，即 workdir）。
+- **数据文件定位（2026-10-02 定案）**：① 任务 headers 的 `real_path`（环境变量 `FXCORR_REAL_PATH`，可选）——逗号分隔列表（容多段），相对路径按 `FXCORR_RAW_ROOT` 解析、绝对路径原样；② 未设 → 按命名规则推导 `<RAW_ROOT>/<station>/<station>_<batch>[_ds<N>].vdif`（先试带 `_ds<N>` 后缀、再试无后缀）。**不再读 .input 的 DATA TABLE**（`.input` 仍加载，供频率/时间等元数据），软链机制退役——详见 data-spec 5.2。
 - 输出 `workdir/fengine/<batch_id>/<station>/`（自动创建）：`band_XX.sp`、`pcal.bin`（配置了 phasecal 时）、`autocorr.bin`（二进制布局见 data-spec 5.3）。配置 phasecal 时另在 OUTPUT FILENAME 目录（`vis/<exp>.difx/`）写实验级 `PCAL_<mjd>_<sec>_<station>` 文本（每 intTime 一行、重跑幂等，格式见 data-spec 5.4）。
 - 状态消息节奏（mpiId = dsindex+1，datastream/core 角色）：Starting（启动）→ 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误时 Alert + Aborting。RUNNING 不发（归 fxcorr-x，manager 角色）。
 
@@ -194,7 +195,7 @@ fxcorr-x merge --experiment [workdir]            # ② 实验级归并 → SWIN�
 | `FXCORR_X_GROUPS_ONLY` | 未设 | **`1` = 只报 ds 组划分就退出**（2026-09-29 加，V7 P3 前）：分片模式下打印全部组的成员（格式与运行期那行 `fxcorr-x: shard mode, ds group G of N = {...}` 同前缀，差一个 ` -> path`），**不读 raw/fengine、不写盘、不建目录**。用途是给"两处 ds 组实现"的对照判据（`test/input/run_consistency.sh`）提供一个**无数据依赖**的 C++ 真值出口——它**刻意跳过了根一致性与 SWIN 互斥两道 workdir 状态检查**（只读 `.input` 与 `batch.json`，不碰任何根、不写 SWIN，而对照测试常跑在已经跑过的 workdir 上）。诊断上也可用：想只问"这个 batch 分几组、组里是谁"，不必先造 fengine。传任意组号（含越界值）都能拿到全部组 |
 | `FXCORR_X_MERGE_FORCE` | 未设（严格） | **两个层级的 `merge` 都认**：batch 级是"ds 组不齐"、实验级是"batch 不齐"，语义相同——强制写出已到齐的部分（缺失者留空洞 + stderr 列明缺了哪些），未设 = 报错退出不写 |
 | `FXCORR_X_SWIN_CONFLICT` | 未设（严格） | **写 SWIN 的两条路径（全量模式 / 实验级 `merge`）共用**：目标 SWIN 里若已有**本 batch 时间范围内**的记录（说明这个 batch 已经被另一次运行写过），默认报错退出——再写会追加重复记录、破坏 SWIN 的时间单调（difx2fits 顺序读、时间回退的记录被静默丢弃）。设 `allow` 强制继续。**分片任务与 batch 级 `merge` 都不写 SWIN、故都不查**——重跑分片必须畅通（调并行度、补失败组全靠它）。**2026-09-28 起主责移交实验级**：检查由 `merge --experiment` 做，范围扩为"**本次将写出的全部 batch**"；分片模式下"分片与全量混跑"的重复风险由它兜住。**2026-09-30 修**：分片模式曾被误拦（条件写作 `!merge`，任何被 merge 写过的 batch 都再也重跑不了），现为 `!merge && !sharded`，见 `data-spec` 5.9 |
-| `FXCORR_X_ALLOW_EMPTY` | 未设（严格） | **空输入 / 空产物防呆（2026-09-28，`v6-plan.md`「进行中的发现」2）**。两条互补的检查，挡的是同一种最坏的静默——每个程序都退 0、日志照报 "N integrations written"，产物却是空文件：① **整个 batch 一块有效数据都没有**（`.sp` 的 valid flags 全 0；那是 f 写的"这些块没有数据"，x 以前完全不用它，只靠 weight 门控间接判断，于是"数据根本没读到"与"读到了但权重为 0"分不开）；② 全量模式下 batch 算完却**一条记录都没进 SWIN**（数据有效，但每条基线的 weight 都成了 0）。两者都可能由 **raw 与 `batch.json` 的时间轴不符**引起（软链指错 batch、VDIF 幂等跳过而重新规划改了 batch 时长……）。设 `1`（或 `allow`）跳过检查。**正常数据不触发**：部分 subint 无效是常态（gap / filler / 真实观测丢帧），只有**全无效**才报；分片模式写 `.part`，只做① |
+| `FXCORR_X_ALLOW_EMPTY` | 未设（严格） | **空输入 / 空产物防呆（2026-09-28，`v6-plan.md`「进行中的发现」2）**。两条互补的检查，挡的是同一种最坏的静默——每个程序都退 0、日志照报 "N integrations written"，产物却是空文件：① **整个 batch 一块有效数据都没有**（`.sp` 的 valid flags 全 0；那是 f 写的"这些块没有数据"，x 以前完全不用它，只靠 weight 门控间接判断，于是"数据根本没读到"与"读到了但权重为 0"分不开）；② 全量模式下 batch 算完却**一条记录都没进 SWIN**（数据有效，但每条基线的 weight 都成了 0）。两者都可能由 **raw 与 `batch.json` 的时间轴不符**引起（数据文件指错 batch、VDIF 幂等跳过而重新规划改了 batch 时长……）。设 `1`（或 `allow`）跳过检查。**正常数据不触发**：部分 subint 无效是常态（gap / filler / 真实观测丢帧），只有**全无效**才报；分片模式写 `.part`，只做① |
 
 输入输出：
 
@@ -298,7 +299,7 @@ fxcorr-x merge --experiment
 ```bash
 ./fxcorr/wrap_vex2difx.sh . test.v2d     # 前处理 1：出 .input/.calc（含路径规范化）
 ./fxcorr/wrap_difxcalc.sh . test.calc    # 前处理 2：出 .im
-./fxcorr/make_testdata.sh               # 造数 + 写 batch.json + 建 DATA TABLE 软链
+./fxcorr/make_testdata.sh               # 造数（raw/ 规范布局）+ 写 batch.json
 ./fxcorr/run_batch.sh <batch_id>        # 逐站 f + 一次 x
 ./fxcorr/wrap_difx2fits.sh . test        # 后处理：SWIN -> FITS（落 FXCORR_PRODUCT_ROOT）
 ```
@@ -306,9 +307,8 @@ fxcorr-x merge --experiment
 手工等价的调用（cwd 取 workdir）：
 
 ```bash
-fxcorr-sim <batch_id> T1                      # 逐站生成 raw 数据（落 FXCORR_RAW_ROOT）
-ln -sf $FXCORR_RAW_ROOT/T1/T1_<batch_id>.vdif  $FXCORR_RAW_ROOT/<DATA TABLE 文件名>
-fxcorr-f <batch_id> T1                        # 逐站
+fxcorr-sim <batch_id> T1                      # 逐站生成 raw 数据（落 FXCORR_RAW_ROOT 规范路径）
+fxcorr-f <batch_id> T1                        # 逐站（按命名规则推导定位；非规范路径设 FXCORR_REAL_PATH）
 fxcorr-x <batch_id>                           # SWIN 落 $FXCORR_VIS_ROOT/<OUTPUT FILENAME>
 ```
 
