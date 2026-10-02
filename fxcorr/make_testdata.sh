@@ -486,8 +486,11 @@ if [ -s "$TASKS" ]; then
 fi
 
 # ---- ⑤ 软链 <DATA TABLE 文件名> → 最后 batch 的 VDIF ----
-# .input 的 DATA TABLE 每个 datastream 只有一个文件名，软链只能指向一个 batch；
-# run_batch.sh 跑每 batch 前会重做软链
+# .input 的 DATA TABLE 每个 datastream 只有一个文件名，软链只能指向一个 batch。
+# **2026-10-02 起 fxcorr-f 不再读 FILE 行**（数据定位改 real_path/命名规则两态，
+# v8-plan.md §2）、run_batch.sh 也不再重指软链——本软链现在只为 **mpifxcorr 基准
+# （run_bench.sh：按 FILE 行读数据、并靠软链定位 batch）** 保留；difx2fits 已实测
+# **不依赖** FILE 行（v8-plan.md §2.5-1）。
 last=${BATCHES[-1]}
 for i in "${!DSTATION[@]}"; do
 	# 软链落在 raw 根下（Q2）：workdir 里不再散落软链，raw 区整体可在大盘上；

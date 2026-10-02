@@ -4,11 +4,11 @@
 # 步骤：① 读 batches/<batch_id>.json + .input，前置校验对齐（batch 起点 subint
 # 边界、batch 时长 INT TIME 整数倍、INT TIME 为 subint 整数倍，容差同 fxcorr-f/x
 # 程序内校验；不通过直接报错退出，不依赖工具兜底）
-# → ② DATA TABLE 软链重指本 batch 的 VDIF（make_testdata.sh 多 batch 时软链停在
-# 最后 batch，跑其他 batch 前必须重做；raw 数据不存在即报错）
+# → ② 推导 ds 组划分（f 的数据定位由 fxcorr-f 按 real_path/命名规则自理，
+# 2026-10-02 起本脚本不再建 DATA TABLE 软链，见 fxinput.py 头部）
 #
 # ①② 的实现都在 fxinput.py（2026-09-29 抽出，V7 P3 前）——解析 .input、前置校验、
-# 软链、ds 组划分都在那里，本脚本只剩编排。
+# ds 组划分都在那里，本脚本只剩编排。
 # → ③ 置 status=running（batch.json status 字段）→ ④ 逐站 fxcorr-f（任一失败 →
 # status=failed、非 0 退出，不跑后续站）→ ⑤ mkdir .input OUTPUT FILENAME 所在目录
 # → ⑥ fxcorr-x（失败同 ④）→ ⑦ 成功 → status=done，追加 meta/batches.index 一行
@@ -140,17 +140,17 @@ if [ -n "${FXCORR_PARALLEL:-}" ]; then
 	[ "$GROUP_JOBS" -ge 1 ] || { echo "run_batch.sh: FXCORR_GROUP_JOBS must be >= 1 (got $GROUP_JOBS)" >&2; exit 2; }
 fi
 
-# ---- ①② 读 batch.json + .input、前置校验、DATA TABLE 软链重做 ----
+# ---- ①② 读 batch.json + .input、前置校验、ds 组推导 ----
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
-# 解析 .input、前置校验、DATA TABLE 软链、ds 组推导**都在 fxinput.py 里**：
+# 解析 .input、前置校验、ds 组推导**都在 fxinput.py 里**：
 # 那是"逻辑"而不是"编排"，且其中的 ds 组划分与 fxcorr-x 的 C++ 侧
 # deriveDsGroups 是同一条规则的两处实现（对照判据 test/input/run_consistency.sh），
 # 藏在 heredoc 里既不能单测、也不能被别的脚本复用。失败时它自己打印
 # `run_batch.sh:` 前缀的消息并以非 0 退出——与抽出前逐字一致，所以这里只让它
 # 的退出码经 set -e 传出去，不再包一层。
 python3 "$SCRIPTDIR/fxinput.py" prepare "$WORKDIR" "$BID" \
-	"$FXCORR_ROOT_RAW" "$FXCORR_ROOT_VIS" > "$OUT"
+	"$FXCORR_ROOT_VIS" > "$OUT"
 
 CFGIN= OUTDIR= NGRP=1
 while IFS= read -r line && [ "$line" != "--" ]; do

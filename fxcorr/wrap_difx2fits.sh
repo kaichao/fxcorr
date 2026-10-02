@@ -9,6 +9,12 @@
 # 运行目录，所以本脚本把三件套组装到 $FXCORR_PRODUCT_ROOT 下、cd 过去单参数
 # 调用，跑完清掉临时件（只留 .FITS）。这是 Q15 那层"规范 → 原程序"的转换。
 #
+# **.calc 的源文件由 .input 的 `CALC FILENAME` 行指出**（相对 config 目录、绝对
+# 原样），不假定 `<base>.calc` 同名：多 batch 的仿真变体只给 `.input` 换名
+# （test-sim.input，128ms subint），`.calc` 仍是 test.calc——"三件套同名"是
+# difx2fits 对**组装产物**的要求，由本脚本在 PRODUCT 目录里满足（2026-10-02
+# 全链联调实测：按同名假定拼路径，test-sim 实验在 fits 阶段直接报 not found）。
+#
 # 与 run_bench.sh 同一套手法：复制一份 .input/.calc 并把里面的相对路径绝对化
 # ——fxcorr 的 config 现在是"相对 .input 所在目录"写的，而这个程序按 cwd 找。
 #
@@ -55,7 +61,22 @@ WORKDIR=$FXCORR_ROOT_WORKDIR
 
 CFG="$WORKDIR/config"
 [ -f "$CFG/$BASE.input" ] || { echo "wrap_difx2fits.sh: $CFG/$BASE.input not found" >&2; exit 2; }
-[ -f "$CFG/$BASE.calc" ] || { echo "wrap_difx2fits.sh: $CFG/$BASE.calc not found" >&2; exit 2; }
+
+# .calc 的源文件：`CALC FILENAME` 行（相对 config 目录、绝对原样）——见头注释
+CALC_SRC=$(python3 - "$CFG/$BASE.input" "$CFG" <<'PYEOF'
+import re, sys
+src, cfg = sys.argv[1], sys.argv[2]
+for line in open(src):
+    m = re.match(r'^CALC FILENAME:\s*(\S+)\s*$', line)
+    if m:
+        v = m.group(1)
+        print(v if v.startswith('/') else cfg.rstrip('/') + '/' + v)
+        break
+else:
+    sys.exit('wrap_difx2fits.sh: no CALC FILENAME in %s' % src)
+PYEOF
+)
+[ -f "$CALC_SRC" ] || { echo "wrap_difx2fits.sh: $CALC_SRC not found (CALC FILENAME of $CFG/$BASE.input)" >&2; exit 2; }
 PROD="$FXCORR_ROOT_PRODUCT"
 mkdir -p "$PROD" || exit 2
 
@@ -90,9 +111,11 @@ trap cleanup EXIT
 sed -e "s|^CALC FILENAME:[[:space:]]*\([^/].*\)\$|CALC FILENAME:      $PROD/$BASE.calc|" \
     -e "s|^OUTPUT FILENAME:[[:space:]]*\([^/].*\)\$|OUTPUT FILENAME:    $SWINDIR|" \
     "$CFG/$BASE.input" > "$PROD/$BASE.input"
-sed -e "s|^IM FILENAME:[[:space:]]*\([^/].*\)\$|IM FILENAME:        $CFG/\1|" \
-    -e "s|^FLAG FILENAME:[[:space:]]*\([^/].*\)\$|FLAG FILENAME:      $CFG/\1|" \
-    "$CFG/$BASE.calc" > "$PROD/$BASE.calc"
+# IM/FLAG 相对 .calc 所在目录（configuration 的规则），拼它而不是 config 目录
+CALCDIR=$(dirname "$CALC_SRC")
+sed -e "s|^IM FILENAME:[[:space:]]*\([^/].*\)\$|IM FILENAME:        $CALCDIR/\1|" \
+    -e "s|^FLAG FILENAME:[[:space:]]*\([^/].*\)\$|FLAG FILENAME:      $CALCDIR/\1|" \
+    "$CALC_SRC" > "$PROD/$BASE.calc"
 if [ -e "$PROD/$BASE.difx" ] && [ ! -L "$PROD/$BASE.difx" ]; then
 	echo "wrap_difx2fits.sh: $PROD/$BASE.difx exists and is not a symlink; refusing to replace" >&2
 	exit 2

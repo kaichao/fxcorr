@@ -6,6 +6,9 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#include <sys/stat.h>
 
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/mode.h>
@@ -224,12 +227,76 @@ static bool extractJsonString(const string &json, const string &key, string *val
 	return true;
 }
 
+// Data-file localization (v8-plan.md 2.2, 2026-10-02): the .input FILE lines
+// are retired (a shared mutable name space cannot serve several batches at
+// once); the files are located in two states instead --
+//
+//   1. FXCORR_REAL_PATH -- set by the module runner from the task header
+//      `real_path` (debugging: read straight from the shared storage):
+//      comma-separated list, each item resolved against the RAW root when
+//      relative, used as-is when absolute (FxcorrPath::under, the same rule
+//      Configuration applies to FILE lines);
+//   2. otherwise the layout rule
+//      <RAW_ROOT>/<station>/<station>_<batch>[_ds<N>].vdif -- the `_ds<N>`
+//      suffix first (multi-datastream stations), then no suffix (single,
+//      data-spec 5.2).  The same rule lives in fxinput.py's
+//      station_out_path, fxcorr-sim's stationOutPath and the app-fxcorr
+//      router's fxin.StationOutPath -- four places that change together
+//      (v8-plan.md 2.5-2).
+//
+// Returns an empty list when nothing is found (the error has been printed).
+static vector<string> resolveDataFiles(const string &station, const string &batchid, int dsarg)
+{
+	const string rawroot = FxcorrPath::root(FxcorrPath::ROOT_RAW);
+
+	if(const char *env = getenv("FXCORR_REAL_PATH"))
+	{
+		string list = env;
+		vector<string> files;
+		size_t pos = 0;
+		while(pos <= list.size())
+		{
+			size_t comma = list.find(',', pos);
+			string item = (comma == string::npos) ? list.substr(pos)
+			                                      : list.substr(pos, comma - pos);
+			if(item.size() > 0)
+				files.push_back(FxcorrPath::under(rawroot, item));
+			if(comma == string::npos)
+				break;
+			pos = comma + 1;
+		}
+		if(files.size() > 0)
+			return files;
+	}
+
+	char suffix[32];
+	snprintf(suffix, sizeof(suffix), "_ds%d", dsarg);
+	const string candidates[2] = {
+		rawroot + "/" + station + "/" + station + "_" + batchid + suffix + ".vdif",
+		rawroot + "/" + station + "/" + station + "_" + batchid + ".vdif" };
+	struct stat st;
+	for(int i=0;i<2;i++)
+	{
+		if(stat(candidates[i].c_str(), &st) == 0 && S_ISREG(st.st_mode))
+			return vector<string>(1, candidates[i]);
+	}
+
+	cerr << "fxcorr-f: no data file for station " << station << " batch " << batchid
+	     << " ds " << dsarg << endl
+	     << "  tried " << candidates[0] << endl
+	     << "        " << candidates[1] << endl
+	     << "  or set FXCORR_REAL_PATH to the file path(s), comma-separated" << endl;
+	return vector<string>();
+}
+
 int main(int argc, char **argv)
 {
 	if(argc < 3)
 	{
 		cerr << "usage: fxcorr-f <batch_id> <station> [workdir] [ds_index]" << endl
-		     << "  env: FXCORR_WORKDIR (default .), overridden by the workdir argument" << endl;
+		     << "  env: FXCORR_WORKDIR (default .), overridden by the workdir argument" << endl
+		     << "       FXCORR_REAL_PATH: data file path(s), comma-separated"
+		     << " (default: raw-root layout rule)" << endl;
 		return EXIT_FAILURE;
 	}
 	// P3 (algo-plan.md): thread count from OMP_NUM_THREADS; unset = serial
@@ -384,7 +451,13 @@ int main(int argc, char **argv)
 		batchstartns -= 1000000000;
 	}
 
-	DataReader reader(&config, 0, dsindex, model, batchstartsec, batchstartns);
+	// data files (v8-plan.md 2.2): an explicit list (FXCORR_REAL_PATH) wins
+	// over the layout rule; the .input FILE lines are no longer consulted
+	vector<string> datafiles = resolveDataFiles(station, batchid, dsarg);
+	if(datafiles.empty())
+		return EXIT_FAILURE;
+
+	DataReader reader(&config, 0, dsindex, model, batchstartsec, batchstartns, &datafiles);
 
 	// P9: Mode::process accumulates s1/s2 per FFT block only when this is
 	// set (mode.cpp:1236, upstream core.cpp:702)

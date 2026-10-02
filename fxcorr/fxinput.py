@@ -12,11 +12,16 @@ ds 组划分——其中 **ds 组划分与 fxcorr-x 的 C++ 侧 `deriveDsGroups`
 对照判据：`fxcorr/test/input/run_consistency.sh`——同一批 `.input` 喂两侧，
 逐组比成员。
 
+2026-10-02：**DATA TABLE 软链重指（`relink_data_table`）退役**——数据定位改为
+"任务 headers 的 `real_path` + 命名规则两态"（`v8-plan.md` §2），`fxcorr-f` 不再
+读 `.input` 的 `FILE` 行，本脚本也不再建软链。`make_testdata.sh` 的软链保留：
+mpifxcorr 基准（`run_bench.sh`）仍按 `FILE` 行读数据。
+
 子命令：
 
-  prepare <workdir> <batch_id> <rawroot> <visroot>
-      全套：读 batch.json → 解析 .input → 前置校验 → DATA TABLE 软链重指本
-      batch → 推导 ds 组。`run_batch.sh` 用它。
+  prepare <workdir> <batch_id> <visroot>
+      全套：读 batch.json → 解析 .input → 前置校验 → 推导 ds 组。
+      `run_batch.sh` 用它。
 
   groups <workdir> <batch_id>
       **只**打印 ds 组划分，无任何副作用（不改文件、不建目录）。对照测试用。
@@ -102,13 +107,6 @@ class InputConfig(object):
 		self.dspairs = list(zip(
 			[int(x) for x in re.findall(r'^D/STREAM A INDEX \d+:\s*(\d+)\s*$', text, re.M)],
 			[int(x) for x in re.findall(r'^D/STREAM B INDEX \d+:\s*(\d+)\s*$', text, re.M)]))
-
-	def nds_of(self):
-		"""站名 → 该站有几个 datastream（决定数据文件名带不带 `_ds<N>` 后缀）。"""
-		out = {}
-		for st in self.stations:
-			out[st] = out.get(st, 0) + 1
-		return out
 
 
 def load_input(workdir, bid, bj):
@@ -217,51 +215,6 @@ def check_stations(cfg, bj):
 
 
 # --------------------------------------------------------------------------
-# DATA TABLE 软链重指本 batch
-# --------------------------------------------------------------------------
-
-def station_out_path(rawroot, station, bid, dsidx, nds):
-	"""本 batch 该 ds 的 VDIF 路径。
-
-	多 datastream 站的文件名带 `_ds<N>` 后缀（N = 站内序号，data-spec 5.2），
-	单 ds 站没有后缀——与 `fxcorr-sim` 的 stationOutPath、`make_testdata.sh`
-	的 vdifrel **同一规则，三处必须同改**。少了这个后缀时多 ds 站的 src 永远
-	不存在，软链就停在 `make_testdata.sh` 建的最后那个 batch 上：单 batch 场景
-	看不出来（软链本来就是对的），多 batch 才现形，而 f 读的是别的 batch 的
-	数据却按本 batch 的时间轴解，**全程没有任何报错**。
-	"""
-	base = '%s_%s' % (station, bid)
-	if nds > 1:
-		base += '_ds%d' % dsidx
-	return os.path.join(rawroot, station, base + '.vdif')
-
-
-def relink_data_table(rawroot, cfg, bid):
-	"""把 `.input` 的 DATA TABLE 逐行软链到本 batch 的 VDIF。
-
-	`make_testdata.sh` 的布局（`raw/<st>/<st>_<bid>[_ds<N>].vdif`）下软链重指
-	本 batch，落在 RAW 根下（Q2）；真实观测场景 FILE 行已是数据文件路径
-	（绝对路径或直接可见），不软链。
-	"""
-	nds_of = cfg.nds_of()
-	for st, di, fn in zip(cfg.stations, cfg.dsidx, cfg.datafiles):
-		src = station_out_path(rawroot, st, bid, di, nds_of[st])
-		if os.path.isfile(src):
-			tgt = os.path.join(rawroot, fn)
-			if os.path.islink(tgt) or os.path.exists(tgt):
-				os.unlink(tgt)
-			# 绝对目标：相对目标跨文件系统就断，而"把 raw 根指到另一块盘"
-			# 正是这么用的（Q2）
-			os.symlink(src, tgt)
-		elif fn == os.path.basename(fn):
-			# 裸文件名 = make_testdata 布局（DATA TABLE 直接写文件名，由 RAW
-			# 根解析），文件必须在；真实观测的 FILE 行是路径（绝对或已可见），
-			# 走不到这里
-			raise InputError('%s %s not found (batch %s, station %s datastream %d)'
-			                 % (PROG, src, bid, st, di))
-
-
-# --------------------------------------------------------------------------
 # 组装
 # --------------------------------------------------------------------------
 
@@ -284,11 +237,10 @@ def groups_of(cfg):
 	return derive_ds_groups(bj_nds, cfg.dspairs)
 
 
-def prepare(workdir, bid, rawroot, visroot):
+def prepare(workdir, bid, visroot):
 	"""全套预处理。返回可以直接喂给 bash 的文本行。"""
 	bj, cfgrel, cfg = parse_batch(workdir, bid)
 	validate(cfg, bj)
-	relink_data_table(rawroot, cfg, bid)
 	groups = groups_of(cfg)
 
 	# ds 全局序号 → 组号：C++ 侧按 ds 序号打掩码，这里反向查表，两侧一致
@@ -312,7 +264,7 @@ def prepare(workdir, bid, rawroot, visroot):
 
 def usage():
 	sys.stderr.write(
-		'用法：fxinput.py prepare <workdir> <batch_id> <rawroot> <visroot>\n'
+		'用法：fxinput.py prepare <workdir> <batch_id> <visroot>\n'
 		'      fxinput.py groups  <workdir> <batch_id>\n')
 	return 2
 
@@ -323,10 +275,10 @@ def main(argv):
 	cmd = argv[1]
 
 	if cmd == 'prepare':
-		if len(argv) != 6:
+		if len(argv) != 5:
 			return usage()
-		workdir, bid, rawroot, visroot = argv[2:6]
-		lines = prepare(workdir, bid, rawroot, visroot)
+		workdir, bid, visroot = argv[2:5]
+		lines = prepare(workdir, bid, visroot)
 	elif cmd == 'groups':
 		if len(argv) != 4:
 			return usage()

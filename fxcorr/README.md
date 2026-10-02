@@ -163,7 +163,7 @@ raw data
 | `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供对拍；它把 `.input`/`.calc` 副本里的相对路径绝对化后交给 mpifxcorr（原程序按 cwd 解析） |
 | `wrap_vex2difx.sh` / `wrap_difxcalc.sh` | 前处理封装：在 `config/` 内调用原程序，并把产物里的绝对路径规范化回相对（整个 config 目录可搬） |
 | `wrap_difx2fits.sh` | 后处理封装：SWIN → FITS，产物落 `FXCORR_PRODUCT_ROOT`；实验级，全部 batch 跑完后调一次 |
-| `run_batch.sh` | fxcorr 流水线：前置校验 → 根记录与一致性检查 → DATA TABLE 软链重指本 batch → 逐站 `fxcorr-f` → `fxcorr-x` → 更新 status |
+| `run_batch.sh` | fxcorr 流水线：前置校验 → 根记录与一致性检查 → 逐站 `fxcorr-f` → `fxcorr-x` → 更新 status |
 
 `watch_and_dispatch.sh` 已砍（V1 静态数据集无轮询场景）；流式监视与多节点调度由 scalebox 承担；容器化 V2 建成、V5 P4 起为单镜像 `fxcorr/fxcorr`（`FXCORR_RUN_MODE=container`，见 `fxcorr/CLAUDE.md` 与 `docker/README.md`）。
 

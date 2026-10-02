@@ -31,7 +31,7 @@ raw/
 
 ## 数据定位（f 怎么找到数据）
 
-`fxcorr-f` 定位数据**不经过** `.input` 的 DATA TABLE（2026-10-02 定案，见
+`fxcorr-f` 定位数据**不经过** `.input` 的 DATA TABLE（2026-10-02 定案并实施，见
 `fxcorr/v8-plan.md` §2），两级：
 
 1. **任务 headers 的 `real_path`**（可选）：数据文件路径，**逗号分隔列表**（容一个 ds

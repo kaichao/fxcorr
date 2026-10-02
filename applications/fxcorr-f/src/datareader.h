@@ -41,8 +41,14 @@ public:
 	// batchstartsec/batchstartns: absolute (seconds, ns) of the batch start --
 	// the raw file holds this batch's data starting at that time (data-spec 5.2
 	// file-per-batch layout), so all byte offsets are relative to it
+	//
+	// dataFilesOverride (v8-plan.md 2.2): when non-null and non-empty, the
+	// data files come from this list instead of the .input FILE lines.  The
+	// caller (fxcorr-f's main) owns the list and keeps it alive for the
+	// reader's lifetime.
 	DataReader(Configuration *config, int configindex, int dsindex, Model *model,
-	           long long batchstartsec, int batchstartns);
+	           long long batchstartsec, int batchstartns,
+	           const std::vector<std::string> *dataFilesOverride = 0);
 	~DataReader();
 
 	inline int getBlocksPerSend() const { return blockspersend; }
@@ -186,6 +192,9 @@ private:
 	// file state
 	int numfiles;
 	std::string *datafilenames;
+	std::vector<std::string> dataFileList;	// backing store when the caller
+						// overrode the .input FILE lines
+						// (dataFilesOverride, v8-plan.md 2.2)
 	int currentfile;
 	std::ifstream input;
 	long long currentscanstartsec;	// absolute second of the scan this file holds

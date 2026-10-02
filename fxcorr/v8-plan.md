@@ -4,8 +4,9 @@
 V8 主题是**接入 scalebox 编排**（fxcorr 六工具封装为算法模块 + Go 主路由，在另一仓库
 `app-fxcorr`）。编排落地过程中暴露一个既有设计问题：**raw 数据文件的定位**——FILE 行 +
 软链的既有机制在"多 batch 并行 + 容器路径映射"下不成立（共享可变状态、绝对路径陷阱、
-重指职责无主）。本日定案为**「real_path + 命名规则」两态定位，FILE 行/软链整条链退役**；
-改动在 fxcorr-f（C++，三个文件）与模块 run.sh（app-fxcorr 仓库），主路由零改动。§3 把
+重指职责无主）。本日定案为**「real_path + 命名规则」两态定位，FILE 行/软链整条链退役**，代码当日
+实施（fxcorr-f C++ 三文件 + 模块 run.sh 转发 real_path + `fxinput.py` 的软链重指
+退役；判据 1–3 实测过，待镜像重建与模块级全链回归），不涉主路由（零改动）。§3 把
 `v7-plan.md` 的未完成项逐条落位——**主承接是判据 9b（P5b：跨节点流量实测，Q5 正题，
 本就"等 scalebox 编排"）**。）
 
@@ -74,7 +75,7 @@ V8 主题是**接入 scalebox 编排**（fxcorr 六工具封装为算法模块 +
 
 ### 2.3 改动清单
 
-**A. fxcorr-f（C++，3 个文件）**
+**A. fxcorr-f（C++，3 个文件；2026-10-02 已实施）**
 
 - `src/datareader.h`：构造加可选参数 `const std::vector<std::string> *dataFilesOverride
   = nullptr`；新增成员 `std::vector<std::string> dataFileList`（覆盖时持有，
@@ -87,7 +88,7 @@ V8 主题是**接入 scalebox 编排**（fxcorr 六工具封装为算法模块 +
   两候选（`_ds<N>` 后缀 → 无后缀）以 `stat()` 探测；都缺 → 报错并提示 `real_path`
   （`DataReader` 构造在 `main.cpp:387` 处传入）。
 
-**B. 模块 run.sh（app-fxcorr 仓库，`modules/fxcorr-f/code/run.sh`，+4 行）**
+**B. 模块 run.sh（app-fxcorr 仓库，`modules/fxcorr-f/code/run.sh`，+4 行；2026-10-02 已实施）**
 
 - headers 正则取 `real_path` → `export FXCORR_REAL_PATH`（空串视为未设置；
   与 x-merge 的 headers 解析同手法）。
@@ -107,11 +108,13 @@ V8 主题是**接入 scalebox 编排**（fxcorr 六工具封装为算法模块 +
   `modules/README.md`（headers 契约条 + §3 路径规则）、`router/README.md`
   （§6 sim 跳过判据注 + §14 #24）。
 
-**随代码改动同步**（本轮未动——它们描述的是**当前代码**的行为，改代码时一起改）：
+**随代码改动同步（2026-10-02 已随代码实施完成）**：
 
-- `fxcorr/README.md:166`（`run_batch.sh` 行："DATA TABLE 软链重指本 batch"步骤）；
-- `fxcorr/fxinput.py` 的 `relink_data_table`（退役）；`fxcorr/run_batch.sh` 的调用点；
-- `fxcorr/make_testdata.sh` 的软链（清理与否见 §2.5-4）。
+- `fxcorr/README.md:166`（`run_batch.sh` 行：删"DATA TABLE 软链重指本 batch"步骤）；
+- `fxcorr/fxinput.py` 的 `relink_data_table` 与 `station_out_path`（退役；`prepare`
+  少一个 `rawroot` 参数）；`fxcorr/run_batch.sh` 的调用点（不再传 RAW 根）；
+- `fxcorr/make_testdata.sh` 的软链**保留**（理由见 §2.5-4），注释说明新定位；
+- `fxcorr/CLAUDE.md` 相应条目（run_batch / fxinput / make_testdata / run_bench）同步。
 
 ### 2.4 判据
 
@@ -121,17 +124,46 @@ V8 主题是**接入 scalebox 编排**（fxcorr 六工具封装为算法模块 +
 3. 手工调试流程不变：`fxcorr-f <batch> <station> <workdir> <ds>` 无 env 直接可用；
 4. 现有模块测试（app-fxcorr 的 `modules/*/test.yaml`）全链回归。
 
+**实施记录（2026-10-02，测试机宿主编译，判据 1–3 已过）**：route1（单 ds 站、
+无后缀命名）无 env 直接跑通；test1 软链移开后 ds0/ds1 都命中带 `_ds<N>` 后缀的
+规范名；把规范文件改名藏起后，命名规则路径报错（列出两候选 + 提示 real_path），
+而 real_path 的相对 / 绝对 / 逗号两文件三例全跑通、产物与基线 md5 **逐字节一致**，
+指向不存在的文件时报错退出。判据 4 待镜像重建后（模块级全链）。顺带修掉测试机
+宿主 `/usr/local/difx` 里滞后的 fxcorrcommon 头文件（缺 V7 P3 的
+`Mode::enableBlockAccumulators`，`make install` 后消掉）。
+
+**模块级全链（判据 4）2026-10-02 通过**（app-fxcorr 平台，route1 两 batch）：
+`task add test` → router（入口）→ prep → wait-queue → vtask-head → f×4 → x×2 →
+batch 级 merge×2 → vtask-tail×2 → 实验级 merge（SWIN 12 records）→ **fits（FITS 出）**，
+31 个任务全绿；产物与手工链对拍一致（fengine 逐字节；FITS 仅差 HISTORY 时间戳
+6 字节）。**real_path 模块级验证**：规范文件移开、headers 带
+`real_path=/tmp/v8test/copy-b1t1.vdif` 直投 f，任务读出数据正常完成——run.sh
+转发链（headers → `FXCORR_REAL_PATH` → f）全程成立。联调顺带修三处（详见
+`app-fxcorr/modules/README.md` §5 坑 10/11 与 `wrap_difx2fits.sh` 头注释）：
+`scalebox.env` 的 `FXCORR_AGENT` 镜像名（错写成 Docker Hub 风格 → 拉取超时
+SSHFAILED）、`HEAD_SLOTS` 未定义（vtask-head 不建 slot → 任务卡 wait-queue）、
+**`wrap_difx2fits.sh` 改为从 `.input` 的 `CALC FILENAME` 读 `.calc` 真名**
+（原按 `<base>.calc` 同名假定，多 batch 变体 `test-sim.input` + `test.calc`
+直接撞 not found；fxcorr-agent 已随之重建）。
+
 ### 2.5 待验证 / 风险
 
-1. **difx2fits 对 FILE 行的依赖**：初查 `applications/difx2fits/` 未引用 `datafilenames`，
-   大概率只解析不打开；联调时实测（`wrap_difx2fits.sh` 本有"复制 .input + 改写"的手法
-   兜底）。若确有依赖，.input 生成时把 FILE 行写成规范路径即可（不改本设计）；
-2. **命名规则同改清单变四处**：`fxinput.py`（权威）/ `fxcorr-sim` / app-fxcorr 主路由的
-   `fxin.StationOutPath` / **`fxcorr-f`（本次新增）**——四处注释互引；
+1. **difx2fits 对 FILE 行的依赖（2026-10-02 实测：不依赖）**：软链全部移开后
+   `wrap_difx2fits.sh . test-sim` 仍转换成功（1 of 1 jobs → FITS；两 FITS 仅差
+   HISTORY 时间戳 6 字节）；`applications/difx2fits/` 源码也未引用 `datafilenames`
+   ——它只解析 FILE 行、不打开文件。软链的第一个候选消费者排除（见 §2.5-4）；
+2. **命名规则现役清单三处**：`fxcorr-sim` 的 `stationOutPath`（生产者）/
+   app-fxcorr 主路由的 `fxin.StationOutPath` / **`fxcorr-f`（本次新增）**——注释互引；
+   `make_testdata.sh` 的 `vdifrel`（造数处）同规则；原 `fxinput.py` 的
+   `station_out_path` 已随 relink 退役（2026-10-02）；
 3. **多文件 datastream**：命名规则只覆盖"一 ds 一文件"的仿真布局；多段真实数据必须走
    `real_path` 列表（文档写明）；
-4. **软链清理**：`make_testdata.sh` 仍建软链（指向最后 batch）——本设计下 f 不再使用，
-   是否清理待 difx2fits 验证后定（无害则留）。
+4. **软链保留（2026-10-02 定）**：`make_testdata.sh` 仍建软链（指向最后 batch）——
+   f 不再使用，**difx2fits 也已实测不依赖 `FILE` 行（§2.5-1）**，唯一确定的消费者是
+   **mpifxcorr 基准（`run_bench.sh`：按 `FILE` 行读数据、并用软链定位 batch）**。
+   run_batch.sh 的重指退役后多 batch 下软链停在最后一个 batch，`run_bench.sh` 定位
+   其他 batch 时走"最新 batch.json" fallback（它本就有）。**结论：保留**——对拍基准
+   在用；将来 mpifxcorr 退场时可一并清理。
 
 ## 3. 承接：V7 未完成项（2026-10-02 整理）
 

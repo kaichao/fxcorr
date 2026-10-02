@@ -100,9 +100,10 @@ def softlink_bid():
         m = re.search(r'^FILE \d+/\d+:\s*(\S+)\s*$', open(cfg).read(), re.M)
         if not m:
             continue
-        # FILE 行是相对路径时按 RAW 根拼——与 run_batch.sh 的软链重指、程序内
-        # 的 FxcorrPath 同一规则（data-spec 5.2.1）；绝对路径原样（真实观测的
-        # FILE 行就是绝对路径，那里也没有软链可读，自然退到 fallback）。
+        # FILE 行是相对路径时按 RAW 根拼——与程序内的 FxcorrPath 同一规则
+        # （data-spec 5.2.1）；绝对路径原样（真实观测的 FILE 行就是绝对路径，
+        # 那里也没有软链可读，自然退到 fallback）。软链由 make_testdata.sh 建
+        # （2026-10-02 起 run_batch.sh 不再重指——本脚本是它保留的消费者之一）。
         # 2026-09-28 之前这里拼的是 workdir，只在 RAW 根未重定向（= workdir 的
         # 默认值）时才碰巧正确；一旦按 Q2 把 raw 指到大盘就找不到软链，静默退到
         # "取最新 batch.json"——多 batch 场景下那个 fallback 很可能选错 batch。

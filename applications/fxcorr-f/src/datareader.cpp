@@ -19,7 +19,8 @@ using namespace std;
 using namespace frametimeline;
 
 DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
-                       long long batchstartsec, int batchstartns) :
+                       long long batchstartsec, int batchstartns,
+                       const vector<string> *dataFilesOverride) :
 	config(conf), model(mdl), configindex(confindex), dsindex(ds),
 	kind(KIND_VDIF),
 	framebytes(0), payloadbytes(0), framespersecond(0), sendbytes(0),
@@ -42,13 +43,26 @@ DataReader::DataReader(Configuration *conf, int confindex, int ds, Model *mdl,
 {
 	batchstartabsns = batchstartsec*1000000000LL + (long long)batchstartns;
 
-	numfiles = config->getDNumFiles(configindex, dsindex);
-	if(numfiles < 1)
+	// data files: an explicit list from the caller (data localization,
+	// v8-plan.md 2.2) wins over the .input FILE lines -- the FILE lines are
+	// retired; the .input itself is still parsed above for the metadata
+	// (frequencies, times, ...)
+	if(dataFilesOverride != 0 && dataFilesOverride->size() > 0)
 	{
-		cerr << "DataReader: no data files for datastream " << dsindex << endl;
-		exit(EXIT_FAILURE);
+		dataFileList = *dataFilesOverride;
+		numfiles = (int)dataFileList.size();
+		datafilenames = &dataFileList[0];
 	}
-	datafilenames = config->getDDataFileNames(configindex, dsindex);
+	else
+	{
+		numfiles = config->getDNumFiles(configindex, dsindex);
+		if(numfiles < 1)
+		{
+			cerr << "DataReader: no data files for datastream " << dsindex << endl;
+			exit(EXIT_FAILURE);
+		}
+		datafilenames = config->getDDataFileNames(configindex, dsindex);
+	}
 
 	// format dispatch (algo-plan.md P10); K5VSSP/K5VSSP32 have no working
 	// path upstream (mark5access K5 is "Not Yet Implemented", genMk5FormatName
