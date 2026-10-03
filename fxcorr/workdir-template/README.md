@@ -1,6 +1,8 @@
 # fxcorr workdir 模板
 
-**最后更新**：2026-09-27（前处理已在 `ssh difx` 上验证）
+**最后更新**：2026-10-03（**新增 `t25362-base-mini` 变体**——2 站 + mini 跨度，供
+内存/算力受限节点用；`station` 单任务内存实测 full **27.5 GB** / mini **4.4 GB**，
+见 `../data-volume.md` §3.3）
 
 一个 fxcorr workdir 的**实物骨架**——十个目录都建了出来（`config/` 有配置实物，
 其余各一份 README 说明"里面有什么"），**不含任何仿真或观测数据**。三个用途，
@@ -18,10 +20,11 @@
 
 | 路径 | 内容 |
 |---|---|
-| `gen_vex.py` | 生成器：base → 4 站 → mini 变体；也负责装进 workdir（见「用法」） |
+| `gen_vex.py` | 生成器：base → 4 站 → mini 变体（含 2 站 mini）；也负责装进 workdir（见「用法」） |
 | `config/t25362-base.{vex,v2d}` | **t25362 真实观测的原配置**（2 站），生成器的输入，逐字取自 `ssh difx` |
 | `config/t25362-4st.{vex,v2d}` | 4 站、**完整跨度**——S0 第②次跑、S3 基准 |
 | `config/t25362-4st-mini.{vex,v2d}` | 4 站、**跨度压到连续**——S0 第①次跑 |
+| `config/t25362-base-mini.{vex,v2d}` | 2 站（= base）、**跨度压到连续**——内存/算力受限节点（2026-10-03 加） |
 | `config/data/filelist_*.t[1-8]` | 32 个 filelist（4 站 × 8 ds），`gen_vex.py` 生成 |
 | `<目录>/README.md` | 十个目录各一份，讲"里面有什么"——见下一节 |
 
@@ -49,19 +52,24 @@
 这边是**实物与逐目录说明**。「这个目录长什么样、里面有哪些文件」看这里，
 「为什么必须这样」看那边。
 
-## 三个配置的对照
+## 四个配置的对照
 
-| | base | 4st | 4st-mini |
-|---|---|---|---|
-| 站 | BA, S6 | BA, **BX**, S6, **SX** | 同 4st |
-| datastream | 16（每站 8） | 32 | 32 |
-| 唯一频率 | 32 | 32 | 32 |
-| 频率范围（MHz） | 2936.40–9976.40 | 同 base | **2936.40–3928.40** |
-| **跨度** | **7072 MHz** | 7072 MHz | **1024 MHz** |
-| `chan_def` 数 = recorded band | 64 | 64 | 64 |
-| 通道带宽 / `NUM CHANNELS` | 32 MHz / 128 | 同 | 同 |
-| `INT TIME` / `SUBINT` | 1.024 s / 5.12 ms | 同 | 同 |
-| 前处理产物 | `T25362_1.input` | `t25362-4st_1.input` | `t25362-4st-mini_1.input` |
+| | base | base-mini | 4st | 4st-mini |
+|---|---|---|---|---|
+| 站 | BA, S6 | 同 base | BA, **BX**, S6, **SX** | 同 4st |
+| datastream | 16（每站 8） | 16 | 32 | 32 |
+| 唯一频率 | 32 | 32 | 32 | 32 |
+| 频率范围（MHz） | 2936.40–9976.40 | 同 4st-mini | 同 base | **2936.40–3928.40** |
+| **跨度** | **7072 MHz** | **1024 MHz** | 7072 MHz | **1024 MHz** |
+| `chan_def` 数 = recorded band | 64 | 64 | 64 | 64 |
+| 通道带宽 / `NUM CHANNELS` | 32 MHz / 128 | 同 | 同 | 同 |
+| `INT TIME` / `SUBINT` | 1.024 s / 5.12 ms | 同 | 同 | 同 |
+| 前处理产物 | `T25362_1.input` | `t25362-base-mini_1.input` | `t25362-4st_1.input` | `t25362-4st-mini_1.input` |
+
+**单任务内存（`station`，2026-10-03 实测）**：full 跨度（base / 4st 系）**27.5 GB**、
+mini 跨度（base-mini / 4st-mini）**4.4 GB**（128 ms subint 条件下；∝ 覆盖跨度 ×
+块时长、与站数无关，构成见 `../data-volume.md` §3.3）。**小内存节点（< 32 GB）
+必须用 mini**。
 
 **跨度的口径是 `max(freq + bw) − min(freq)`**——fxcorr-sim 的 `deriveGrid` 定义
 （`applications/fxcorr-sim/src/commonsignal.cpp`），**不是** `max(freq) − min(freq)`

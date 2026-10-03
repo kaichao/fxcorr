@@ -47,10 +47,14 @@ raw/BA/BA_00000002_ds0.vdif     ← 数据本体（sim 产物，规范布局）
 f 任务 00000002-BA-0（无 real_path）→ 按命名规则推导命中上面这个文件
 ```
 
-**DATA TABLE 软链已退役**：不再需要"把 DATA TABLE 的文件名链到真实文件"这一层——
-多 batch 并行时软链是共享可变状态（同一个文件名要指向不同 batch 的文件，重指即串），
-新机制下每个任务自带定位依据。`make_testdata.sh` 建的旧软链不再被程序使用
-（保留无害，待统一清理）。**多文件**（一个 ds 跨多个 VDIF 文件）只能走 `real_path` 列表。
+**DATA TABLE 软链（现状：为 mpifxcorr 保留，2026-10-02 定）**：fxcorr 链不再需要
+"把 DATA TABLE 的文件名链到真实文件"这一层——多 batch 并行时软链是共享可变状态
+（同一个文件名要指向不同 batch 的文件，重指即串），新机制下每个任务自带定位依据
+（见上）。`make_testdata.sh` **仍会生成**这层软链（`raw/<DATA TABLE 名>` → 最后
+batch 的 VDIF）：唯一消费者是 **mpifxcorr 基准**（`run_bench.sh`——mpifxcorr 按
+`.input` 的 FILE 行打开数据，多 batch 下靠软链定位 batch）；fxcorr 三工具与 difx2fits
+都不使用（后者已实测不依赖 FILE 行，`v8-plan.md` §2.5-1）。**多文件**（一个 ds 跨多个
+VDIF 文件）只能走 `real_path` 列表。
 
 ## `<N>` 的口径（三处必须一致）
 

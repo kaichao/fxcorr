@@ -7,6 +7,9 @@
 # 产物（与 base 并列）：
 #   t25362-4st.vex / .v2d       4 站、完整跨度（7040 MHz）—— S0 第②次跑、S3 基准
 #   t25362-4st-mini.vex / .v2d  4 站、跨度压到连续（992 MHz）—— S0 第①次跑
+#   t25362-base-mini.vex / .v2d 2 站（= base）、跨度压到连续——内存/算力受限节点
+#     （station 任务峰值内存 ∝ 覆盖跨度 × 块时长，full 跨度 + 128ms subint 实测
+#     ~27.5 GB/任务（2026-10-03），mini 降 ~6.9×；见 ../data-volume.md）
 #
 # 两个变换：
 #
@@ -182,17 +185,22 @@ def compress_span(body, uniq):
 	return out
 
 
-def make_vex(mini):
+def make_vex(mini, expand=True):
+	"""生成 vex 变体。expand=False 保留 base 的 2 站（不克隆新站）——
+	用于 t25362-base-mini（2 站 + mini 跨度）。"""
 	text = open(os.path.join(CFG, BASE + '.vex')).read()
 	uniq = []
 	parts = []
 	for name, body in split_sections(text):
 		if name == 'STATION':
-			body = expand_station(body)
+			if expand:
+				body = expand_station(body)
 		elif name == 'MODE':
-			body = expand_mode(body)
+			if expand:
+				body = expand_mode(body)
 		elif name == 'SCHED':
-			body = expand_sched(body)
+			if expand:
+				body = expand_sched(body)
 		elif name == 'FREQ':
 			uniq = chan_freqs(body)
 			if mini:
@@ -326,6 +334,16 @@ def main():
 		print('gen_vex.py: %s  %d stations, %d datastreams, %d unique freqs, '
 		      'span %.1f-%.1f MHz (%.0f MHz)'
 		      % (stem, nstation, nds4, len(uniq), lo, hi, hi - lo))
+
+	# t25362-base-mini：base 的 2 站 + mini 跨度（内存/算力受限节点用）
+	vex, uniq = make_vex(True, expand=False)
+	v2d = re.sub(r'^vex\s*=.*$', 'vex = t25362-base-mini.vex', base_v2d, flags=re.M)
+	open(os.path.join(outdir, 't25362-base-mini.vex'), 'w').write(vex)
+	open(os.path.join(outdir, 't25362-base-mini.v2d'), 'w').write(v2d)
+	lo, hi = uniq[0], uniq[-1]
+	print('gen_vex.py: t25362-base-mini  %d stations, %d datastreams, '
+	      '%d unique freqs, span %.1f-%.1f MHz (%.0f MHz)'
+	      % (2, nds, len(uniq), lo, hi, hi - lo))
 	write_filelists(outdir, stations, nds // 2)
 
 
