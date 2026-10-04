@@ -36,7 +36,8 @@ struct Grid
 	int numsamps;             // frequency points per slice
 	double minstartfreqmhz;   // lowest band frequency in MHz (grid origin)
 	double stimeus;           // slice duration in us (= 1/specresmhz)
-	long long slicesperblock; // slices per 0.5 s block (500000 / stimeus)
+	long long slicesperblock; // slices per block (FXSIM_BLOCK_US / stimeus;
+	                          // default 500000 us = the D15 0.5 s block)
 };
 
 // Spectral line parameters (FXSIM_LINE, datasim --specline / util.cpp

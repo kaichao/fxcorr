@@ -156,7 +156,32 @@ bool deriveGrid(Configuration &config, Grid *grid, int specresfac)
 	grid->numsamps = (int)rint(maxchanfreq / specres);
 	grid->minstartfreqmhz = minstartfreq;
 	grid->stimeus = 1.0 / specres;
-	grid->slicesperblock = (long long)rint(500000.0 / grid->stimeus);
+	// Block length: D15's 0.5 s block-file granularity kept as the default;
+	// FXSIM_BLOCK_US overrides it in microseconds.  It caps a station task's
+	// peak memory - the block buffer and every per-band baseband are
+	// blksize x slicesperblock - and does not change the output: the PRNG
+	// stream runs continuously across blocks and each frame's window stays
+	// reachable through the rolling buffers, so any block length holding a
+	// whole number of frames reproduces the data byte for byte (a length that
+	// does not is rejected at processing time, see signalgen.cpp).
+	double blockus = 500000.0;
+	if(const char *bu = getenv("FXSIM_BLOCK_US"))
+	{
+		blockus = atof(bu);
+		if(!(blockus > 0.0))
+		{
+			cerr << "fxcorr-sim: FXSIM_BLOCK_US must be a positive number of "
+			        "microseconds" << endl;
+			return false;
+		}
+	}
+	grid->slicesperblock = (long long)rint(blockus / grid->stimeus);
+	if(grid->slicesperblock < 1)
+	{
+		cerr << "fxcorr-sim: block length " << blockus << " us is shorter than "
+		        "one slice (" << grid->stimeus << " us)" << endl;
+		return false;
+	}
 
 	// every band must be a contiguous cut of the slice
 	for(size_t i = 0; i < freqs.size(); i++)

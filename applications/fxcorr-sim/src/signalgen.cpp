@@ -476,7 +476,8 @@ bool FreqStationGen::processBlock(const float *blockdata, long long nfloats)
 	if(nslices * (long long)bands[0].blksize % vpsamps != 0)
 	{
 		cerr << "fxcorr-sim: block (" << nslices << " slices) is not a whole "
-		        "number of frames" << endl;
+		        "number of frames (one frame is " << vpsamps / bands[0].blksize
+		     << " slices; check FXSIM_BLOCK_US)" << endl;
 		return false;
 	}
 	framesinblock = nslices * bands[0].blksize / vpsamps;

@@ -51,6 +51,7 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 | `FXSIM_NOISE` | `0.02` | station 端高斯噪声 σ；`0` 关闭（两站同参数全关闭 = 输出逐位一致，跨站相干校验） |
 | `FXSIM_ADAPTIVE` | 关 | station 端自适应量化门限（`1` 开启；datasim d_tmul 语义：量化前按数据 rms 缩放、每帧更新、1M 样本封顶），默认关 |
 | `FXSIM_SPECRES` | 1 | specRes 缩放因子（正整数）：公共信号频谱分辨率 ÷N、样本数 ×N（datasim --specres 语义）；网格缩放后的一致性检查照跑，station 须用同一值（meta.json 网格不匹配即报错） |
+| `FXSIM_BLOCK_US` | 500000 | 公共信号块时长（微秒），`slicesperblock = 值 / stimeus`。默认 500000 = D15 的 0.5 s 块粒度，它**决定 `station` 单任务的峰值内存**（块缓冲与每 band 基带缓冲都 ∝ `blksize × slicesperblock`；full 跨度 0.5 s 实测 27.5 GB、mini 4.4 GB，见 `data-volume.md` §3.3）——小块长 + 提高 `-p` 进程数是小内存节点的降内存主线（0.25 s → mini 单任务实测 ≈2.0 GB）。**不改数据**：PRNG 流跨块连续、帧窗口经滚动缓冲可达，同一 batch 下任意合规块长逐字节一致；要求**每块含整数帧**（mini 配置 125 slices/帧，250000 µs 恰 4000 帧），不满足时 station 侧报错退出 |
 | `FXSIM_LINE` | 关 | 谱线 `freq,amp,rms`：freq = 绝对 MHz（须落在公共信号带内，越界报错），amp = 幅度（滤波器乘 √amp），rms = 网格点数（datasim gengaussianfilter 语义，re=im 分量同乘）；站端合成公共信号时 gencplx 后逐 slice 频域注入、跨站相干（每站用同一 seed 与同一顺序，注入结果逐位相同） |
 | `FXSIM_DELAY` | 开（`0` 关） | **新路径**：完整延迟链（datasim updatevalues + processdata 语义）——每帧 .im 模型求 delay/rate（order=1）、fracsamperror 累积超半复样本整样本移位（滚动基带缓冲）、频域亚样本校正（e^{j·2π·bandwidth·idx/vpsamps·fracerr}）、时域条纹旋转（band 起始频率，fraction_of = x−rint(x−0.5) 小数相位）；`0` = 延迟无关恒等链（字节回归）。**legacy**：`1` = 把 .calc 几何延迟注入 tone 相位（+2π·f_RF·τ(t)，每帧 order=1 求值、帧内线性；pcal 不注入） |
 | `FXSIM_FLUX` / `FXSIM_SEFD` | 关 / 1000 | **新路径**：flux > 0 启用 datasim fabricatedata 定标链（×√F → +√SEFD 站噪声 → ÷√(F+SEFD) 归一），替代 FXSIM_NOISE 路径（显式设 NOISE 时报错）；SEFD = 单值全站共用或逗号列表按 .input datastream 序逐站取值（datasim -s 语义），flux 设了而 SEFD 没设时用默认 1000。**legacy**：源流量 / 站 SEFD（Jy），**两者都设**才启用 SNR 定标（tone 幅度 = 0.5·√(2F/(F+SEFD))、噪声 σ = 0.5·√(SEFD/(F+SEFD))，覆盖 FXSIM_NOISE） |
@@ -84,6 +85,9 @@ FXSIM_NOISE=0 fxcorr-sim station 00000001 T2
 
 # P2：谱线（201.5 MHz，幅度 10，rms 3 网格点）+ 4 倍频谱分辨率
 FXSIM_LINE=201.5,10,3 FXSIM_SPECRES=4 fxcorr-sim station 00000001 T1
+
+# 小内存节点：块时长减半 → 单任务峰值内存减半（数据不变；配合提高 -p 并发）
+FXSIM_BLOCK_US=250000 fxcorr-sim station 00000001 T1
 
 # P2：datasim 定标链（源 100 Jy；T1 SEFD 100、T2 SEFD 10000 按 datastream 序）
 FXSIM_FLUX=100 FXSIM_SEFD=100,10000 fxcorr-sim station 00000001 T1
