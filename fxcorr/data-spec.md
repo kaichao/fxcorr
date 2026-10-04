@@ -244,6 +244,20 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
   文件格式与样例见 `workdir-template/meta/README.md`。
 
+  **本地计算模式下的根取值与记录改写（2026-10-04，app-fxcorr 编排）**：平台编排把
+  `raw`/`fengine` 下到**计算节点本地**时（app-fxcorr 的 `FXCORR_ROUTE=1|2`），根一律
+  写**直接映射写法**——平台给任务容器挂了 `-v /tmp:/tmp -v /dev/shm:/dev/shm`，容器内
+  `/tmp`、`/dev/shm` 就是宿主同名目录，`FXCORR_RAW_ROOT=/tmp/fxcorr/raw` 即节点本地盘；
+  **不写 `/local_data_root/...` 前缀**（平台另挂 `-v /:/local_data_root`，两种写法同一
+  物理目录，但记录按字符串比对——全链必须统一一种写法）。
+  **记录需改写**：`meta/roots/*.json` 描述的是这套布局，raw/fengine 一旦重定向，既有
+  记录不改写就会让后续 batch 报 `disagrees`（护栏按设计生效）。操作 = 在**同一环境的
+  同一条命令里** export 好本地根变量后跑一次
+  `fxcorr/set_roots.sh <workdir>`（对全部 `batches/*.json` 重写记录；脚本会打印写出的
+  workdir 与四个根值供核对——**不 export 就跑 = 按共享布局写回，等于没改**）。只应在
+  确实按该布局准备/搬运了数据时执行（route=1 的 raw-copy、route=2 的本地 sim 即由此
+  成立）。“无记录 = 放行”的旧行为不变。
+
   **其余环境变量**：`FXCORR_PRINT_ROOTS=1` 打印各根解析结果与来源；`FXCORR_RUN_MODE` /
   `FXCORR_LOGLEVEL` / `FXCORR_STA` / `FXCORR_KURTOSIS` 见 usage.md。
 

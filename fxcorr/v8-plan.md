@@ -152,8 +152,11 @@ SSHFAILED）、`HEAD_SLOTS` 未定义（vtask-head 不建 slot → 任务卡 wai
    `wrap_difx2fits.sh . test-sim` 仍转换成功（1 of 1 jobs → FITS；两 FITS 仅差
    HISTORY 时间戳 6 字节）；`applications/difx2fits/` 源码也未引用 `datafilenames`
    ——它只解析 FILE 行、不打开文件。软链的第一个候选消费者排除（见 §2.5-4）；
-2. **命名规则现役清单三处**：`fxcorr-sim` 的 `stationOutPath`（生产者）/
-   app-fxcorr 主路由的 `fxin.StationOutPath` / **`fxcorr-f`（本次新增）**——注释互引；
+2. **命名规则现役清单**：`fxcorr-sim` 的 `stationOutPath`（生产者）/
+   app-fxcorr 主路由的 `fxin.StationOutPath` / **`fxcorr-f`（本次新增）** /
+   **app-fxcorr 的 `raw-copy` 模块（2026-10-04 第四处）**——它的 `mv` 目标名 =
+   共享侧源文件基名（`real_path` 的 basename，共享布局即规范名），即"镜像"同一
+   规则而非重新推导；注释互引；
    `make_testdata.sh` 的 `vdifrel`（造数处）同规则；原 `fxinput.py` 的
    `station_out_path` 已随 relink 退役（2026-10-02）；
 3. **多文件 datastream**：命名规则只覆盖"一 ds 一文件"的仿真布局；多段真实数据必须走
