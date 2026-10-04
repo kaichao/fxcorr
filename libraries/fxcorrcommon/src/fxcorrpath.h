@@ -61,9 +61,12 @@ public:
 	// Compare the roots this tool uses against what the orchestration layer
 	// recorded in meta/roots/<batchid>.json (v5-plan.md Q4/Q14).  Pass only
 	// the roots the caller actually reads or writes - comparing all of them
-	// would fail a tool for a change in a root it never touches.  Returns
-	// false (and prints both values) on disagreement; a missing record is not
-	// an error: single-tool runs and tests have none.
+	// would fail a tool for a change in a root it never touches.  Both sides
+	// are normalised first (data-spec.md 5.2.1, 2026-10-04): a root sitting at
+	// its default <workdir>/<name> position compares equal across mount
+	// aliases, a redirected root is compared verbatim.  Returns false (and
+	// prints both values) on disagreement; a missing record is not an error:
+	// single-tool runs and tests have none.
 	static bool checkRoots(const std::string &batchid, const Root *used,
 	                       int nused, const char *progname);
 

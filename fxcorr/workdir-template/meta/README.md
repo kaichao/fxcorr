@@ -52,15 +52,23 @@ meta/
 ```json
 {
   "workdir": "/data/scalebox/s0run",
-  "raw": "/data/scalebox/s0run/raw",
+  "raw": "./raw",
   "fengine": "/dev/shm/fengine",
-  "vis": "/data/scalebox/s0run/vis",
-  "product": "/data/scalebox/s0run/product"
+  "vis": "./vis",
+  "product": "./product"
 }
 ```
 
 注意 `fengine` 可以指向 `/dev/shm` ——**根是路径，不要求都在 workdir 下**
 （这正是 P5 根变量化要的形状）。
+
+**值的写法（2026-10-04 定案）**：等于 `workdir/<规范目录名>` 的根写**相对形式**
+`./<名>`（相对 = 相对该 batch 的 workdir），**重定向的根写绝对**——记录描述的是**布局**
+（"raw 在 workdir 下"），不是某个挂载视图下的路径，所以同一份布局在宿主与容器里
+（`/shared/mydata/x` 与 `/cluster_data_root/x` 是同一份数据）读到的是同一句话。比对时
+两侧都先归一化（"等于自己那份 workdir/<名>"折成 `./<名>`、末位 `/` 归一），因此
+**旧式绝对记录不用重写**；默认 ↔ 默认 在任意别名下判一致，默认 ↔ 重定向 仍报错
+（那才是"真换了地方"）。规则条文见 `fxcorr/data-spec.md` 5.2.1。
 
 ## `difxmsg/`（暂不启用）
 

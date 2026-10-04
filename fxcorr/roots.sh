@@ -25,7 +25,7 @@ fxcorr_root()
 	if [ -n "$val" ]; then
 		case "$val" in
 			/*) printf '%s\n' "$val" ;;
-			*)  printf '%s\n' "$PWD/$val" ;;	# 相对值按 cwd 绝对化（Q20）
+			*)  printf '%s\n' "${PWD%/}/$val" ;;	# 相对值按 cwd 绝对化（Q20）；`%/` 防 cwd=/ 时拼出 `//rel`（2026-10-04 修，与 C++ absolutise 同规则）
 		esac
 	else
 		printf '%s\n' "$FXCORR_ROOT_WORKDIR/$dirname"
@@ -55,6 +55,31 @@ fxcorr_mkroots()
 	done
 }
 
+# 记录值的书写（2026-10-04 定案，data-spec 5.2.1）：记录描述的是**布局**、不是某个
+# 挂载视图下的路径——容器化下同一物理目录必然有多个路径别名（宿主 /shared/mydata/x
+# 与容器内 /cluster_data_root/x 是同一份数据），写死绝对路径会让换个视图跑就误报
+# "换了根"。规则：等于 workdir/<规范名> 的根写相对形式 ./<名>（相对 = 相对本 batch
+# 的 workdir）；重定向的根写绝对。末位 / 一律归一（拼写稳定，比对是逐字的）。
+fxcorr_root_norm()
+{
+	local val="$1"
+	while [ "$val" != "/" ] && [ "${val%/}" != "$val" ]; do
+		val="${val%/}"
+	done
+	printf '%s\n' "$val"
+}
+
+fxcorr_root_record()
+{
+	local val name="$2"
+	val=$(fxcorr_root_norm "$1")
+	if [ "$val" = "$(fxcorr_root_norm "$FXCORR_ROOT_WORKDIR")/$name" ]; then
+		printf '%s\n' "./$name"
+	else
+		printf '%s\n' "$val"
+	fi
+}
+
 # 写 meta/roots/<batch_id>.json：记下本 batch 生效的全部根（Q4）。
 # 环境变量不进 batch.json，这份记录是事后追溯"这批数据用了哪套布局"的唯一手段。
 fxcorr_write_roots()
@@ -63,11 +88,11 @@ fxcorr_write_roots()
 	mkdir -p "$dir" || return 1
 	cat > "$dir/$bid.json" <<EOF
 {
-  "workdir": "$FXCORR_ROOT_WORKDIR",
-  "raw": "$FXCORR_ROOT_RAW",
-  "fengine": "$FXCORR_ROOT_FENGINE",
-  "vis": "$FXCORR_ROOT_VIS",
-  "product": "$FXCORR_ROOT_PRODUCT"
+  "workdir": "$(fxcorr_root_norm "$FXCORR_ROOT_WORKDIR")",
+  "raw": "$(fxcorr_root_record "$FXCORR_ROOT_RAW" raw)",
+  "fengine": "$(fxcorr_root_record "$FXCORR_ROOT_FENGINE" fengine)",
+  "vis": "$(fxcorr_root_record "$FXCORR_ROOT_VIS" vis)",
+  "product": "$(fxcorr_root_record "$FXCORR_ROOT_PRODUCT" product)"
 }
 EOF
 }
@@ -82,6 +107,19 @@ fxcorr_check_roots()
 import glob, json, os, sys
 
 workdir, bid, vis, product = sys.argv[1:5]
+
+# 归一化后再比（data-spec 5.2.1，2026-10-04）：记录写的是"布局"——等于
+# <workdir>/<规范名> 的根记作 './<名>'（旧式记录里是同一件事的绝对写法），两种
+# 写法折成同一形式，容器挂载别名（宿主 /shared/mydata/x 与容器内
+# /cluster_data_root/x 是同一份数据）才不会误报；重定向的根没有别名可言，仍是
+# 逐字比。末位 / 归一。与 FxcorrPath::checkRoots 同规则。
+def norm(value, wd, name):
+    v = value.rstrip('/') or '/'
+    wd = (wd or '').rstrip('/')
+    if wd and v == wd + '/' + name:
+        return './' + name
+    return v
+
 # 本 batch 自己的记录也参与比对：重跑同一个 batch 换了根，新旧产物同样会分裂
 # 在两处。调用方保证 check 发生在 write 之前，所以首次运行时还没有自己的记录。
 for path in sorted(glob.glob(os.path.join(workdir, 'meta', 'roots', '*.json'))):
@@ -92,7 +130,7 @@ for path in sorted(glob.glob(os.path.join(workdir, 'meta', 'roots', '*.json'))):
         continue
     for key, want in (('vis', vis), ('product', product)):
         got = d.get(key)
-        if got and got != want:
+        if got and norm(got, d.get('workdir'), key) != norm(want, workdir, key):
             sys.exit('roots.sh: %s changed since %s\n  was %s\n  now %s\n'
                      'experiment-level outputs would split across two locations; '
                      'finish that experiment first or restore the root'

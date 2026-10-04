@@ -159,7 +159,7 @@ raw data
 | 脚本 | 作用 |
 |------|------|
 | `make_testdata.sh` | 构建 data-spec 布局的标准测试数据（前处理 + 仿真 VDIF + batch.json） |
-| `roots.sh` | **目录根解析**（V5 P5）：四个根的三档回退、`mkdir -p` 各根、写 `meta/roots/<batch_id>.json`、实验级根一致性检查；被三个 `wrap_*.sh` 与编排脚本 source，与库内 `FxcorrPath` 同规则（一致性判据 `test/roots/run_consistency.sh`） |
+| `roots.sh` | **目录根解析**（V5 P5）：四个根的三档回退、`mkdir -p` 各根、写 `meta/roots/<batch_id>.json`、实验级根一致性检查；被三个 `wrap_*.sh` 与编排脚本 source，与库内 `FxcorrPath` 同规则（判据 `test/roots/run_consistency.sh` + `test/roots/check_record.sh`）。**2026-10-04 起记录写归一化形式**（默认档 `./<名>`、重定向根绝对），比对两侧先归一化（旧式绝对记录兼容）——见 `data-spec` 5.2.1 |
 | `run_bench.sh` | difx 原命令基准：mpifxcorr 固化流程出基准 SWIN 供对拍；它把 `.input`/`.calc` 副本里的相对路径绝对化后交给 mpifxcorr（原程序按 cwd 解析） |
 | `wrap_vex2difx.sh` / `wrap_difxcalc.sh` | 前处理封装：在 `config/` 内调用原程序，并把产物里的绝对路径规范化回相对（整个 config 目录可搬） |
 | `wrap_difx2fits.sh` | 后处理封装：SWIN → FITS，产物落 `FXCORR_PRODUCT_ROOT`；实验级，全部 batch 跑完后调一次 |

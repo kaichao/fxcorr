@@ -143,6 +143,28 @@ static string jsonField(const string &json, const string &key)
 	return json.substr(p + 1, e - p - 1);
 }
 
+// Normalise one root value for the record comparison (data-spec.md 5.2.1,
+// 2026-10-04).  A root that is exactly <workdir>/<canonical name> means "the
+// default layout" and records spell it "./<name>" (older records spell the
+// same thing absolutely); collapse both to that token so that a workdir
+// reached through a different mount alias - host /shared/mydata/x vs container
+// /cluster_data_root/x, the same data - still compares equal.  A redirected
+// root has no alias-free spelling and stays verbatim.  Trailing slashes are
+// dropped: the comparison is textual, so the spelling has to be stable.
+// An empty recorded workdir (field absent) disables the folding.
+static string normRoot(const string &value, const string &workdir, const string &name)
+{
+	string v = value;
+	while(v.size() > 1 && v[v.size() - 1] == '/')
+		v.erase(v.size() - 1);
+	string wd = workdir;
+	while(wd.size() > 1 && wd[wd.size() - 1] == '/')
+		wd.erase(wd.size() - 1);
+	if(!wd.empty() && v == wd + "/" + name)
+		return "./" + name;
+	return v;
+}
+
 bool FxcorrPath::checkRoots(const string &batchid, const Root *used, int nused, const char *progname)
 {
 	string path = workdir_ + "/meta/roots/" + batchid + ".json";
@@ -154,12 +176,14 @@ bool FxcorrPath::checkRoots(const string &batchid, const Root *used, int nused, 
 	ss << in.rdbuf();
 	string json = ss.str();
 
+	string recordedWorkdir = jsonField(json, "workdir");
 	for(int i = 0; i < nused; i++)
 	{
 		string want = jsonField(json, jsonname(used[i]));
 		if(want.empty())
 			continue;
-		if(want != root(used[i]))
+		if(normRoot(want, recordedWorkdir, canonname(used[i])) !=
+		   normRoot(root(used[i]), workdir_, canonname(used[i])))
 		{
 			cerr << progname << ": " << envname(used[i]) << " disagrees with " << path << endl
 			     << "  recorded " << want << endl
