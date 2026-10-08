@@ -16,10 +16,11 @@ push:
 clean:
 	docker rmi $(IMAGE_NAME):latest $(IMAGE_NAME):$(VERSION)
 
-dist-singularity: build
+dist-singularity:
 	docker save fxcorr/fxcorr:latest |zstd > /tmp/fxcorr.tar.zst
 	scp /tmp/fxcorr.tar.zst p419:/tmp/
 	ssh p419 'singularity build -F /tmp/fxcorr.sif docker-archive:///tmp/fxcorr.tar.zst'
-	ssh p419 'scp /tmp/fxcorr.sif login1:fxcorr/singularity/'
+	ssh p419 'scp /tmp/fxcorr.sif login0:singularity/fxcorr/'
+	ssh p419 'scp /tmp/fxcorr.sif login1:singularity/fxcorr/'
 
 .PHONY: build push clean

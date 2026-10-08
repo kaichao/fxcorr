@@ -1,6 +1,10 @@
 # fxcorr 改造工作区
 
-**最后更新**：2026-10-04（**根记录改归一化形式**（`data-spec` 5.2.1）——**同一物理目录在
+**最后更新**：2026-10-08（**根记录改写执行位置迁移**——从 app-fxcorr 的 router 进程移入
+**fxcorr-prep 任务**（模块内调 `set_roots.sh`；p419 上 router 落控制面、无数据面；见
+app-fxcorr 的 `docs/p419-scale-plan.md`）；`set_roots.sh` 补装进镜像（`docker/Dockerfile`
+——2026-10-04 加脚本时漏装，今天才暴露）；bio 三路线回归全绿（route=1 记录被 prep 正确
+改写 `/tmp/fxcorr/*`）。**此前** 2026-10-04（**根记录改归一化形式**（`data-spec` 5.2.1）——**同一物理目录在
 宿主与容器里必然有不同路径别名**（bio 实测：造数以宿主路径 `/shared/mydata/fxcorr/s2` 跑、
 平台容器解析出 `/cluster_data_root/fxcorr/s2`，`fxcorr-f` 报 `FXCORR_RAW_ROOT disagrees
 with …` 停链），而记录与比对都是**逐字符**的。定案两条：**写侧写"布局"**（等于
@@ -98,7 +102,7 @@ with …` 停链），而记录与比对都是**逐字符**的。定案两条：
 | `run_batch.sh` | fxcorr 流水线：前置校验对齐 → 根记录与实验级一致性检查 → 逐站 fxcorr-f → fxcorr-x → 更新 status/meta/batches.index；**`FXCORR_X_SHARD=1` 走分片路径**（逐 ds 组跑 + 一次 **batch 级** merge → `vis-parts/<bid>/merged.part`，**不写 SWIN**——SWIN 由实验级 `merge --experiment` 单点写出，那是实验级操作、不进本脚本） | 已实现 |
 | `fxinput.py` | **`.input` 解析与 batch 预处理**（V7 P3 前从 `run_batch.sh` 的内嵌 python 段抽出，2026-09-29）：解析 `.input`、三条前置校验、**ds 组划分**。两个子命令——`prepare <workdir> <batch> <visroot>`（全套，`run_batch.sh` 用）与 `groups <workdir> <batch>`（只打印组划分，无副作用，供对照测试）。**组划分与 `fxcorr-x` 的 C++ 侧 `deriveDsGroups` 是同一条规则的两处实现**（`data-spec` 第 8 节），改一处必须改两处；对照判据 `test/input/run_consistency.sh`。**2026-10-02：DATA TABLE 软链重指（`relink_data_table`）退役**——数据定位改两态（`v8-plan.md` §2），`prepare` 少一个 `rawroot` 参数 | 已实现 |
 | `roots.sh` | **目录根解析**（V5 P5）：四个根的三档回退、`mkdir -p` 各根、写 `meta/roots/<batch_id>.json`、实验级根一致性检查。被下面四个脚本 source；与库内 `FxcorrPath` 同规则。**2026-10-04 起记录写归一化形式**（默认档 `./<名>`、重定向根绝对），比对两侧先归一化（旧式绝对记录兼容）——见 `data-spec` 5.2.1 | 已实现 |
-| `set_roots.sh` | **根记录改写**（2026-10-04，节点本地计算模式配套）：按**当前环境变量**（先 export 好本地根）对 workdir 内全部 `batches/*.json` 重写 `meta/roots/<batch_id>.json`，并打印写出的四个根值供核对。用途：raw/fengine 下到节点本地时让记录与真实布局一致（不改写则后续 batch 报 `disagrees`）。**不 export 就跑 = 写回共享布局**；根用直接映射写法。规则见 `data-spec` 5.2.1 | 已实现 |
+| `set_roots.sh` | **根记录改写**（2026-10-04；**2026-10-08 起由 fxcorr-prep 模块在任务内调用**——此前 10-07–10-08 曾由 app-fxcorr 的 router 代写，因 p419 上 router 落控制面、无数据面而移回数据面；手工场景仍可直接用）：按**当前环境变量**（先 export 好本地根）对 workdir 内全部 `batches/*.json` 重写 `meta/roots/<batch_id>.json`，并打印写出的四个根值供核对。**不 export 就跑 = 写回共享布局**；根用直接映射写法。规则见 `data-spec` 5.2.1 | 现役（prep 任务调用 + 手工） |
 | `wrap_difxcalc.sh` | difxcalc 封装：同上（规范化 `.calc` 的 IM/FLAG FILENAME） | 已实现 |
 | `wrap_difx2fits.sh` | difx2fits 封装：组装三件套到 PRODUCT 根 + 相对路径绝对化，跑完清理（只留 FITS）。**实验级操作**，由编排层在该实验全部 batch 跑完后调一次。**`.input` 的 `CALC FILENAME` 必须指向 PRODUCT 下那份已绝对化的 `.calc`**（2026-09-28 修）：指向 config 原件时它的 `IM FILENAME` 还是相对名，difx2fits 按 cwd（PRODUCT）解析找不到 `.im`，而缺 `.im` 时它的 `fitsMC.c` **不查 NULL** 直接索引 `scan->im[antId]` → **段错误**（`fitsML.c` 有 `if(scan->im)` 保护，所以 ML 那遍只打印一行 "No IM info available"、MC 那遍才崩）。修前 FITS 写到 51 KB 就断，修后 5.4 MB 完整。**2026-10-02：`.calc` 的源改按 `.input` 的 `CALC FILENAME` 行定位**——不再要求 `<base>.calc` 同名（多 batch 的 `test-sim.input` 变体配 `test.calc`，同名假定在全链 fits 阶段直接 not found；`IM/FLAG` 的绝对化基准也改为 `.calc` 所在目录） | 已实现 |
 

@@ -119,6 +119,11 @@ COPY --from=builder /src/fxcorr/wrap_difx2fits.sh /usr/local/difx/bin/
 COPY --from=builder /src/fxcorr/make_testdata.sh /usr/local/difx/bin/
 COPY --from=builder /src/fxcorr/run_batch.sh /usr/local/difx/bin/
 
+# set_roots.sh（2026-10-08）：根记录改写——由 fxcorr-prep 模块在流水线任务内调用
+# （prep 落在有数据面的节点；2026-10-07–10-08 曾短暂由 app-fxcorr 的 router 进程
+# 写，因 p419 上 router 落控制面、无数据面而移回数据面）。source 同目录 roots.sh。
+COPY --from=builder /src/fxcorr/set_roots.sh /usr/local/difx/bin/
+
 # fxinput.py 是 run_batch.sh 的**运行期依赖**（2026-09-29 起，V7 P3 前）：`.input`
 # 解析、前置校验、DATA TABLE 软链、ds 组划分都从 run_batch.sh 的内嵌段搬到了这里，
 # 它按 `$SCRIPTDIR/fxinput.py` 找——所以两者必须同目录，漏了这个 COPY 会让容器里

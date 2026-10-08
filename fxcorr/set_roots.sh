@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# set_roots.sh —— 按当前环境变量重写 meta/roots/*.json（"记录改写"，本地计算模式用）
+# set_roots.sh —— 按当前环境变量重写 meta/roots/*.json（"记录改写"；fxcorr-prep
+# 任务内调用 + 手工场景）
+#
+# **当前状态（2026-10-08 起）**：流水线内的记录改写由 **fxcorr-prep 模块**在任务
+# 内调用本脚本完成（prep 落在有数据面的节点；2026-10-07–10-08 曾短暂由 app-fxcorr
+# 的 router 进程代写，因 p419 上 router 落控制面、无数据面而移回数据面——见
+# app-fxcorr 的 docs/p419-scale-plan.md）。**仿真数据无论用命令行方式
+# （make_testdata.sh）还是流水线方式（FXCORR_SIM_ONLY）生成，跑链前都不需要手工
+# 调用本脚本**；手工场景（手工投单模块任务、宿主手工跑链、单模块调试）仍可直接用。
 #
 # 背景（data-spec 5.2.1）：根记录描述"这批数据用了哪套布局"，三个程序启动时与它
 # 比对、不一致即报错停链。本地计算模式（app-fxcorr 的 FXCORR_ROUTE=1|2）把

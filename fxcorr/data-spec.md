@@ -251,12 +251,16 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
   **不写 `/local_data_root/...` 前缀**（平台另挂 `-v /:/local_data_root`，两种写法同一
   物理目录，但记录按字符串比对——全链必须统一一种写法）。
   **记录需改写**：`meta/roots/*.json` 描述的是这套布局，raw/fengine 一旦重定向，既有
-  记录不改写就会让后续 batch 报 `disagrees`（护栏按设计生效）。操作 = 在**同一环境的
-  同一条命令里** export 好本地根变量后跑一次
-  `fxcorr/set_roots.sh <workdir>`（对全部 `batches/*.json` 重写记录；脚本会打印写出的
-  workdir 与四个根值供核对——**不 export 就跑 = 按共享布局写回，等于没改**）。只应在
-  确实按该布局准备/搬运了数据时执行（route=1 的 raw-copy、route=2 的本地 sim 即由此
-  成立）。“无记录 = 放行”的旧行为不变。
+  记录不改写就会让后续 batch 报 `disagrees`（护栏按设计生效）。**2026-10-08 起该改写
+  由 app-fxcorr 的 fxcorr-prep 任务执行**（模块内调 `set_roots.sh`；10-07 曾短暂并入
+  router，因 p419 上 router 落控制面、无数据面而移回数据面）：按 app 的根变量自动
+  重写全部 batch 的记录——**仿真数据无论命令行方式（make_testdata.sh）
+  还是流水线方式（FXCORR_SIM_ONLY）生成，跑链前都不再需要手工操作**。手工场景
+  （不经流水线：手工投单模块任务、宿主手工跑链）仍用 `fxcorr/set_roots.sh <workdir>`
+  ——在**同一环境的同一条命令里** export 好本地根变量后跑（对全部 `batches/*.json`
+  重写记录；脚本会打印写出的 workdir 与四个根值供核对——**不 export 就跑 = 按共享
+  布局写回，等于没改**）。只应在确实按该布局准备/搬运了数据时执行（route=1 的
+  raw-copy、route=2 的本地 sim 即由此成立）。“无记录 = 放行”的旧行为不变。
 
   **其余环境变量**：`FXCORR_PRINT_ROOTS=1` 打印各根解析结果与来源；`FXCORR_RUN_MODE` /
   `FXCORR_LOGLEVEL` / `FXCORR_STA` / `FXCORR_KURTOSIS` 见 usage.md。
