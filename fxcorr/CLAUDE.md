@@ -1,6 +1,17 @@
 # fxcorr 改造工作区
 
-**最后更新**：2026-10-08（**根记录改写执行位置迁移**——从 app-fxcorr 的 router 进程移入
+**最后更新**：2026-10-09（**核算方法改以"组"为基准 + f/x 介质 A/B 实测（p419 计算节点）**：
+`data-volume.md` 新增 **§1.4「批、组与核算单位」**——计算过程中的在制量 = **在制组数 × 组体量**
+（组 = `.input` BASELINE 连通分量 = 一个频段 X/Y 对 × 全站；mini 4 站 = 8 ds/组、4 组/批；
+组级滑窗 = 1~2 组，整批驻留 = 全部组），§3 补 p419/mini 配置列、§4.1 增"每组"行、§4.2 口径 3
+重写、§5.1 补介质实测、§6 杠杆 2 明确 **组级 purge**、§7.3 补 mini 分组实测；`data-spec.md`
+§12 的 D8 生命周期改**组级**（该组 x 分片完成即删，raw 留批末），batch duration 权衡的"x 侧
+内存"条实测修正（**x 流式读、工作集 ≈2 GB，与 batch 时长无关**），§6 的 `<g>` 补 mini 组划分。
+**实测数据**（裸跑 singularity）：**f 与 x 单任务均为 CPU 限制**（介质 A/B 同速：f 4.4 s、
+x 8.8 s）；SATA SSD 写 **199** / 读 **499 MB/s**、tmpfs 写 **2.3 GB/s** / 读 **4.8 GB/s**；
+f 写 120 MB/s/任务、x 读 477 MB/s/任务（SATA 上 x 单任务读即近饱和）。**roots 护栏正面实证**：
+批级单值记录下同批混介质必报 `disagrees`（per-ds 分流不改 fxcorr 走不通）；非规范子目录
+（如 `fengine-sata`）的根须记**绝对路径**、env 同理。**此前** 2026-10-08（**根记录改写执行位置迁移**——从 app-fxcorr 的 router 进程移入
 **fxcorr-prep 任务**（模块内调 `set_roots.sh`；p419 上 router 落控制面、无数据面；见
 app-fxcorr 的 `docs/p419-scale-plan.md`）；`set_roots.sh` 补装进镜像（`docker/Dockerfile`
 ——2026-10-04 加脚本时漏装，今天才暴露）；bio 三路线回归全绿（route=1 记录被 prep 正确
