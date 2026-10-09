@@ -123,54 +123,8 @@ static bool extractJsonString(const string &json, const string &key, string *val
 // ---------------------------------------------------------------------------
 // 分片模式（v5-plan.md P6 / data-spec 5.9）
 
-// ds 组推导：把 datastream 按 BASELINE TABLE 的**连通分量**分组。每条 baseline
-// 条目绑定一对具体的 ds，这两个覆盖同一频段组；把全部条目并查集合并后，连通
-// 分量就是"覆盖同一频段组的一组 ds"（t25362 实测 4 组，每组 4 个 = 2 站 x 2 极化）。
-//
-// **不能按 ds 序号或 freq 条目配对**：同频段的 X/Y 是两条不同的 freq 条目
-// （按 freq 聚类会把一对极化拆开），而 t25362 的第 2 条 baseline 是 (ds1,ds8)
-// 而非 (ds1,ds9)——按序号配对同样会配错。机理与实测表见 data-spec 第 8 节。
-//
-// 合并时小的根胜出，于是代表元 = 组内最小 ds 序；收集时按 root 升序扫，组的
-// 顺序就是"最小 ds 序"的顺序（即频段升序）。
-static vector<vector<int> > deriveDsGroups(Configuration &config, int configindex)
-{
-	const int nds = config.getNumDataStreams();
-	vector<int> parent(nds);
-	for(int i = 0; i < nds; i++)
-		parent[i] = i;
-	for(int b = 0; b < config.getNumBaselines(); b++)
-	{
-		int a = config.getBOrderedDataStream1Index(configindex, b);
-		int c = config.getBOrderedDataStream2Index(configindex, b);
-		while(parent[a] != a) a = parent[a] = parent[parent[a]];
-		while(parent[c] != c) c = parent[c] = parent[parent[c]];
-		if(a < c)
-			parent[c] = a;		// smaller index wins: representative = min
-		else if(c < a)
-			parent[a] = c;
-	}
-	vector<vector<int> > groups;
-	vector<char> used(nds, 0);
-	for(int root = 0; root < nds; root++)
-	{
-		if(used[root])
-			continue;
-		vector<int> grp;
-		for(int i = root; i < nds; i++)
-		{
-			int r = i;
-			while(parent[r] != r) r = parent[r];
-			if(r == root)
-			{
-				grp.push_back(i);
-				used[i] = 1;
-			}
-		}
-		groups.push_back(grp);
-	}
-	return groups;
-}
+// ds 组推导（deriveDsGroups / groupOfDs）已移至 fxcorrcommon/configuration.{h,cpp}——
+// fxcorr-f（fengine 按组落盘）与 fxcorr-x（分片）共用同一实现（data-spec 第 8 节）。
 
 // 一条分片记录：74 字节 SWIN 头 + cf32 数据，逐字节搬运。归并 key 用**整数
 // 纳秒**（由 mjd 与秒偏移推算），不用浮点秒——浮点相等比较不可靠（data-spec 5.9）。
@@ -1122,21 +1076,27 @@ int main(int argc, char **argv)
 	int numdatastreams = config.getNumDataStreams();
 	vector<vector<SpReader *> > readers(numdatastreams);
 	vector<string> autocorrFiles(numdatastreams);
+	// ds 组（fengine 按组布局，data-spec 5.3，2026-10-09）：sdir 的组层用
+	vector<vector<int> > dsgroups = deriveDsGroups(config, configindex);
 	for(int ds=0;ds<numdatastreams;ds++)
 	{
 		if(!dsactive[ds])
 			continue;	// shard mode: not ours - leave readers[ds] empty
 		string station = config.getDStationName(configindex, ds);
-		// fengine layout: ds_<N>/ subdirectory, N = station-local datastream
-		// index (data-spec 5.3; multi-datastream stations from fxcorr-f's
-		// ds_index parameter)
+		// fengine layout (data-spec 5.3, 2026-10-09): <batch>/<ds-group>/
+		// <station>/ds_<N>/ — the group layer is the lifecycle unit
+		// (per-group purge removes one directory tree; fxcorr-f writes the
+		// same layout).  N = station-local datastream index.
 		int dswithinstation = 0;
 		for(int d=0;d<ds;d++)
 		{
 			if(config.getDStationName(configindex, d) == station)
 				dswithinstation++;
 		}
-		string sdir = FxcorrPath::root(FxcorrPath::ROOT_FENGINE) + "/" + batchid + "/" + station + "/ds_" + to_string(dswithinstation);
+		int dsgroupof = groupOfDs(dsgroups, ds);
+		if(dsgroupof < 0)
+			return fail(monitor, "fxcorr-x: ds " + to_string(ds) + " not in any ds group");
+		string sdir = FxcorrPath::root(FxcorrPath::ROOT_FENGINE) + "/" + batchid + "/" + to_string(dsgroupof) + "/" + station + "/ds_" + to_string(dswithinstation);
 		int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
 		int ntotalbands = config.getDNumTotalBands(configindex, ds);
 		readers[ds].resize(ntotalbands);

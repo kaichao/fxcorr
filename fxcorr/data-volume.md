@@ -136,7 +136,7 @@ Go 三处同规则；为什么不是按 ds 序号或 freq 聚类见 §7.3 与 `d
 | ~~1~~ | ~~D15 公共信号块~~（**已取消**） | 原 `sim-common/<bid>/data_XX.bin` | 0.5 s 块（块内为 slice） | **全站跨度**的全部网格点（`numSamps`/slice） | 现在只在 `station` 进程内存在，不落盘 | `8 B × 覆盖带宽 × 0.5 s` |
 | ~~2~~ | ~~D15 meta~~（**已取消**） | 原 `sim-common/<bid>/meta.json` | batch | — | 参数只剩 `seed`，随 `batch.json` 走 | KB |
 | 3 | **D7 原始基带** | `raw/<st>/<st>_<bid>[_ds<N>].vdif` † | **帧**（帧号按秒回绕） | **帧内交织的 nbands 个 band**（每 band 等分 payload） | 连续流式写 | `帧长 × fps`＝采样率 × 0.25 B/s（2bit） |
-| 4 | **D8 频域谱** | `fengine/<bid>/<st>/ds_N/band_XX.sp` | **subint**（一条记录；内部按 FFT 块的 `blockspersend` 段） | **单 band 的 `num_channels` 个通道** | 每 subint 一条记录（约 200 条/s @5.12 ms） | 见 §2.1 |
+| 4 | **D8 频域谱** | `fengine/<bid>/<g>/<st>/ds_N/band_XX.sp` | **subint**（一条记录；内部按 FFT 块的 `blockspersend` 段） | **单 band 的 `num_channels` 个通道** | 每 subint 一条记录（约 200 条/s @5.12 ms） | 见 §2.1 |
 | 5 | D8 pcal | `…/ds_N/pcal.bin` | **subint** | 该 ds 各 band 的 tone 之和 | 每 subint 一条 | `Σtones × 8 B`／subint（极小） |
 | 6 | D8 autocorr | `…/ds_N/autocorr.bin` | **subint**（内部 `ac_batches` 条 = 每 `maxacblocks` 个 FFT 一块） | 各 band 的 nchan（+ 交叉极化段） | 每 subint 若干条 | 见 `data-spec` 5.3 |
 | 7 | **PCAL 文本** | `vis/PCAL_<mjd>_<sec>_<st>` | **intTime**（每 intTime 一行） | 各 band 的 tone | 每 intTime 一行，追加幂等 | 每行 `max_tones × ~40 B`（极小） |

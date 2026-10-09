@@ -39,7 +39,7 @@ fxcorr-sim         <batch_id> [workdir]                    # 默认：本机串�
 | `batch_id` | 批量标识（8 位顺序号，见「通用约定」与 data-spec 第 6 节），用于读 `batches/<id>.json` 与输出命名 |
 | `station` | 站名（如 `T1`），输出目录 `raw/<station>/` 与文件名前缀（station 子命令） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
-| `ds_index` | **仅 station 子命令**：站内 datastream 序号（0-based，缺省 0），与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<st>/ds_<N>/` 四处同一口径（data-spec 5.2）。多 datastream 站每 ds 一次调用、每 ds 一个文件。**它的位置固定在 `workdir` 之后**，所以 legacy 的 tone 参数要写在它后面：`station <bid> <st> <workdir> 0 1.5`（缺了 ds_index 会把 1.5 当成 ds 序号报错） |
+| `ds_index` | **仅 station 子命令**：站内 datastream 序号（0-based，缺省 0），与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<g>/<st>/ds_<N>/` 四处同一口径（data-spec 5.2）。多 datastream 站每 ds 一次调用、每 ds 一个文件。**它的位置固定在 `workdir` 之后**，所以 legacy 的 tone 参数要写在它后面：`station <bid> <st> <workdir> 0 1.5`（缺了 ds_index 会把 1.5 当成 ds 序号报错） |
 | `tone_mhz ...` | **仅 station 子命令**，0 个 = 新路径；出现即 legacy 模式（旧时域合成路径，字节对拍回归专用）：0 值 = 无 tone；1 值 = 所有 band 同频；nbands 值 = 逐 band |
 
 环境变量：
@@ -126,7 +126,7 @@ fxcorr-f <batch_id> <station> [workdir] [ds_index]
 | `batch_id` | 批量标识 |
 | `station` | 站名（须在 .input 的 DATA TABLE / datastream 中） |
 | `workdir` | 项目根目录，默认 `.`（环境变量 `FXCORR_WORKDIR` 亦可定义，位置参数优先） |
-| `ds_index` | 站内 datastream 序号（0-based，默认 0；多 datastream 站每记录线程一个 f 任务）；输出目录 `fengine/<batch_id>/<station>/ds_<ds_index>/` |
+| `ds_index` | 站内 datastream 序号（0-based，默认 0；多 datastream 站每记录线程一个 f 任务）；输出目录 `fengine/<batch_id>/<g>/<station>/ds_<ds_index>/` |
 
 环境变量（DifxMessage 状态发送，algo-plan P1）：
 
@@ -146,7 +146,7 @@ fxcorr-f <batch_id> <station> [workdir] [ds_index]
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file）。
 - 读 `workdir/<config_file>`（.input）；Model 由 .calc 内建，无 .im 依赖。
 - **数据文件定位（2026-10-02 定案并实施）**：① 任务 headers 的 `real_path`（环境变量 `FXCORR_REAL_PATH`，可选）——逗号分隔列表（容多段），相对路径按 `FXCORR_RAW_ROOT` 解析、绝对路径原样；② 未设 → 按命名规则推导 `<RAW_ROOT>/<station>/<station>_<batch>[_ds<N>].vdif`（先试带 `_ds<N>` 后缀、再试无后缀）。**不再读 .input 的 DATA TABLE**（`.input` 仍加载，供频率/时间等元数据），软链机制退役——详见 data-spec 5.2。
-- 输出 `workdir/fengine/<batch_id>/<station>/`（自动创建）：`band_XX.sp`、`pcal.bin`（配置了 phasecal 时）、`autocorr.bin`（二进制布局见 data-spec 5.3）。配置 phasecal 时另在 OUTPUT FILENAME 目录（`vis/<exp>.difx/`）写实验级 `PCAL_<mjd>_<sec>_<station>` 文本（每 intTime 一行、重跑幂等，格式见 data-spec 5.4）。
+- 输出 `workdir/fengine/<batch_id>/<g>/<station>/`（自动创建）：`band_XX.sp`、`pcal.bin`（配置了 phasecal 时）、`autocorr.bin`（二进制布局见 data-spec 5.3）。配置 phasecal 时另在 OUTPUT FILENAME 目录（`vis/<exp>.difx/`）写实验级 `PCAL_<mjd>_<sec>_<station>` 文本（每 intTime 一行、重跑幂等，格式见 data-spec 5.4）。
 - 状态消息节奏（mpiId = dsindex+1，datastream/core 角色）：Starting（启动）→ 每 subint 两条 Diagnostic（DataConsumed/InputDatarate）→ Ending → Done；错误时 Alert + Aborting。RUNNING 不发（归 fxcorr-x，manager 角色）。
 
 程序内校验：batch 起点须在 subint 边界（1µs 容差，吸收 start_mjd 的 f64 表示误差）——batch.json 的 start_mjd 建议写精确 repr（如 `58948.291666666664`），否则报错退出。
@@ -204,7 +204,7 @@ fxcorr-x merge --experiment [workdir]            # ② 实验级归并 → SWIN�
 输入输出：
 
 - 读 `workdir/batches/<batch_id>.json`（取 start_mjd / n_subints / config_file / difx_dir）。
-- 数据源 `workdir/fengine/<batch_id>/<station>/`（各站 band_XX.sp + autocorr.bin），station 列表 = .input 的全部 datastream（自动枚举，无站参数）。
+- 数据源 `workdir/fengine/<batch_id>/<g>/<station>/`（各站 band_XX.sp + autocorr.bin），station 列表 = .input 的全部 datastream（自动枚举，无站参数）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘语义，difx2fits 零改造前提），batch.json 的 difx_dir 仅为元数据；输出目录不存在时自动创建（mkdir -p OUTPUT FILENAME 目录）。
 - **分片模式（给了 `ds_group`）**：输入只读**本组**的 fengine（该频段组在各站的 `ds_<N>/` 子目录），输出 `vis-parts/<batch_id>/ds<G>.part`（D16），**不写 SWIN**。不同组可由不同进程并行，各写各的文件，互不干扰。
 - **相位阵配置（.input `PHASED ARRAY TRUE` + `PHASED ARRAY CONFIG FILE`）时不写 SWIN**，改出 `beam/<batch_id>/beam.bin`（波束加权和，per ACC TIME 窗口记录；布局见 data-spec 5.5）。

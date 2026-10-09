@@ -64,7 +64,7 @@ VDIF 文件）只能走 `real_path` 列表。
 | 处 | 形态 |
 |---|---|
 | 本目录文件名 | `BA_00000001_ds0.vdif` |
-| `fengine/<batch>/<station>/` | `ds_0/` |
+| `fengine/<batch>/<g>/<station>/` | `ds_0/` |
 | `fxcorr-f` 的命令行参数 | `<ds_index>` |
 
 ## 文件里的时间语义（三条容易踩的）

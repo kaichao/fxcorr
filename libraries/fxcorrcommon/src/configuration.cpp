@@ -3702,5 +3702,55 @@ Configuration::filechecklevel Configuration::getFileCheckLevel()
   }
 }
 
+// ---- ds 组推导（data-spec 第 8 节；声明与"四处同改"清单见 configuration.h）----
+
+std::vector<std::vector<int> > deriveDsGroups(const Configuration &config, int configindex)
+{
+  const int nds = config.getNumDataStreams();
+  std::vector<int> parent(nds);
+  for(int i = 0; i < nds; i++)
+    parent[i] = i;
+  for(int b = 0; b < config.getNumBaselines(); b++)
+  {
+    int a = config.getBOrderedDataStream1Index(configindex, b);
+    int c = config.getBOrderedDataStream2Index(configindex, b);
+    while(parent[a] != a) a = parent[a] = parent[parent[a]];
+    while(parent[c] != c) c = parent[c] = parent[parent[c]];
+    if(a < c)
+      parent[c] = a;    // smaller index wins: representative = min
+    else if(c < a)
+      parent[a] = c;
+  }
+  std::vector<std::vector<int> > groups;
+  std::vector<char> used(nds, 0);
+  for(int root = 0; root < nds; root++)
+  {
+    if(used[root])
+      continue;
+    std::vector<int> grp;
+    for(int i = root; i < nds; i++)
+    {
+      int r = i;
+      while(parent[r] != r) r = parent[r];
+      if(r == root)
+      {
+        grp.push_back(i);
+        used[i] = 1;
+      }
+    }
+    groups.push_back(grp);
+  }
+  return groups;
+}
+
+int groupOfDs(const std::vector<std::vector<int> > &groups, int ds)
+{
+  for(size_t g = 0; g < groups.size(); g++)
+    for(size_t k = 0; k < groups[g].size(); k++)
+      if(groups[g][k] == ds)
+        return (int)g;
+  return -1;
+}
+
 
 // vim: shiftwidth=2:softtabstop=2:expandtab

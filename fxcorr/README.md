@@ -47,7 +47,7 @@ vex2difx / difxcalc     （实验级，一次）
         ↓
   [run_batch.sh：batch.json → fxcorr-f → fxcorr-x]
         ↓
-  fengine/<batch_id>/<station>/
+  fengine/<batch_id>/<g>/<station>/
         ↓
   vis/<experiment>.difx/（SWIN，跨 batch 追加）
         ↓

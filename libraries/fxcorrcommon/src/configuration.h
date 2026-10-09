@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <set>
+#include <vector>
 #include <math.h>
 #include "polyco.h"
 #include "model.h"
@@ -1152,6 +1153,23 @@ private:
   Model * model = NULL;
   outputformat outformat;
 };
+
+// ds 组 = BASELINE TABLE 的连通分量（data-spec 第 8 节）：一个频段 X/Y 极化对
+// × 全站的 datastream 集合 = 互相关的最小完整单元（fxcorr-x 的分片单位、
+// fengine 的生命周期单位——fxcorr-f 按组落盘，见 data-spec 5.3）。
+//
+// 组序 = 组内最小 ds 序（即频段升序）——合并时小的根胜出、收集按 root 升序扫。
+// **不能按 ds 序号或 freq 条目配对**：同频段的 X/Y 是两条不同的 freq 条目
+// （按 freq 聚类会把一对极化拆开），而 t25362 的第 2 条 baseline 是 (ds1,ds8)
+// 而非 (ds1,ds9)——按序号配对同样会配错。机理与实测表见 data-spec 第 8 节。
+//
+// **四处同规则、必须同改**：本函数（fxcorr-f 的按组落盘与 fxcorr-x 的分片都用
+// 它）、fxcorr/fxinput.py 的 derive_ds_groups、app-fxcorr router 的
+// internal/fxin（Go）。
+std::vector<std::vector<int> > deriveDsGroups(const Configuration &config, int configindex);
+
+// ds 全局序号 → 组号；-1 = 未找到（调用方自行报错）。
+int groupOfDs(const std::vector<std::vector<int> > &groups, int ds);
 
 inline bool operator>(const struct Configuration::freqdata_t& f1, const struct Configuration::freqdata_t& f2)
 {

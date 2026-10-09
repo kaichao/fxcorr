@@ -208,15 +208,11 @@ pool_wait()
 
 # 删掉一个 ds 组的 fengine（只在它的 x 分片成功之后调用）。fengine 落 tmpfs 时
 # 容量是硬墙：不删上一波，下一波就进不来（v7-plan 10.1）。失败路径刻意不调用。
+# fengine 按组布局（2026-10-09，data-spec 5.3）：一组一个目录——整目录删。
 purge_group()
 {
-	local t st di
 	local root=${FXCORR_ROOT_FENGINE:?}
-	for t in ${GROUP_TASKS[$1]:-}; do
-		st=${t%%:*}
-		di=${t#*:}
-		rm -rf "$root/$BID/$st/ds_$di"
-	done
+	rm -rf "$root/$BID/$1"
 }
 
 # 跑一个 ds 组：组内 f 并行 → 该组 x 分片 → 按开关 purge。在后台子 shell 里调用

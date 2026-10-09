@@ -17,26 +17,37 @@
 ```
 fengine/
 └── 00000001/                   # batch_id
-    ├── BA/
-    │   └── ds_0/               # 站内 datastream 序号
-    │       ├── band_00.sp      # 每个 recorded band 一个频谱文件
-    │       ├── band_01.sp
-    │       ├── ...
-    │       ├── pcal.bin        # 脉冲校准 tone（每 subint）
-    │       └── autocorr.bin    # 自相关（每 subint，已频率平均）
-    └── S6/
-        └── ds_0/
+    ├── 0/                      # ds 组序号（BASELINE 表连通分量；生命周期单位）
+    │   ├── BA/
+    │   │   └── ds_0/           # 站内 datastream 序号
+    │   │       ├── band_00.sp  # 每个 recorded band 一个频谱文件
+    │   │       ├── band_01.sp
+    │   │       ├── ...
+    │   │       ├── pcal.bin    # 脉冲校准 tone（每 subint）
+    │   │       └── autocorr.bin # 自相关（每 subint，已频率平均）
+    │   └── S6/
+    │       └── ds_0/
+    ├── 1/                      # 另一组（mini = 4 组：0..3，每组含全站）
+    │   └── ...
+    └── 3/
+        └── ...
 ```
+
+**组层（2026-10-09 加）**：一个组 = 一个频段 X/Y 极化对 × **全站**的 datastream
+集合（互相关最小完整单元）——**组目录 = 数据生命周期单位**，x 分片跑完整目录删
+（组级 purge）；f 与 x 各自推导组号（同一 `.input` 连通分量，`fxcorrcommon` 的
+`deriveDsGroups`），无调度依赖。
 
 **单 datastream 站同样是 `ds_0/`**——布局统一，没有平铺特例。
 f 任务 = `(batch_id, station, ds_index)`；`ds_index` 是站内序号，与
 `../raw/README.md` 里 `_ds<N>` 的口径一致。
 
-## 三层编号各回答一个问题
+## 四层编号各回答一个问题
 
 | 层 | 含义 | 依据 |
 |---|---|---|
 | `<batch_id>` | **哪段时间** | `batches/<batch_id>.json` |
+| `<g>` | **哪个 ds 组** | `.input` BASELINE 表的连通分量（data-spec 第 8 节） |
 | `<station>/ds_<N>` | **哪个站、哪路记录** | `.input` 的 DATASTREAM 表 |
 | `band_<xx>.sp` | **哪个 recorded band** | `.input` 的 FREQ 表；`xx` 是**该 ds 内**的序号 |
 

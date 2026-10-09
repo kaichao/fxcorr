@@ -1,6 +1,12 @@
 # fxcorr 改造工作区
 
-**最后更新**：2026-10-09（**核算方法改以"组"为基准 + f/x 介质 A/B 实测（p419 计算节点）**：
+**最后更新**：2026-10-09（**fengine 按组布局（f/x 代码 + 规范）**：目录改为
+`fengine/<batch>/<g>/<station>/ds_<N>/`——组层 = 生命周期单位（组级 purge 整目录删）；
+`deriveDsGroups`/`groupOfDs` 从 fxcorr-x 的应用内挪入 **fxcorrcommon**
+（`configuration.{h,cpp}`，自由函数），fxcorr-f（按组落盘）与 fxcorr-x（分片/读路径）共用；
+`data-spec` §5.3/§6/D8、`usage.md`、`workdir-template/fengine/README.md` 与各
+`CLAUDE.md` 同步；`run_batch.sh` 的 `purge_group` 改为整组目录删。**待：镜像重建 + 全链复测**。
+**此前** 2026-10-09（**核算方法改以"组"为基准 + f/x 介质 A/B 实测（p419 计算节点）**：
 `data-volume.md` 新增 **§1.4「批、组与核算单位」**——计算过程中的在制量 = **在制组数 × 组体量**
 （组 = `.input` BASELINE 连通分量 = 一个频段 X/Y 对 × 全站；mini 4 站 = 8 ds/组、4 组/批；
 组级滑窗 = 1~2 组，整批驻留 = 全部组），§3 补 p419/mini 配置列、§4.1 增"每组"行、§4.2 口径 3
@@ -98,7 +104,7 @@ with …` 停链），而记录与比对都是**逐字符**的。定案两条：
 ## 核心约定（源自 data-spec.md）
 
 - **batch_id（2026-09-27 修订）**：**8 位零填充顺序号**（`00000001`）——定宽、单调递增、`workdir` 内全局唯一，由切批规划步骤单点分配；**名字不承载时间信息**（起点/时长/band 全在 batch.json 里）。旧的时间编码格式（如 `60512_45000`）**仍然可用**——三工具不校验格式，只当不透明字符串拼路径。规范见 data-spec 第 6 节。
-- **目录**（权威见 data-spec 第 2 节，2026-09-27 核对）：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（TB 级原始基带；**多 datastream 站每 ds 一个文件，`_ds<N>` 后缀只在多 ds 站出现**，见 data-spec 5.2）、`fengine/<batch_id>/<station>/ds_<N>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，**二进制布局见 `workdir-template/fengine/README.md`**）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`vis-parts/<batch_id>/ds<G>.part`（D16 分片局部记录，**2026-09-27 已实施**，见 data-spec 5.9；2026-09-28 起同目录另有 batch 级归并产物 `merged.part`，实验级 merge 的输入）、`beam/<batch_id>/beam.bin`（D14 相位阵）、`product/`、`meta/`。均不进 git（**`work/` 已随 V5 P5 删除**）。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
+- **目录**（权威见 data-spec 第 2 节，2026-09-27 核对）：`config/`（.vex/.v2d/.input/.calc/.im/.flag）、`batches/`（`<batch_id>.json`，D9 批量元数据，共享存储）、`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`（TB 级原始基带；**多 datastream 站每 ds 一个文件，`_ds<N>` 后缀只在多 ds 站出现**，见 data-spec 5.2）、`fengine/<batch_id>/<g>/<station>/ds_<N>/`（band_XX.sp 复数频谱 + pcal.bin + autocorr.bin，**二进制布局见 `workdir-template/fengine/README.md`**）、`vis/<experiment>.difx/`（SWIN 文件集，跨 batch 追加）、`vis-parts/<batch_id>/ds<G>.part`（D16 分片局部记录，**2026-09-27 已实施**，见 data-spec 5.9；2026-09-28 起同目录另有 batch 级归并产物 `merged.part`，实验级 merge 的输入）、`beam/<batch_id>/beam.bin`（D14 相位阵）、`product/`、`meta/`。均不进 git（**`work/` 已随 V5 P5 删除**）。多节点存储归属（共享/本地）与计算本地化原则见 data-spec 第 1/2 节。
 - **batch.json**（`batches/<batch_id>.json`，D9 全字段单文件）：batch_id / start_mjd / start_time / duration_sec / stations / baselines / config_file / calc_file / im_file / n_subints / subint_ns / integration_sec / n_channels / polarizations / difx_dir / status / 版本字段。编排脚本一次写全，三工具只读。
 - **数据流**：vex2difx + difxcalc（实验级一次）→ [仿真分支：fxcorr-sim station × 各站每 ds（D7 VDIF；**公共信号在该任务内本地合成，不落盘**，见 data-spec 5.8）] → fxcorr-f × 各站每 ds（D3+D4+D6+D7 → D8+D9）→ fxcorr-x（D3+D4+D6+D8+D9 → D10+D9）→ difx2fits / difx2mark4（按需）。**分片模式（`run_batch.sh` 的 `FXCORR_X_SHARD=1`）**：x 按 ds 组分片 → D16 `vis-parts/` → `fxcorr-x merge` 归并写出 D10（见 data-spec 5.9 与 `data-volume.md` §7.5）。**2026-09-28 起 merge 分两级**（已实施，V6 S4.1）：batch 级 → `vis-parts/<batch_id>/merged.part`，实验级 `fxcorr-x merge --experiment` → D10（**唯一 SWIN 写入者**）；由此推出一条部署硬约束——**`FXCORR_WORKDIR`（含 `config/` `batches/` `meta/` `vis-parts/`）必须落在全局共享存储上**，本地根只有 `RAW`/`FENGINE`（`SIM_COMMON` 已随 V6 S2.5 取消，公共信号不再落盘）。fxcorr-sim 架构（两入口/公共信号模型）见 fxcorr-sim-arch.md。
 - **三个敲定决策**：UVW 由 fxcorr-x 读 .calc/.im 求值（D1）；可见度直出 SWIN、difx2fits 零改造（D2）；偏振是 band 属性、偏振组合在 x 侧按 BASELINE TABLE 选（D3）。V1 边界与实施步骤见 v1-plan.md。

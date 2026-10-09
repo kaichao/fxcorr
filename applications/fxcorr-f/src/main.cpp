@@ -327,7 +327,8 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	// multi-datastream stations (real observations: one datastream per
 	// recording thread): ds_index selects the station's n-th datastream
-	// (0-based, default 0; fengine output goes to ds_<ds_index>/)
+	// (0-based, default 0; fengine output goes to <ds-group>/<station>/
+	// ds_<ds_index>/ as of the 2026-10-09 per-group layout)
 	int dsarg = 0;
 	if(argc > 4)
 		dsarg = atoi(argv[4]);
@@ -398,6 +399,17 @@ int main(int argc, char **argv)
 	if(dsindex < 0)
 	{
 		cerr << "fxcorr-f: station " << station << " ds_index " << dsarg << " not found in .input" << endl;
+		return EXIT_FAILURE;
+	}
+
+	// ds 组（fengine 按组布局，data-spec 5.3，2026-10-09）：组 = BASELINE 表
+	// 连通分量（与 fxcorr-x 的分片划分同一实现——fxcorrcommon 的 deriveDsGroups）；
+	// 输出路径 <batch>/<组>/<station>/ds_<N>/ 使组级 purge 可整目录删除。
+	vector<vector<int> > dsgroups = deriveDsGroups(config, 0);
+	int dsgroupof = groupOfDs(dsgroups, dsindex);
+	if(dsgroupof < 0)
+	{
+		cerr << "fxcorr-f: ds " << dsindex << " not in any ds group" << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -502,10 +514,12 @@ int main(int argc, char **argv)
 		cerr << "fxcorr-f: requested autocorrelation shift/average time of " << model->getMaxNSBetweenACAvg(0) << " ns cannot be met with " << numbufferedffts << " FFTs being buffered; the time resolution which will be attained is " << maxacblocks*blockns << " ns" << endl;
 	}
 
-	// fengine layout: per datastream subdirectory (ds_N, N = station-local
-	// datastream index), so multi-datastream stations (one stream per
-	// recording thread) never collide (data-spec 5.3)
-	string outdir = FxcorrPath::root(FxcorrPath::ROOT_FENGINE) + "/" + batchid + "/" + station + "/ds_" + to_string(dsarg);
+	// fengine layout (data-spec 5.3, 2026-10-09): <batch>/<ds-group>/
+	// <station>/ds_<N>/ — the group layer is the lifecycle unit (per-group
+	// purge removes one directory tree; fxcorr-x reads the same layout).
+	// ds_N keeps multi-datastream stations (one stream per recording
+	// thread) from colliding; N = station-local index.
+	string outdir = FxcorrPath::root(FxcorrPath::ROOT_FENGINE) + "/" + batchid + "/" + to_string(dsgroupof) + "/" + station + "/ds_" + to_string(dsarg);
 	string mkdircommand = "mkdir -p " + outdir;
 	if(system(mkdircommand.c_str()) != 0)
 		return fail(monitor, "fxcorr-f: cannot create " + outdir);

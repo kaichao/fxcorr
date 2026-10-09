@@ -26,7 +26,7 @@ fxcorr-x merge --experiment [workdir]      # 实验级归并 → SWIN（唯一�
 - `workdir` 定位：位置参数 > 环境变量 `FXCORR_WORKDIR` > 默认 `.`。
 - **`FXCORR_X_GROUPS_ONLY=1`**（2026-09-29 加，V7 P3 前）：分片模式下**只打印全部 ds 组划分就退出**，不读任何数据、不写盘。存在的理由是 `/fxcorr/fxinput.py` 有一份同规则的组划分实现（编排脚本按它算分片边界），两处之间没有编译器兜底，而漂移的症状是"每片少算或多算 ds、产物看起来完全正常"——判据 `fxcorr/test/input/run_consistency.sh` 拿这里当真值对拍，所以它必须能在**没有 raw/fengine** 的机器上跑。**刻意放在组号范围检查之前**：传任意组号（含越界值如 `0`）都能拿到全部组。诊断上也有用：想只问"这个 batch 分几组、组里是谁"，不必先造 fengine。输出与运行期那行 `fxcorr-x: shard mode, ds group G of N = {...}` 同前缀（差一个 ` -> path`），一条 sed 同时读得懂。
 - 读 `workdir/batches/<batch_id>.json`（run_batch.sh 预写），取 start_mjd / n_subints / config_file / difx_dir。
-- 数据源 `workdir/fengine/<batch_id>/<station>/ds_<N>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream；N = 站内 datastream 序号（按 .input datastream 序累计，多 datastream 站每记录线程一个 f 任务，见 fxcorr-f 的 ds_index）。
+- 数据源 `workdir/fengine/<batch_id>/<g>/<station>/ds_<N>/`（band_XX.sp + autocorr.bin），station 列表即 .input 的全部 datastream；N = 站内 datastream 序号（按 .input datastream 序累计，多 datastream 站每记录线程一个 f 任务，见 fxcorr-f 的 ds_index）。
 - 输出目录由 **.input 的 OUTPUT FILENAME** 决定（SWIN 写盘沿用 config 语义，difx2fits 零改造），batch.json 的 difx_dir 仅为元数据。
 - **DifxMessage 状态发送**（algo-plan P1，difxmonitor 封装）：mpiId = 0（manager 角色），identifier = .input basename。节奏：Starting → 每积分写盘一条 Running（Integrator::sendRunning，writedata 后、increment 前——increment 清零 floatresults，时序同上游 fxmanager loopwrite；weight 照抄 visibility.cpp:1100-1146，f32 截断点一致，对拍逐位一致）→ Ending → Done；错误路径 Alert + Aborting（fail helper）。host 模式组播（DIFX_MESSAGE_GROUP/PORT 未设即静默）；`FXCORR_RUN_MODE=container` 落盘 `meta/difxmsg/<exp>_<batch>.xml`（构造时截断，重跑幂等）。
 

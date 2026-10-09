@@ -34,7 +34,7 @@
 
 多 datastream（2026-09-27 加，分片架构的前置）：
 
-- **定位**：`setupStation(..., station, dslocal, ...)` 的 `dslocal` 是**站内**序号——遍历 .input 的全部 datastream、只数同站的那些，第 dslocal 个即该 ds（与 fxcorr-f 的 `ds_index`、`raw` 的 `_ds<N>`、`fengine/<st>/ds_<N>/` 同一口径）。`StationSetup` 同时记下 `ndsinstation`（该站有几个 ds）供输出命名用。
+- **定位**：`setupStation(..., station, dslocal, ...)` 的 `dslocal` 是**站内**序号——遍历 .input 的全部 datastream、只数同站的那些，第 dslocal 个即该 ds（与 fxcorr-f 的 `ds_index`、`raw` 的 `_ds<N>`、`fengine/<g>/<st>/ds_<N>/` 同一口径）。`StationSetup` 同时记下 `ndsinstation`（该站有几个 ds）供输出命名用。
 - **输出名**：`raw/<station>/<station>_<batch_id>[_ds<N>].vdif`——**后缀只在多 ds 站出现**（`ndsinstation > 1`），单 ds 站的文件名与加多 ds 之前逐字相同。`make_testdata.sh` 的 `vdifrel()` 是同一规则的两处实现，改一处要改两处。
 - **命令行**：`station <bid> <st> [workdir] [ds_index] [tone_mhz ...]`——`ds_index` 缺省 0，位置固定在 workdir 之后，legacy tone 要写在它后面（`station <bid> <st> . 0 1.5`）。默认模式（无子命令）遍历**全部** datastream，每站每 ds 一个文件。
 - **验证（2026-09-27，测试机）**：① 单 ds 配置产物**逐字节不变**（T1/T2 的 00000001/00000003 与改前 md5 相同）；② 两 ds 配置下同站 ds0/ds1 有噪时 md5 不同、`FXSIM_NOISE=0` 时**逐字节相同**（差异只来自噪声，帧头/时间轴/延迟链完全一致）；③ 多 ds 配置生成的 ds0 与**单 ds 配置**生成的文件**逐字节相同**（`18dea81e…` 两边一致）——即"单 ds 生成与全 ds 生成在同一 ds 上逐位相同"。测试资产与用法见 `fxcorr/test/multids/`。

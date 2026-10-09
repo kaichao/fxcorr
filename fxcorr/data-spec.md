@@ -57,7 +57,7 @@ invalid 位帧的语义）
 
 - **计算单元 = (batch, ds 组)（2026-09-20 首次明确，2026-09-27 按分片修订）**：一个 batch 是自足的处理单元——该 batch 的 `common` → 全部站的 `station` → 全部站的 f → x。**分片改造（5.9）把它的粒度细化为 `(batch, ds_group)`**：x 的处理单元是"**一个 batch 的**一个 ds 组"，所以**节点承载的单位是 `(batch, ds 组)`**——该组涉及的**全部站的全部 ds**必须在同一节点（互相关要求两站同一 freq 同时在场）。**原来"整个 batch 在同一节点"的说法在分片后过粗**：一个 batch 的多个 ds 组可以分散在多个节点上并行。**f 与 x 同节点**这条不变（同组的 f 与 x 必须同节点）。
 
-  由此：f 只需本节点该 `(batch, ds 组)` 的 raw；x 只需本节点**该组**的 fengine（不是该 batch 全部站的 fengine）——**raw 与 fengine 仍然都不需要跨节点汇聚**，"每节点只持有自己写的部分"成立，只是粒度更细。依据仍是目录本身按 batch 组织（`fengine/<batch_id>/<station>/ds_<N>/`），batch 之间互不依赖。
+  由此：f 只需本节点该 `(batch, ds 组)` 的 raw；x 只需本节点**该组**的 fengine（不是该 batch 全部站的 fengine）——**raw 与 fengine 仍然都不需要跨节点汇聚**，"每节点只持有自己写的部分"成立，只是粒度更细。依据仍是目录本身按 batch 组织（`fengine/<batch_id>/<g>/<station>/ds_<N>/`，组层 2026-10-09 加），batch 之间互不依赖。
 - **共享存储主数据流**：默认一切都在 `$FXCORR_WORKDIR` 下，即全部节点共享同一份**全局存储**。需要本地化时按 5.2.1 的根变量把 `raw/`（TB 级）与 `fengine/` 指到本地盘，目录逻辑集中、物理分布（**每节点只持有自己负责的 `(batch, ds 组)`**）。配置与元数据（`config/`、`batches/`、`meta/`）没有独立根、恒在 workdir 下；**真正必须全局可见的是实验级的 `vis/` 与 `product/`**——SWIN 跨 batch 追加、difx2fits 一次读整个实验，各节点各写各的会静默分裂（见第 2 节存储归属表与第 12 节）。分片模式（5.9 节）下 **`vis-parts/` 同样必须全局可见**——各节点的 x 分片任务写、`merge` 子命令统一读；它无独立根，**多节点部署时靠 `FXCORR_WORKDIR` 落在共享存储来实现可见性**（见 `data-volume.md` §7.5）。
 - **网络/计算/存储权衡**：必要时以**重复计算**（同一数据各节点各算一份，省网络传输、费 CPU）或**网络传输**（拉数到计算节点，省 CPU、费网络）为调节手段，在三者复用上取平衡；实现不应做死"必须本地"或"必须共享"的假设。
 
@@ -110,7 +110,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
 | D5 | 标记文件 | `*.flag` | 前处理 | 文本 | KB | 可选，数据标记 |
 | D6 | 延迟模型 | `*.im` | 前处理 | 文本/二进制 | MB 级 | 延迟/uvw 多项式（被 .calc 引用） |
 | D7 | 原始基带数据 | `raw/<station>/` | 观测记录 | VDIF/Mark5B/Mark6 等 | **TB 级** | 各台站原始采样数据 |
-| D8 | 频域谱数据 | `fengine/<batch_id>/<station>/ds_<N>/band_XX.sp` | fxcorr-f | 二进制（.sp） | 较大 | Station-based 结果：延迟对齐、条纹旋转、小数采样校正、FFT 后的复数频谱；N = 站内 datastream 序号 |
+| D8 | 频域谱数据 | `fengine/<batch_id>/<g>/<station>/ds_<N>/band_XX.sp` | fxcorr-f | 二进制（.sp） | 较大 | Station-based 结果：延迟对齐、条纹旋转、小数采样校正、FFT 后的复数频谱；N = 站内 datastream 序号；`<g>` = ds 组序号（**按组布局，2026-10-09**——组 = 生命周期单位，组级 purge 整目录删） |
 | D9 | 批量元数据 | `batch.json` | 编排脚本（make_testdata.sh / run_batch.sh，一次写全） | JSON | KB | 每个批量的描述信息；三工具只读 |
 | D10 | 可见度数据 | `vis/<experiment>.difx/DIFX_*.s*.b*` | fxcorr-x | SWIN 二进制 | MB~GB | Baseline-based 结果，difx2fits/difx2mark4 直读 |
 | D11 | FITS 科学产品 | `*.FITS` | 后处理 | FITS-IDI | MB~GB | 天文标准格式 |
@@ -175,7 +175,7 @@ project/                          # 项目根目录（FXCORR_WORKDIR，可自定
   多 batch 并行不再有共享软链这个可变状态；调试直读共享存储（路径不规范）时用 `real_path`。
   多文件（一个 ds 跨多个 VDIF 文件）只能走 `real_path` 列表。`.input` 仍照常加载（频率/时间等元数据）。
 - **`filelist` / DATA TABLE / 软链的现状（2026-10-03 补）**：`config/data/filelist_*`（每 ds 一行"文件名 + 起止 MJD"）是 **vex2difx 的输入**（v2d 的 DATASTREAM 块引用），前处理必须能读到、否则生成不出 DATA TABLE——**保留**。它生成的 `.input` DATA TABLE（`FILE` 行）在 fxcorr 链上**已无消费者**（f 不读，见上条；x 只读 fengine；difx2fits 实测不依赖 FILE 行，`v8-plan.md` §2.5-1），DATA TABLE 软链（`raw/<DATA TABLE 文件名>`）**已退役**（`fxinput.py::relink_data_table` 删除、`run_batch.sh` 不再建）。**唯一确定的消费者是 mpifxcorr**（`run_bench.sh`：按 FILE 行打开数据、靠软链定位 batch）。整条 `filelist → DATA TABLE` 链保留的两个理由：① vex2difx 的格式要求；② 与 mpifxcorr 共用同一份 `.input` 对拍。
-- **`N` 的口径（三处必须一致）**：站内 datastream 序号（0-based，按 `.input` DATASTREAM 表里该站出现的次序）——`raw/` 文件名、`fengine/<batch_id>/<station>/ds_<N>/` 的目录名、`fxcorr-f` 的 `ds_index` 参数。**不一致就会读错文件**；
+- **`N` 的口径（三处必须一致）**：站内 datastream 序号（0-based，按 `.input` DATASTREAM 表里该站出现的次序）——`raw/` 文件名、`fengine/<batch_id>/<g>/<station>/ds_<N>/` 的目录名、`fxcorr-f` 的 `ds_index` 参数。**不一致就会读错文件**；
 - **文件起点语义**：**不要求**等于 batch 起点（真实观测中各记录系统的帧计数器不同相，文件可以从某一秒的中途开始，起点之前的部分判为无效）；文件中间缺帧（"直接缺帧"与"filler 帧占位"两种形态）同样受支持；**标了 VDIF invalid 位的帧按"在时间轴上在位、数据不可用"处理**——它照常占一个时间槽（帧号参与连续性判断），只是对应的块在 f 侧被标无效，这与"占字节不占时间轴"的 filler 是两回事（实测与定案见 `fxcorr/reader-model.md` 4.12）；
 - **VDIF 时间参考**：帧头秒字段是**当日秒**（对 86400 取模、不带日期），帧号是秒内序号（对帧率取模、每秒回绕；t25362 为 16000 fps）。文件起点由首帧的 (秒, 帧号) 唯一确定，**不保证落在整秒边界**——这也是"文件起点 ≠ batch 起点"的成因；
 - 数据量 TB 级；**一个 raw 文件的时间范围须覆盖完整 batch**（切批约束见第 12 节）；
@@ -287,8 +287,8 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 > **`batch.json`（D9）见 `fxcorr/workdir-template/batches/README.md`**——它原先写在本节，2026-09-27 移回它自己的目录。
 
 - 编号：D8；生产者：`fxcorr-f`；消费者：`fxcorr-x`；
-- 布局：`fengine/<batch_id>/<station>/ds_<N>/`——**单 datastream 站同样是 `ds_0/`**（无平铺特例）。f 任务 = `(batch_id, station, ds_index)`，`ds_index` 与 `raw/` 文件名的 `_ds<N>` 同口径（见 5.2）；
-- 三层编号各回答一个问题：`<batch_id>` **哪段时间**（`batches/<batch_id>.json`）、`<station>/ds_<N>` **哪个站哪路记录**（`.input` 的 DATASTREAM 表）、`band_<xx>.sp` **哪个 recorded band**（`.input` 的 FREQ 表，`xx` 是**该 ds 内**的序号而非全局 band 号）；
+- 布局：`fengine/<batch_id>/<g>/<station>/ds_<N>/`——**组层是生命周期单位**（组级 purge 整目录删除，2026-10-09）；**单 datastream 站同样是 `ds_0/`**（无平铺特例）。f 任务 = `(batch_id, station, ds_index)`，`ds_index` 与 `raw/` 文件名的 `_ds<N>` 同口径（见 5.2）；
+- 四层编号各回答一个问题：`<batch_id>` **哪段时间**（`batches/<batch_id>.json`）、`<g>` **哪个 ds 组**（`.input` BASELINE 表的连通分量，第 8 节）、`<station>/ds_<N>` **哪个站哪路记录**（`.input` 的 DATASTREAM 表）、`band_<xx>.sp` **哪个 recorded band**（`.input` 的 FREQ 表，`xx` 是**该 ds 内**的序号而非全局 band 号）；
 - 生命周期：该 batch 的 x 跑完后可删；
 - **多节点部署必须落 tmpfs**（`/dev/shm`）：产生率 GB/s 级，SATA SSD 差两个数量级；同节点的并发组数受 tmpfs 容量约束（见 `data-volume.md` §5.1 与 `v6-plan.md`）；
 - **改这三种文件的布局时必须递增其 Header 的 `version`**，并同步 README 与本节。
@@ -483,7 +483,7 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 
 - `<batch>` = 8 位 batch_id（见上一节）。
 - `<station>` = 站名（`.input` 的 TELESCOPE NAME；字母数字，不含 `-`）。
-- `<ds>` = **站内** datastream 序号（0-based）——与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<st>/ds_<N>/` **四处同一口径**，详见 5.2。
+- `<ds>` = **站内** datastream 序号（0-based）——与 `fxcorr-f` 的 `ds_index`、`raw` 的 `_ds<N>` 后缀、`fengine/<bid>/<g>/<st>/ds_<N>/` **四处同一口径**，详见 5.2。
 - `<g>` = **ds 组序号**（0-based，按频段升序）。**注意它与 `<ds>` 不是同一个维度**：一组 ds 是**跨站、含全部极化**的——互相关要求两站同一 freq 同时在场，且要算全极化组合（RR/LL/RL/LR）。t25362 是 **4 组**，每组 4 个 ds（2 站 × 2 极化）；**mini/p419（4 站 × 8 ds）也是 4 组，每组 8 ds（4 站 × 2 极化）**——**组数 = 每站 ds 数 ÷ 2、"每组含全站"是配置无关的**。实测的 ds→(频段, 极化) 映射与分组依据见 `data-volume.md` §7.3 与 §1.4。
 
 **解析建议**：按**段数**分派，不要按位置硬编码——1 段（数字）= 整 batch 任务
@@ -658,7 +658,7 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
   | 数据 | 粒度 | 最早可删时点 | 再生前提 | 备注 |
   |---|---|---|---|---|
   | D7 `raw/` | station × batch | 该站在该 batch 的 **f 完成** | **真实观测不可再生**；仿真可重跑 `fxcorr-sim station`（同 batch + 同 seed 逐字节相同，不依赖任何中间文件） | 唯一"删了就没了"的数据 |
-  | D8 `fengine/` | **batch × 组**（组 = 一个频段对 × 全站，`data-volume.md` §1.4） | **该组的 x 分片完成**（组级 purge，2026-10-09 定；保守下限 = 该 batch 的 x 完成） | 重跑该组 x，需 D7 在（f 可重跑，单组秒级） | = D7 的 16 倍（2bit），中间数据里最大 |
+  | D8 `fengine/` | **batch × 组**（组 = 一个频段对 × 全站，`data-volume.md` §1.4） | **该组的 x 分片完成**（组级 purge，2026-10-09 定；目录按组布局 `fengine/<batch>/<g>/`、整目录删；保守下限 = 该 batch 的 x 完成） | 重跑该组 x，需 D7 在（f 可重跑，单组秒级） | = D7 的 16 倍（2bit），中间数据里最大 |
   | D14 `beam/` | batch | 随该 batch 的 x 完成（D14 由 x 产出） | 重跑 x，需 D8 在 | MB 级；仅相位阵实验有 |
   | D10 `vis/` | **实验**（跨 batch 追加） | **FITS 通过 QC 且不再需要重处理** | 重跑 f + x，需 D7 在 | 实验级，**不能按 batch 删** |
   | D16 `vis-parts/` | batch × ds 组 | 该实验的**实验级 `merge --experiment` 写出 SWIN 之后**（2026-09-28 起实施）——**整目录**删，`ds*.part` 与 `merged.part` 同去（5.9 末条） | 重跑该分片的 x + batch 级 merge，需 D8 在（**不需要重生成 raw**） | 纯中转数据，归并成功即无用；**归并前必须集齐**（缺 `ds*.part` 报错、缺 batch 报错），两个层级各查各的 |
@@ -666,7 +666,7 @@ D10 随基线数 O(N²) 增长，多站大阵可能反超 D7；D11/D12（科学�
   | D1–D6/D9/D13 `config/`、`batches/`、`meta/` | 实验 / batch | **终态保留** | 前处理可重跑（vex2difx/difxcalc） | KB~MB；删了就没有"当初怎么跑的"的追溯依据 |
 
   两点注意：① 表里是**最早**可删时点（下限）——它按"下游跑过一遍"给，而实际删除还应等**该级结果确认**（改权重 / 改 pcal / 修 reader 的 bug 都要回头重跑，此时上游必须还在）；② **可再生的依赖链是逐级的**：raw → fengine → vis → product，删掉任一级就等于把以下各级钉死。仿真链路里 raw 也可再生（fxcorr-sim，真正不可再生的只有真实观测的 raw）。
-- **batch duration 选择**：硬约束 = intTime 整数倍 + 起点落在**积分**边界（上文）。**旧的"batch_id 秒唯一（时长 ≥ 1 s）"已取消**（第 6 节，2026-09-27）：顺序号不承载时间，batch 时长不必 ≥ 1 s。之上权衡：① **调度并行度**——batch 是并行/调度单元（scalebox task，编排外置 V2+），batch 数越多多节点并行越好；② **x 侧内存**——**与 batch 时长无关**（2026-10-09 实测修正：x 流式读 .sp，工作集 ≈2 GB，不是整 batch 常驻）；③ **重试成本**——失败重跑整个 batch（V1 无 batch 内回滚）；④ **吞吐 vs 延迟**——启动开销（配置读入、目录、SWIN 头）摊销想大，首个结果的可见延迟与 fengine/ 存储峰值想小。**大 duration 的代价集中在存储**：fengine/ 峰值 ∝ 时长（D8 ≈ 16×D7，见 `data-volume.md` §1.3）；**组级 purge（组 = 时长 ÷ 组数）把峰值压到滑窗 1~2 组**，是放大 batch 的前提（`data-volume.md` §1.4/§4.2）。
+- **batch duration 选择**：硬约束 = intTime 整数倍 + 起点落在**积分**边界（上文）。**旧的"batch_id 秒唯一（时长 ≥ 1 s）"已取消**（第 6 节，2026-09-27）：顺序号不承载时间，batch 时长不必 ≥ 1 s。之上权衡：① **调度并行度**——batch 是并行/调度单元（scalebox task，编排外置 V2+），batch 数越多多节点并行越好；② **x 侧内存**——**与 batch 时长无关**（2026-10-09 实测修正：x 流式读 .sp，工作集 ≈2 GB，不是整 batch 常驻）；③ **重试成本**——失败重跑整个 batch（V1 无 batch 内回滚）；④ **吞吐 vs 延迟**——启动开销（配置读入、目录、SWIN 头）摊销想大，首个结果的可见延迟与 fengine/ 存储峰值想小。**大 duration 的代价集中在存储**：fengine/ 峰值 ∝ 时长（D8 ≈ 16×D7，见 `data-volume.md` §1.3）；**组级 purge（组 = ds 划分——频段对 × 全站，与时长无关；组数 = 每站 ds 数 ÷ 2）把峰值压到滑窗 1~2 组**，是放大 batch 的前提（`data-volume.md` §1.4/§4.2）。
 - **站间时间同步**：per-station 串行架构下站间不靠 MPI 屏障同步，同步信息全在数据时间戳（VDIF 帧 epoch/帧号、.sp header 的 scan/sec/ns）+ .im/.calc 的时钟与几何延迟模型；fxcorr-f 的粗延迟（采样级移位）+ 条纹旋转/小数采样即"把两站拉到同一时刻"。站间残余延迟误差 Δτ 的后果按量级分档：**< 1 采样** → 被小数采样校正吸收；**1 采样～亚 subint** → 带宽 smearing 去相关（幅度 ×sinc(Δτ·Δν)，4MHz 带宽 1 采样误差即 -36%）+ 跨频相位斜坡 2πΔf·Δτ；**帧级（4ms）** → 两站乘不同时刻信号，完全去相关、weight 崩；**subint 级** → .sp 时间戳错位，错位相乘、静默错数据。注意：fxcorr-x 按 .sp header 时间对齐、**不校验站间一致性**（站间错位不报错、静默产出低质量数据，与 mpifxcorr 行为一致）；真实观测的站钟漂移靠 .im 时钟多项式补偿，模型不准的残余误差随时间演化。
 - **并行模型（V3 定案，V6 修订）**：并行维度只有时间——batch 即并行/调度单元（多 batch 并发由 scalebox 编排承担，编排外置不在本项目）；无空间切分（原 V2 P2 基线子集方案已取消，见 algo-plan P2 节）。**V3 的"同实验 batch 串行约定（路线 B）"在 V6 的多节点部署下不再成立**——数百个节点并行处理同一实验的不同 batch 是常态，实验级共享文件的并发语义必须显式解决：
 

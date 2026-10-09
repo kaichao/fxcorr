@@ -19,7 +19,8 @@
 class FEngineWriter {
 public:
 	/**
-	 * @param outdir  fengine/<batch_id>/<station>/ (must exist)
+	 * @param outdir  fengine/<batch_id>/<g>/<station>/ds_<N>/ (must exist;
+	 *                per-group layout since 2026-10-09, data-spec 5.3)
 	 * @param config  parsed .input
 	 * @param configindex   configuration index for this datastream
 	 * @param dsindex  datastream (configdatastream) index
