@@ -38,6 +38,11 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
   blockweight = 0;
   blockacblocks = 0;
   currentblock = 0;
+  blockslotbase = 0;
+  // P3 (pcal): per-block pcal slots (see mode.h); off by default as well
+  blockpcal = 0;
+  blockpcalsamples = 0;
+  blockpcallen = 0;
 
   int status, localfreqindex, parentfreqindex;
   int decimationfactor = config->getDDecimationFactor(configindex, datastreamindex);
@@ -594,6 +599,19 @@ Mode::~Mode()
   {
     delete [] blockac;
     delete [] blockweight;
+    if(blockpcal != 0)	// P3 (pcal): allocated with the block accumulators
+    {
+      for(int b=0;b<blockacblocks;b++)
+      {
+        for(int j=0;j<numrecordedbands;j++)
+          vectorFree(blockpcal[b][j]);
+        delete [] blockpcal[b];
+        delete [] blockpcalsamples[b];
+      }
+      delete [] blockpcal;
+      delete [] blockpcalsamples;
+      delete [] blockpcallen;
+    }
   }
 
   if(config->getDPhaseCalIntervalHz(configindex, datastreamindex) > 0)
@@ -660,9 +678,10 @@ float Mode::unpack(int sampleoffset, int subloopindex)
 
 void Mode::process(int index, int subloopindex)  //frac sample error is in microseconds
 {
-  // block index for the per-block accumulators (no-op when they are off);
-  // index is the FFT position within the subint, which is exactly the slot
-  currentblock = index;
+  // slot for the per-block accumulators (no-op when they are off); index is
+  // the FFT position within the subint, mapped to this Mode's slots by
+  // blockslotbase (setBlockSlotBase, once per parallel batch)
+  currentblock = index - blockslotbase;
   // each block is processed exactly once per subint, so clearing its slots
   // here is both correct and N times cheaper than zeroing every slot of every
   // Mode up front (see clearBlockAccumulators)
@@ -805,6 +824,17 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
 	                 - unpackstartsamples])), fftchannels);
         if(status != true)
           csevere << startl << "Error in phase cal extractAndIntegrate" << endl;
+      }
+
+      // P3 (pcal): park this block's integration state and restart, so the
+      // parallel reduction can add the blocks back in block order (see pcal.h)
+      if(blockpcal != 0)
+      {
+        for(int i=0;i<numrecordedbands;i++)
+        {
+          if(extractor[i]->getAccum(blockpcal[currentblock][i], &blockpcalsamples[currentblock][i]))
+            extractor[i]->resetAccum();
+        }
       }
   }
 
@@ -1491,14 +1521,19 @@ bool Mode::calculateAndAverageKurtosis(int numblocks, int maxchannels)
 
 // P3: allocate the per-block accumulators (see mode.h).  Only the fxcorr-f
 // parallel form calls this; everything else leaves them off and behaves
-// exactly as before.  blockspersend slots per band -- the whole subint's worth
-// of blocks, because a thread may be given any contiguous stretch of them.
-void Mode::enableBlockAccumulators()
+// exactly as before.  slotcount slots per band: the parallel form passes the
+// number of blocks this thread will process per subint (a fraction of
+// blockspersend), so the allocation -- and above all its first-touch page
+// faults, which used to cost ~0.5 s per replica at 32000 blocks -- scale with
+// the per-thread work.
+void Mode::enableBlockAccumulators(int slotcount)
 {
   if(blockacblocks > 0)
     return;	// already enabled
 
-  blockacblocks = blockspersend;
+  if(slotcount <= 0)
+    slotcount = blockspersend;	// conservative: the whole subint
+  blockacblocks = slotcount;
   blockac = new cf32***[autocorrwidth];
   blockweight = new f32*[autocorrwidth];
   for(int i=0;i<autocorrwidth;i++)
@@ -1510,12 +1545,33 @@ void Mode::enableBlockAccumulators()
       blockac[i][b] = new cf32*[numrecordedbands];
       for(int j=0;j<numrecordedbands;j++)
       {
+        // no up-front zeroing: process() clears each block's slots as it
+        // reaches them (clearBlockAccumulators), so the first-touch page
+        // faults land on the slots that are actually used
         blockac[i][b][j] = vectorAlloc_cf32(recordedbandchannels);
-        vectorZero_cf32(blockac[i][b][j], recordedbandchannels);
       }
     }
-    for(int k=0;k<blockacblocks*numrecordedbands;k++)
-      blockweight[i][k] = 0.0f;
+  }
+
+  // P3 (pcal): park each block's pcal integration state too, when every band's
+  // extractor exposes its raw accumulator (PCal::getAccumSize()).  When one
+  // does not, the slots stay off and the caller has to run the pcal path
+  // serially (Mode::blockPcalCapable() tells it).
+  if(extractor != 0 && blockPcalCapable())
+  {
+    blockpcallen = new int[numrecordedbands];
+    blockpcal = new f32**[blockacblocks];
+    blockpcalsamples = new uint64_t*[blockacblocks];
+    for(int b=0;b<blockacblocks;b++)
+    {
+      blockpcal[b] = new f32*[numrecordedbands];
+      blockpcalsamples[b] = new uint64_t[numrecordedbands];
+      for(int j=0;j<numrecordedbands;j++)
+      {
+        blockpcallen[j] = (int)extractor[j]->getAccumSize();
+        blockpcal[b][j] = vectorAlloc_f32(blockpcallen[j]);
+      }
+    }
   }
   currentblock = 0;
 }
@@ -1543,8 +1599,10 @@ void Mode::zeroAutocorrelations()
 
 // P3: zero one block's slots (all bands, both polarisations).  Cheap: the
 // block arrays are per-thread private, so no synchronisation is involved.
-void Mode::clearBlockAccumulators(int block)
+// index is the global block index; the slot is index - blockslotbase.
+void Mode::clearBlockAccumulators(int index)
 {
+  int block = index - blockslotbase;
   if(blockacblocks <= 0 || block < 0 || block >= blockacblocks)
     return;
 
@@ -1555,6 +1613,43 @@ void Mode::clearBlockAccumulators(int block)
     for(int j=0;j<numrecordedbands;j++)
       blockweight[i][block*numrecordedbands + j] = 0.0f;
   }
+  if(blockpcal != 0)
+  {
+    // A block that never gets fed (invalid data returns early in process())
+    // must contribute zeros, exactly like the serial form where nothing was
+    // added to the extractor for it.
+    for(int j=0;j<numrecordedbands;j++)
+    {
+      vectorZero_f32(blockpcal[block][j], blockpcallen[j]);
+      blockpcalsamples[block][j] = 0;
+    }
+  }
+}
+
+// P3 (pcal): true when every band's pcal extractor exposes its raw
+// accumulator, i.e. the block-ordered parallel reduction is available.  The
+// slots stay off when this is false and fxcorr-f then runs the pcal path
+// serially (better a slow correct run than a fast wrong one).
+bool Mode::blockPcalCapable() const
+{
+  if(extractor == 0)
+    return false;
+  for(int i=0;i<numrecordedbands;i++)
+  {
+    if(extractor[i]->getAccumSize() == 0)
+      return false;
+  }
+  return true;
+}
+
+// P3 (pcal): add one parked block's accumulation (and its sample count) back
+// into this Mode's extractor.  The caller walks the blocks in block order,
+// which reproduces the serial addition sequence exactly.
+void Mode::addPcalBlock(int band, const f32 *accum, uint64_t samples)
+{
+  if(extractor == 0 || accum == 0)
+    return;
+  extractor[band]->addAccum(accum, samples);
 }
 
 void Mode::zeroKurtosis()

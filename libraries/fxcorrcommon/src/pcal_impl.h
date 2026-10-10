@@ -129,6 +129,12 @@ class PCalExtractorTrivial : public PCal {
        * @return number of samples that were integrated for the result
        */
       uint64_t getFinalPCal(cf32* out);
+
+      // per-block accumulation, for the fxcorr-f parallel form (see pcal.h)
+      size_t getAccumSize() const;
+      bool getAccum(f32 *out, uint64_t *samples);
+      bool addAccum(const f32 *in, uint64_t samples);
+      void resetAccum();
 };
 
 
@@ -191,6 +197,12 @@ class PCalExtractorShifting : public PCal {
        * @return number of samples that were integrated for the result
        */
       uint64_t getFinalPCal(cf32* out);
+
+      // per-block accumulation, for the fxcorr-f parallel form (see pcal.h)
+      size_t getAccumSize() const;
+      bool getAccum(f32 *out, uint64_t *samples);
+      bool addAccum(const f32 *in, uint64_t samples);
+      void resetAccum();
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -315,6 +327,12 @@ class PCalExtractorImplicitShift : public PCal {
        * @return number of samples that were integrated for the result
        */
       uint64_t getFinalPCal(cf32* out);
+
+      // per-block accumulation, for the fxcorr-f parallel form (see pcal.h)
+      size_t getAccumSize() const;
+      bool getAccum(f32 *out, uint64_t *samples);
+      bool addAccum(const f32 *in, uint64_t samples);
+      void resetAccum();
 };
 
 

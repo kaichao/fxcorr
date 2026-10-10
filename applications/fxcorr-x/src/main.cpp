@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fstream>
 #include <iostream>
@@ -26,6 +27,35 @@
 #include "ompcompat.h"
 
 using namespace std;
+
+// ---- stage timing (FXCORR_TIMING=1; measurement only, no behaviour change) ----
+// Same instrument as fxcorr-f: per-stage wall-clock accumulators, one TIMING
+// line at exit; every nowsec() call is skipped when the switch is off.
+static bool g_timing = false;
+static double g_tt_read, g_tt_zero, g_tt_xmac, g_tt_wacc, g_tt_uvshift, g_tt_cbw,
+              g_tt_auto, g_tt_addsub, g_tt_start;
+
+static inline double nowsec()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
+}
+
+struct StageTimer
+{
+	double t0;
+	StageTimer() : t0(g_timing ? nowsec() : 0.0) {}
+	double lap()
+	{
+		if(!g_timing)
+			return 0.0;
+		double t = nowsec();
+		double d = t - t0;
+		t0 = t;
+		return d;
+	}
+};
 
 // experiment name for DifxMessage identification, same as mpifxcorr's
 // generateIdentifier (mpifxcorr.cpp:217-239): .input basename without the
@@ -741,6 +771,13 @@ int main(int argc, char **argv)
 		if(env == 0 || env[0] == '\0')
 			omp_set_num_threads(1);
 	}
+	// stage timing (FXCORR_TIMING=1)
+	{
+		const char *timingenv = getenv("FXCORR_TIMING");
+		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0);
+		if(g_timing)
+			g_tt_start = nowsec();
+	}
 	// Four call forms (usage above).  ds_group sits after workdir, same
 	// position as fxcorr-f's ds_index, so giving it requires giving workdir.
 	bool merge = false;
@@ -1267,8 +1304,17 @@ int main(int argc, char **argv)
 	int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
 	int integrationswritten = 0;
 	long long validblocks = 0;	// over every .sp view and subint, see countValidBlocks
+	// flattened (ds, band) read jobs: every reader owns its .sp file and its
+	// buffers, so the per-subint reads are independent and run in parallel --
+	// the read is x's largest serial stage (measured at ~10 s per batch on
+	// the local test set, ~45% of the run at 8 threads)
+	std::vector<std::pair<int, size_t> > readjobs;
+	for(int ds=0;ds<numdatastreams;ds++)
+		for(size_t band=0;band<readers[ds].size();band++)
+			readjobs.push_back(std::make_pair(ds, band));
 	for(int s=0;s<nsubints;s++)
 	{
+		StageTimer st;
 		// read this subint from every station, checking the time stamps
 		// (same time formula as fxcorr-f main, so sec/ns must match exactly)
 		double subintstart = batchstartjob + (double)s*(double)subintns/1.0e9;
@@ -1295,32 +1341,59 @@ int main(int argc, char **argv)
 			}
 			currentpolyco->setTime(config.getStartMJD(), sec/86400.0);
 		}
-		for(int ds=0;ds<numdatastreams;ds++)
+		// every band view (recorded + zoom) must read its subint; zoom views
+		// share the parent .sp so their timestamps are identical.  The reads
+		// run in parallel: each (ds,band) reader owns its file and buffers,
+		// so this is a pure fan-out.  Errors are collected (a parallel region
+		// cannot return the caller) and reported after the loop; validblocks
+		// is a plain integer sum, so its order does not matter.
 		{
-			// every band view (recorded + zoom) must read its subint; zoom
-			// views share the parent .sp so their timestamps are identical
-			for(size_t band=0;band<readers[ds].size();band++)
+			int readfail = -1, timefail = -1;
+			long long localvalid = 0;
+			#pragma omp parallel for schedule(dynamic) reduction(+:localvalid)
+			for(int k=0;k<(int)readjobs.size();k++)
 			{
+				int ds = readjobs[k].first;
+				size_t band = readjobs[k].second;
 				int rsec, rns, rscan;
 				if(!readers[ds][band]->readSubint(s, rscan, rsec, rns))
 				{
-					ostringstream oss;
-					oss << "fxcorr-x: failed to read subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band;
-					return fail(monitor, oss.str());
+					#pragma omp atomic write
+					readfail = k;
+					continue;
 				}
 				if(rscan != scan || rsec != expectedsec || rns != expectedns)
 				{
-					ostringstream oss;
-					oss << "fxcorr-x: subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << band << " has time " << rscan << "/" << rsec << "/" << rns << ", expected " << scan << "/" << expectedsec << "/" << expectedns;
-					return fail(monitor, oss.str());
+					#pragma omp atomic write
+					timefail = k;
+					continue;
 				}
-				validblocks += countValidBlocks(readers[ds][band]);
+				localvalid += countValidBlocks(readers[ds][band]);
 			}
+			if(readfail >= 0)
+			{
+				int ds = readjobs[readfail].first;
+				ostringstream oss;
+				oss << "fxcorr-x: failed to read subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << readjobs[readfail].second;
+				return fail(monitor, oss.str());
+			}
+			if(timefail >= 0)
+			{
+				int ds = readjobs[timefail].first;
+				int rsec, rns, rscan;	// re-read for the message; the reader is
+				readers[ds][readjobs[timefail].second]->readSubint(s, rscan, rsec, rns);	// positioned on the subint
+				ostringstream oss;
+				oss << "fxcorr-x: subint " << s << " of station " << config.getDStationName(configindex, ds) << " band " << readjobs[timefail].second << " has time " << rscan << "/" << rsec << "/" << rns << ", expected " << scan << "/" << expectedsec << "/" << expectedns;
+				return fail(monitor, oss.str());
+			}
+			validblocks += localvalid;
 		}
 
+		g_tt_read += st.lap();
 		// zero the per-subint accumulation (threadcrosscorrs, baselineweights, results)
 		xmac.zeroSubint();
 		vectorZero_cf32(subintresults, coreresultlength);
+		g_tt_zero += st.lap();
 
 		// XMAC + uvshift/average, batched exactly like core.cpp:786-1057
 		int xcblockcount = 0, xcshiftcount = 0;
@@ -1330,13 +1403,20 @@ int main(int argc, char **argv)
 			if(numffts > numbufferedffts)
 				numffts = numbufferedffts;
 
-			xmac.xmacBatch(fftloop, readers, currentpolyco);
-			xmac.accumulateWeights(fftloop, readers);
+			{
+				StageTimer tx;
+				xmac.xmacBatch(fftloop, readers, currentpolyco);
+				g_tt_xmac += tx.lap();
+				xmac.accumulateWeights(fftloop, readers);
+				g_tt_wacc += tx.lap();
+			}
 			xcblockcount += numffts;
 			if(xcblockcount == maxxcblocks)
 			{
 				double nsoffset = (xcshiftcount*maxxcblocks + ((double)maxxcblocks)/2.0)*blockns;
+				StageTimer tu;
 				xmac.uvshiftAndAverage(offsetsec, nsoffset, maxxcblocks*blockns, currentpolyco, subintresults);
+				g_tt_uvshift += tu.lap();
 				xcblockcount = 0;
 				xcshiftcount++;
 			}
@@ -1344,17 +1424,31 @@ int main(int argc, char **argv)
 		if(xcblockcount != 0)
 		{
 			double nsoffset = (xcshiftcount*maxxcblocks + ((double)xcblockcount)/2.0)*blockns;
+			StageTimer tu;
 			xmac.uvshiftAndAverage(offsetsec, nsoffset, xcblockcount*blockns, currentpolyco, subintresults);
+			g_tt_uvshift += tu.lap();
 		}
 
 		// baseline weights -> floatresults section (core.cpp:1065-1107, no locks)
-		xmac.copyBaselineWeights((f32*)subintresults);
+		{
+			StageTimer tc;
+			xmac.copyBaselineWeights((f32*)subintresults);
+			g_tt_cbw += tc.lap();
+		}
 
 		// autocorrelations come from autocorr.bin (one record per subint)
-		integrator.addAutocorrs(s, autocorrFiles, subintresults);
+		{
+			StageTimer ta;
+			integrator.addAutocorrs(s, autocorrFiles, subintresults);
+			g_tt_auto += ta.lap();
+		}
 
-		if(integrator.addSubint(subintresults))
-			integrationswritten++;
+		{
+			StageTimer ts;
+			if(integrator.addSubint(subintresults))
+				integrationswritten++;
+			g_tt_addsub += ts.lap();
+		}
 	}
 
 	// Empty-input / empty-output guards (v6-plan.md "进行中的发现" 2).  Two
@@ -1420,6 +1514,25 @@ int main(int argc, char **argv)
 	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
 	monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);
 	monitor.status(DIFX_STATE_DONE, "", 0.0, 0, 0, 0.0, 0.0);
+
+	if(g_timing && !merge)
+	{
+		double total = nowsec() - g_tt_start;
+		cerr << "TIMING fxcorr-x"
+		     << " batch=" << batchid
+		     << " dsgroup=" << (sharded ? to_string(dsgroup) : string("all"))
+		     << " nthreads=" << omp_get_max_threads()
+		     << " nsubints=" << nsubints
+		     << " total=" << total
+		     << " read=" << g_tt_read
+		     << " zero=" << g_tt_zero
+		     << " xmac=" << g_tt_xmac
+		     << " wacc=" << g_tt_wacc
+		     << " uvshift=" << g_tt_uvshift
+		     << " cbw=" << g_tt_cbw
+		     << " auto=" << g_tt_auto
+		     << " addsub=" << g_tt_addsub << endl;
+	}
 
 	return EXIT_SUCCESS;
 }

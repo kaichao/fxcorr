@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -25,6 +26,40 @@
 #include "ompcompat.h"
 
 using namespace std;
+
+// ---- stage timing (FXCORR_TIMING=1; measurement only, no behaviour change) ----
+// Accumulates per-stage wall-clock times and prints one TIMING line at exit,
+// for sizing the serial and parallel parts of the subint loop.  Off by default:
+// every nowsec() call is then skipped, so an instrumented build does the same
+// work as an uninstrumented one (use it for the OMP 1-vs-N comparisons too).
+static bool g_timing = false;
+static double g_tt_read, g_tt_swp, g_tt_setup, g_tt_hdr, g_tt_proc, g_tt_reduce,
+              g_tt_copy, g_tt_write, g_tt_ac, g_tt_subtail, g_tt_start;
+static double g_tt_init, g_tt_repl, g_tt_blk, g_tt_fin, g_tt_del;
+
+static inline double nowsec()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
+}
+
+// lap() returns the seconds since construction (or the previous lap) and
+// returns 0 when timing is off
+struct StageTimer
+{
+	double t0;
+	StageTimer() : t0(g_timing ? nowsec() : 0.0) {}
+	double lap()
+	{
+		if(!g_timing)
+			return 0.0;
+		double t = nowsec();
+		double d = t - t0;
+		t0 = t;
+		return d;
+	}
+};
 
 // experiment name for DifxMessage identification, same as mpifxcorr's
 // generateIdentifier (mpifxcorr.cpp:217-239): .input basename without the
@@ -306,6 +341,13 @@ int main(int argc, char **argv)
 		if(env == 0 || env[0] == '\0')
 			omp_set_num_threads(1);
 	}
+	// stage timing (FXCORR_TIMING=1)
+	{
+		const char *timingenv = getenv("FXCORR_TIMING");
+		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0);
+		if(g_timing)
+			g_tt_start = nowsec();
+	}
 	string batchid = argv[1];
 	string station = argv[2];
 	string workdir = ".";
@@ -366,6 +408,7 @@ int main(int argc, char **argv)
 	// fxcorrcommon reports the whole parsing pass through the Alert streams
 	// (see log.h), which is most of what the tool otherwise prints.
 	fxApplyAlertLevel();
+	StageTimer ti;
 
 	// parse .input (non-MPI constructor)
 	Configuration config((workdir + "/" + inputfile).c_str(), 0);
@@ -480,7 +523,16 @@ int main(int argc, char **argv)
 	// the per-subint setup calls and the per-fftloop reduction below keep the
 	// replicas consistent with the primary Mode (bit-identical results).
 	int nthreads = omp_get_max_threads();
+	// P3 (pcal): the parallel pcal reduction needs the extractors' raw
+	// accumulators (PCal::getAccumSize()); an extractor that cannot expose
+	// them forces the serial path -- a slow correct run beats a fast wrong one
+	if(nthreads > 1 && (config.getDPhaseCalIntervalHz(0, dsindex) > 0) && !mode->blockPcalCapable())
+	{
+		cerr << "fxcorr-f: pcal extractor does not expose its raw accumulator; falling back to OMP_NUM_THREADS=1" << endl;
+		nthreads = 1;
+	}
 	vector<Mode *> replicas;
+	StageTimer tr;
 	for(int t=1;t<nthreads;t++)
 	{
 		Mode *m = config.getMode(0, dsindex);
@@ -492,6 +544,7 @@ int main(int argc, char **argv)
 		m->setDumpKurtosis(dokurtosis);
 		replicas.push_back(m);
 	}
+	g_tt_repl += tr.lap();
 
 	// P3: per-block accumulators on every Mode, the primary included (it is
 	// worker 0).  Each block's autocorrelation and weight land in their own
@@ -499,9 +552,25 @@ int main(int argc, char **argv)
 	// serial accumulation sequence -- instead of summing per-thread segment
 	// totals, which reorders the floating point additions.  Cost: ~21 MB per
 	// Mode for a 1310-block, 8-band, 128-channel, dual-polarisation config.
-	mode->enableBlockAccumulators();
-	for(size_t rt=0;rt<replicas.size();rt++)
-		replicas[rt]->enableBlockAccumulators();
+	StageTimer tb;
+	// the per-block slots are the base of the reduction below, so they are
+	// allocated at every thread count (the serial run reduces its own block
+	// slots back in block order -- numerically identical to the direct
+	// accumulation, and it keeps the reduce code on one path).  Each Mode
+	// only gets the slots of the stretch its thread will process -- the
+	// per-thread share of the subint plus slack for the per-fftloop rounding
+	// (setBlockSlotBase in the parallel region maps blocks onto slots).  At
+	// 32000 blocks the full allocation costs ~0.5 s of first-touch page
+	// faults per replica, so this is what keeps the thread count useful.
+	{
+		int bps = config.getBlocksPerSend(0);
+		int nbuf = config.getNumBufferedFFTs(0);
+		int slotcount = (bps + nthreads - 1)/nthreads + (bps + nbuf - 1)/nbuf + 8;
+		mode->enableBlockAccumulators(slotcount);
+		for(size_t rt=0;rt<replicas.size();rt++)
+			replicas[rt]->enableBlockAccumulators(slotcount);
+	}
+	g_tt_blk += tb.lap();
 
 	// autocorrelation averaging batch, same formula as core.cpp:769-783
 	int numbufferedffts = config.getNumBufferedFFTs(0);
@@ -601,6 +670,7 @@ int main(int argc, char **argv)
 		return fail(monitor, oss.str());
 	}
 	long long batchstartabsns = (long long)batchstartsec*1000000000LL + (long long)batchstartns;
+	g_tt_init += ti.lap();
 
 	for(int s=0;s<nsubints;s++)
 	{
@@ -616,8 +686,10 @@ int main(int argc, char **argv)
 		int offsetns = (int)((reld - (double)offsetsec)*1.0e9 + 0.5);
 
 		// station-based processing of one subint (core.cpp:694-801, V1 single-threaded)
+		StageTimer st;
 		int datasec = 0, datans = 0;
 		int bytes = reader.readSubint(scan, offsetsec, offsetns, databuf, sendbytes, &datasec, &datans);
+		g_tt_read += st.lap();
 
 		// P6: accumulate subint bytes into datasegment-sized blocks and feed
 		// the switched power detector (vdiffile.cpp:945-964).  Subint reads
@@ -672,6 +744,7 @@ int main(int argc, char **argv)
 		// P1: input datarate diagnostics, upstream datastream.cpp:631-634
 		monitor.diagnosticDataConsumed(bytes);
 		monitor.diagnosticInputDatarate((double)bytes / ((double)subintns/1.0e9));
+		g_tt_swp += st.lap();
 
 		mode->zeroAutocorrelations();
 		if(dokurtosis)
@@ -695,7 +768,9 @@ int main(int argc, char **argv)
 				m->resetpcal();
 		}
 
+		g_tt_setup += st.lap();
 		writer.writeSubintHeader(scan, offsetsec, offsetns, mode, validflags);
+		g_tt_hdr += st.lap();
 
 		// same loop structure as core.cpp:786-801: buffered slot reuse over fftloops
 		int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
@@ -710,10 +785,18 @@ int main(int argc, char **argv)
 		// the serial one) and writes the batch.  acblockcount/acshiftcount
 		// are only touched by thread 0 and read after the region.
 		int nrecordedbands = config.getDNumRecordedBands(0, dsindex);
+		// per-thread slot bases for the block-ordered reduction: thread 0
+		// advances them after each fftloop; the workers mirror that in their
+		// own localbase (see setBlockSlotBase below)
+		vector<int> slotbase(nthreads, 0);
 		#pragma omp parallel num_threads(nthreads)
 		{
 			int t = omp_get_thread_num();
 			Mode *m = (t == 0) ? mode : replicas[t-1];
+			// per-thread stage accumulators (each stage is timed around its own
+			// body, so barrier waits are not attributed to any stage)
+			double t_proc_l = 0.0, t_reduce_l = 0.0, t_copy_l = 0.0, t_write_l = 0.0, t_ac_l = 0.0;
+			int localbase = 0;	// slots this thread has used so far
 
 			for(int fftloop=0;fftloop<fftloops;fftloop++)
 			{
@@ -723,69 +806,102 @@ int main(int argc, char **argv)
 
 				int bstart = (int)((long long)t*numffts/nthreads);
 				int bend = (int)((long long)(t+1)*numffts/nthreads);
-				for(int b=bstart;b<bend;b++)
+				// this thread's slice of the fftloop maps onto its own slots
+				// starting at localbase (slot = global block index - base)
+				m->setBlockSlotBase(fftloop*numbufferedffts + bstart - localbase);
 				{
-					int i = fftloop*numbufferedffts + b;
-					m->process(i, b);
+					StageTimer ts;
+					for(int b=bstart;b<bend;b++)
+					{
+						int i = fftloop*numbufferedffts + b;
+						m->process(i, b);
+					}
+					t_proc_l += ts.lap();
 				}
+				localbase += bend - bstart;
 				#pragma omp barrier
 
-				// P3: thread 0 reduces the replicas' accumulations in block
-				// order (the only part that must stay serial for bit-identity),
-				// while every worker copies its own output slots into the
-				// primary Mode's -- disjoint memory, no races.
-				if(t == 0)
+				// P3: the block-ordered reduction is split over the whole team
+				// by (crosspol, band) pair -- each pair's accumulation
+				// sequence over the blocks is independent, so the split keeps
+				// every one of them in block order and the result stays
+				// bit-identical.  Summing per-thread segment totals instead
+				// would put a rounding between the segments and shift the low
+				// bits of every value (that was the old, broken form).  The
+				// workers join in here rather than idling at the barrier.
 				{
-					// P3: reduce in **block order** across every Mode, the
-					// primary included (it is worker 0).  Each Mode parked
-					// every block's autocorrelation in its own slot, so
-					// walking the blocks in sequence reproduces the serial
-					// accumulation order bit for bit.  Summing the per-thread
-					// segment totals -- what this did before -- puts a
-					// rounding in between the segments and shifts the low
-					// bits of every value: measured on the V7 target cluster
-					// as the whole autocorrelation section of the SWIN
-					// disagreeing between OMP_NUM_THREADS=1 and 8.
+					StageTimer ts;
 					int crosspols = mode->writeCrossAutoCorrs() ? 2 : 1;
-					for(int wt=0;wt<nthreads;wt++)
+					int npairs = crosspols*nrecordedbands;
+					for(int pair=t;pair<npairs;pair+=nthreads)
 					{
-						Mode *wm = (wt == 0) ? mode : replicas[wt-1];
-						int bstart = (int)((long long)wt*numffts/nthreads);
-						int bend = (int)((long long)(wt+1)*numffts/nthreads);
-						for(int b=bstart;b<bend;b++)
+						int cp = pair/nrecordedbands;
+						int j = pair%nrecordedbands;
+						int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
+						int nchan = config.getFNumChannels(freqindex);
+						cf32 *dst = mode->getAutocorrelation(cp, j);
+						// weight: fold the blocks into the value already in
+						// the primary Mode (read-modify-write; this pair has
+						// exactly one owner), matching the serial add sequence
+						f32 w = mode->getWeightReduced(cp, j);
+						for(int wt=0;wt<nthreads;wt++)
 						{
-							int ib = fftloop*numbufferedffts + b;
-							for(int cp=0;cp<crosspols;cp++)
+							Mode *wm = (wt == 0) ? mode : replicas[wt-1];
+							int bstart = (int)((long long)wt*numffts/nthreads);
+							int bend = (int)((long long)(wt+1)*numffts/nthreads);
+							for(int b=bstart;b<bend;b++)
 							{
-								for(int j=0;j<nrecordedbands;j++)
+								int slot = slotbase[wt] + (b - bstart);
+								const cf32 *src = wm->getBlockAc(cp, slot, j);
+								for(int k=0;k<nchan;k++)
 								{
-									int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
-									int nchan = config.getFNumChannels(freqindex);
-									const cf32 *src = wm->getBlockAc(cp, ib, j);
-									cf32 *dst = mode->getAutocorrelation(cp, j);
-									for(int k=0;k<nchan;k++)
-									{
-										dst[k].re += src[k].re;
-										dst[k].im += src[k].im;
-									}
-									// addWeightReduced, not addWeight: the
-									// primary has the block slots on too, so
-									// addWeight() would divert into them
-									mode->addWeightReduced(cp, j, wm->getBlockWeight(cp, ib, j));
+									dst[k].re += src[k].re;
+									dst[k].im += src[k].im;
+								}
+								w += wm->getBlockWeight(cp, slot, j);
+							}
+						}
+						mode->setWeightReduced(cp, j, w);
+					}
+
+					// pcal: same split, one band per thread (the parked
+					// accumulators are band-indexed; a band's blocks stay in
+					// block order -- see pcal.h)
+					if(haspcal)
+					{
+						for(int j=t;j<nrecordedbands;j+=nthreads)
+						{
+							for(int wt=0;wt<nthreads;wt++)
+							{
+								Mode *wm = (wt == 0) ? mode : replicas[wt-1];
+								int bstart = (int)((long long)wt*numffts/nthreads);
+								int bend = (int)((long long)(wt+1)*numffts/nthreads);
+								for(int b=bstart;b<bend;b++)
+								{
+									int slot = slotbase[wt] + (b - bstart);
+									uint64_t samples = 0;
+									const f32 *accum = wm->getBlockPcal(j, slot, &samples);
+									mode->addPcalBlock(j, accum, samples);
 								}
 							}
 						}
 					}
-
-					// kurtosis and pcal are NOT per-block yet (mode.h), so
-					// they keep the old segment-wise reduction -- and it stays
-					// copies-only, because the primary already accumulated its
-					// own share inside process().
-					for(size_t rt=0;rt<replicas.size();rt++)
+					t_reduce_l += ts.lap();
+				}
+				if(t == 0)
+				{
+					StageTimer ts;
+					// kurtosis is not per-block yet (mode.h), so it keeps the
+					// old segment-wise reduction -- and it stays copies-only,
+					// because the primary already accumulated its own share
+					// inside process().  Left with thread 0: it is off by
+					// default, and the large folds above already ran on the
+					// whole team.
+					if(dokurtosis)
 					{
-						Mode *rm = replicas[rt];
-						if(dokurtosis)
+						for(size_t rt=0;rt<replicas.size();rt++)
 						{
+							Mode *rm = replicas[rt];
 							for(int j=0;j<nrecordedbands;j++)
 							{
 								int freqindex = config.getDRecordedFreqIndex(0, dsindex, j);
@@ -793,20 +909,12 @@ int main(int argc, char **argv)
 								mode->addKurtosisProducts(j, rm->getKurtosisProducts1(j), rm->getKurtosisProducts2(j), nchan);
 							}
 						}
-						if(haspcal)
-						{
-							for(int j=0;j<nrecordedbands;j++)
-							{
-								int localfreqindex = config.getDLocalRecordedFreqIndex(0, dsindex, j);
-								int ntonesband = config.getDRecordedFreqNumPCalTones(0, dsindex, localfreqindex);
-								for(int tone=0;tone<ntonesband;tone++)
-									mode->addPcal(j, tone, rm->getPcal(j, tone));
-							}
-						}
 					}
+					t_ac_l += ts.lap();
 				}
 				else
 				{
+					StageTimer ts;
 					// copy this worker's output slots (spectra + per-slot
 					// weights) into the primary Mode's buffered slots
 					for(int b=bstart;b<bend;b++)
@@ -819,13 +927,24 @@ int main(int argc, char **argv)
 							mode->setDataWeight(j, b, m->getDataWeight(j, b));
 						}
 					}
+					t_copy_l += ts.lap();
 				}
 				#pragma omp barrier
 
+				// bands are the natural split for the write as well: every
+				// band owns its .sp stream and its weightaccum row, and the
+				// data it drains (the primary's slots) is complete -- both
+				// the reduction and the slot copies ended at the barrier above
+				{
+					StageTimer ts;
+					for(int j=t;j<nrecordedbands;j+=nthreads)
+						writer.writeSpectraBand(j, fftloop, mode);
+					t_write_l += ts.lap();
+				}
+
 				if(t == 0)
 				{
-					writer.writeSpectra(fftloop, mode);
-
+					StageTimer ts;
 					// autocorrelation averaging batches, core.cpp:993-1003
 					acblockcount += numffts;
 					if(acblockcount == maxacblocks)
@@ -848,9 +967,18 @@ int main(int argc, char **argv)
 						acblockcount = 0;
 						acshiftcount++;
 					}
+					// advance the per-thread slot bases for the next fftloop
+					// (the workers' localbase runs the same recurrence; the
+					// barrier above guarantees every thread's reduction is
+					// done reading them)
+					for(int wt=0;wt<nthreads;wt++)
+						slotbase[wt] += (int)((long long)(wt+1)*numffts/nthreads)
+						              - (int)((long long)wt*numffts/nthreads);
+					t_ac_l += ts.lap();
 				}
 				else
 				{
+					StageTimer ts;
 					// the replica's accumulation window is one fftloop: zero it
 					// (after the reduction above) so the next reduction adds
 					// only this worker's new blocks
@@ -859,10 +987,22 @@ int main(int argc, char **argv)
 						m->zeroKurtosis();
 					if(haspcal)
 						m->resetpcal();
+					t_copy_l += ts.lap();
 				}
 				#pragma omp barrier
 			}
+			#pragma omp atomic
+			g_tt_proc += t_proc_l;
+			#pragma omp atomic
+			g_tt_reduce += t_reduce_l;
+			#pragma omp atomic
+			g_tt_copy += t_copy_l;
+			#pragma omp atomic
+			g_tt_write += t_write_l;
+			#pragma omp atomic
+			g_tt_ac += t_ac_l;
 		}
+		StageTimer st2;
 		if(acblockcount != 0)
 		{
 			if(haspcal)
@@ -899,6 +1039,7 @@ int main(int argc, char **argv)
 		if(dokurtosis)
 			sendKurtosis(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
 			             (blockspersend/2.0)*blockns, (double)blockspersend*blockns, blockspersend, config.getJobName());
+		g_tt_subtail += st2.lap();
 	}
 
 	if(haspcal)
@@ -919,11 +1060,15 @@ int main(int argc, char **argv)
 	delete switchedpower;	// dtor: close() -> flush() of the tail window
 	delete [] spblock;
 
-	delete [] databuf;
-	delete [] validflags;
-	delete mode;
-	for(Mode *m : replicas)
-		delete m;
+	{
+		StageTimer td;
+		delete [] databuf;
+		delete [] validflags;
+		delete mode;
+		for(Mode *m : replicas)
+			delete m;
+		g_tt_del += td.lap();
+	}
 
 	// Products must be on disk before this task calls itself done: a full
 	// filesystem has to fail HERE, while this process still knows which file
@@ -931,12 +1076,43 @@ int main(int argc, char **argv)
 	// truncated band_XX.sp (v7-plan 17.2).  Under the P3 layout fengine
 	// lives on tmpfs, whose capacity is a hard wall, so this is the expected
 	// failure mode, not a rare one.
-	if(!writer.finalise())
-		return fail(monitor, "fxcorr-f: station products for batch " + batchid + " are incomplete (see above)");
+	{
+		StageTimer tf;
+		if(!writer.finalise())
+			return fail(monitor, "fxcorr-f: station products for batch " + batchid + " are incomplete (see above)");
+		g_tt_fin += tf.lap();
+	}
 
 	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
 	monitor.status(DIFX_STATE_ENDING, "", 0.0, 0, 0, 0.0, 0.0);
 	monitor.status(DIFX_STATE_DONE, "", 0.0, 0, 0, 0.0, 0.0);
+
+	if(g_timing)
+	{
+		// parallel stages are sums over threads (CPU-seconds; divide by
+		// nthreads for the per-thread view), the rest are wall seconds of the
+		// single serial stream
+		double total = nowsec() - g_tt_start;
+		cerr << "TIMING fxcorr-f"
+		     << " batch=" << batchid << " station=" << station << " ds=" << dsarg
+		     << " nthreads=" << nthreads << " nsubints=" << nsubints
+		     << " total=" << total
+		     << " init=" << g_tt_init
+		     << " repl=" << g_tt_repl
+		     << " blk=" << g_tt_blk
+		     << " read=" << g_tt_read
+		     << " swp=" << g_tt_swp
+		     << " setup=" << g_tt_setup
+		     << " hdr=" << g_tt_hdr
+		     << " proc=" << g_tt_proc
+		     << " reduce=" << g_tt_reduce
+		     << " copy=" << g_tt_copy
+		     << " write=" << g_tt_write
+		     << " ac=" << g_tt_ac
+		     << " subtail=" << g_tt_subtail
+		     << " fin=" << g_tt_fin
+		     << " del=" << g_tt_del << endl;
+	}
 
 	return EXIT_SUCCESS;
 }

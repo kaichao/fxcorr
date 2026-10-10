@@ -207,6 +207,44 @@ class PCal {
        */
       virtual uint64_t getFinalPCal(cf32* out) = 0;
 
+      // ---- per-block accumulation (fxcorr-f OMP parallel form) ----
+      //
+      // The extractors integrate samples by a pure linear fold-add, so the
+      // serial result is the sum of the per-block contributions in block
+      // order, and getFinalPCal() is linear in that accumulator (fold + DFT).
+      // The parallel form therefore parks one block's raw accumulator, resets,
+      // and the reduction adds the parked states back in block order -- the
+      // serial addition sequence again, bit for bit.  (The finalized output
+      // must NOT be used for the reduction: adding DFT outputs instead of raw
+      // accumulators reorders the floating point additions.)
+      //
+      // An extractor whose state this interface cannot expose returns
+      // getAccumSize() == 0 and the caller has to stay serial.
+
+      /**
+       * Length in f32 of the raw accumulator; 0 = not supported.
+       */
+      virtual size_t getAccumSize() const { return 0; }
+
+      /**
+       * Copies the raw accumulator (getAccumSize() floats) into out.
+       * @param samples Receives the number of samples integrated so far
+       * @return true on success, false if unsupported
+       */
+      virtual bool getAccum(f32 *out, uint64_t *samples) { return false; }
+
+      /**
+       * Adds a parked accumulator and its sample count back in.
+       */
+      virtual bool addAccum(const f32 *in, uint64_t samples) { return false; }
+
+      /**
+       * Zeroes the raw accumulator and the sample count, keeping the
+       * finalized flag and the sample-offset bookkeeping (adjustSampleOffset
+       * re-sets the latter before the next block is fed).
+       */
+      virtual void resetAccum() {}
+
       /**
        * Specifies a minimum frequency resolution (spectral response around
        * the PCal tone) that the extractors should try to meet. Currently assured

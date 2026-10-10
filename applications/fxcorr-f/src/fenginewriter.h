@@ -38,6 +38,14 @@ public:
 	/** Writes one fftloop worth of spectra (the buffered slots just processed) and collects the per-slot data weights. */
 	void writeSpectra(int fftloop, Mode *mode);
 
+	/**
+	 * One band of writeSpectra().  Every band owns its .sp stream and its
+	 * weightaccum row, so the parallel form hands one subset of the bands to
+	 * each thread and they write concurrently without touching each other's
+	 * state.
+	 */
+	void writeSpectraBand(int band, int fftloop, Mode *mode);
+
 	/** Rewrites the weights placeholder of the current subint with the collected per-FFT weights. */
 	void flushWeights();
 

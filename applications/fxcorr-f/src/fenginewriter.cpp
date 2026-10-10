@@ -258,23 +258,28 @@ void FEngineWriter::writeSubintHeader(int scan, int sec, int ns, Mode *mode, con
 
 void FEngineWriter::writeSpectra(int fftloop, Mode *mode)
 {
+	// serial form: one band after the other (the parallel form splits the
+	// bands over the threads and calls writeSpectraBand directly)
+	for(int j=0;j<nrecordedbands;j++)
+		writeSpectraBand(j, fftloop, mode);
+}
+
+void FEngineWriter::writeSpectraBand(int j, int fftloop, Mode *mode)
+{
 	// spectra: subloop-major within each fftloop batch (same slot reuse as
 	// Core::processdata), covering the FFT indices of this batch
 	int numffts = blockspersend - fftloop*config->getNumBufferedFFTs(configindex);
 	if(numffts > config->getNumBufferedFFTs(configindex))
 		numffts = config->getNumBufferedFFTs(configindex);
 
-	for(int j=0;j<nrecordedbands;j++)
+	int freqindex = config->getDRecordedFreqIndex(configindex, dsindex, j);
+	int nchan = config->getFNumChannels(freqindex);
+	for(int b=0;b<numffts;b++)
 	{
-		int freqindex = config->getDRecordedFreqIndex(configindex, dsindex, j);
-		int nchan = config->getFNumChannels(freqindex);
-		for(int b=0;b<numffts;b++)
-		{
-			const cf32 *spec = mode->getFreqs(j, b);
-			fwrite(spec, sizeof(cf32), nchan, spfiles[j]);
-			// b is the buffered slot just filled by process(fftloop*numBufferedFFTs+b, b)
-			weightaccum[j][fftloop*config->getNumBufferedFFTs(configindex) + b] = mode->getDataWeight(j, b);
-		}
+		const cf32 *spec = mode->getFreqs(j, b);
+		fwrite(spec, sizeof(cf32), nchan, spfiles[j]);
+		// b is the buffered slot just filled by process(fftloop*numBufferedFFTs+b, b)
+		weightaccum[j][fftloop*config->getNumBufferedFFTs(configindex) + b] = mode->getDataWeight(j, b);
 	}
 }
 

@@ -229,13 +229,33 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   inline void addWeightReduced(bool crosspol, int outputband, f32 w) { weights[(crosspol)?1:0][outputband] += w; }
 
   /**
-   * Turns on the per-block accumulators (see blockac).  Allocates
-   * blockspersend slots per band, so it must be called before any process()
-   * and only for a Mode that is going to be accumulated block-wise -- i.e.
-   * the fxcorr-f parallel form.  Costs ~21 MB for a 1310-block, 8-band,
-   * 128-channel, dual-polarisation configuration.
+   * Read/write access to the running band weight, for a reduction that runs
+   * on a thread other than this Mode's own (the parallel block-ordered
+   * reduction splits the (crosspol, band) pairs over the team).  Each pair is
+   * owned by exactly one thread, so the read-modify-write is race-free and
+   * reproduces the serial add sequence: fold the blocks into the value read
+   * here, then write it back.
    */
-  void enableBlockAccumulators();
+  inline f32 getWeightReduced(bool crosspol, int outputband) const { return weights[(crosspol)?1:0][outputband]; }
+  inline void setWeightReduced(bool crosspol, int outputband, f32 w) { weights[(crosspol)?1:0][outputband] = w; }
+
+  /**
+   * Turns on the per-block accumulators (see blockac).  slotcount is the
+   * number of block slots to allocate, i.e. how many blocks this Mode is
+   * going to process per subint -- the fxcorr-f parallel form gives every
+   * thread its own Mode and only that thread's stretch of blocks, so the
+   * slots (and their clearing cost) scale with the per-thread work instead of
+   * the whole subint.  Call setBlockSlotBase() before each parallel batch to
+   * map a global block index onto a slot (slot = index - base).
+   */
+  void enableBlockAccumulators(int slotcount);
+
+  /**
+   * Sets the mapping from global block indices to this Mode's slots
+   * (slot = index - base).  The parallel form calls this once per fftloop
+   * with that thread's base.
+   */
+  inline void setBlockSlotBase(int base) { blockslotbase = base; }
 
   /**
    * Zeroes the per-block slots of one block.  The parallel form calls this
@@ -264,12 +284,30 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   /** Per-block weight slot; only valid after enableBlockAccumulators(). */
   inline f32 getBlockWeight(bool crosspol, int block, int outputband) const { return blockweight[(crosspol)?1:0][block*numrecordedbands + outputband]; }
 
- /** Accumulates a replica's raw pcal tone accumulation into this Mode's. */
-  inline void addPcal(int outputband, int tone, cf32 v)
-  {
-    pcalresults[outputband][tone].re += v.re;
-    pcalresults[outputband][tone].im += v.im;
-  }
+ // ---- P3 (pcal): per-block accumulation slots (parallel form) ----
+ // Parked together with the autocorrelation accumulators when every band's
+ // pcal extractor exposes its raw accumulator (PCal::getAccumSize() > 0); the
+ // parallel reduction adds the parked states back in block order, which is
+ // the serial addition sequence bit for bit (see pcal.h).  The finalized
+ // tone outputs must NOT be reduced -- see the note in pcal.h.
+
+ /** True when every band's pcal extractor supports the per-block interface. */
+ bool blockPcalCapable() const;
+
+ /** True when the per-block pcal slots are on (the parallel pcal path). */
+ inline bool hasBlockPcal() const { return blockpcal != 0; }
+
+ /** Per-block pcal slot of one band, or NULL when the slots are off;
+  *  *samples receives the block's integrated sample count. */
+ inline const f32* getBlockPcal(int band, int block, uint64_t *samples) const
+ {
+   if(blockpcalsamples != 0)
+     *samples = blockpcalsamples[block][band];
+   return (blockpcal != 0) ? blockpcal[block][band] : 0;
+ }
+
+ /** Adds one parked block's pcal accumulation into this Mode's extractor. */
+ void addPcalBlock(int band, const f32 *accum, uint64_t samples);
 
  /** Raw kurtosis products (s1/s2 accumulation) of a replica, for reduction. */
   inline const f32* getKurtosisProducts1(int outputband) const { return s1[outputband]; }
@@ -375,8 +413,13 @@ protected:
   // path can consume it without a transpose.
   cf32**** blockac;	// [crosspol][block][outputband] -> cf32*
   f32 **  blockweight;	// [crosspol][block][outputband]
-  int     blockacblocks;	// blocks allocated; 0 = disabled
-  int     currentblock;	// block process() is accumulating into
+  int     blockacblocks;	// slot count allocated; 0 = disabled
+  int     currentblock;	// slot process() is accumulating into
+  int     blockslotbase;	// slot = block index - blockslotbase
+  // P3 (pcal): per-block pcal accumulation slots (see the interfaces above)
+  f32 ***  blockpcal;		// [block][band][accum len]
+  uint64_t ** blockpcalsamples;	// [block][band]
+  int *    blockpcallen;	// [band] accumulator length in f32
   vecFFTSpecR_f32 * pFFTSpecR;
   vecFFTSpecC_cf32 * pFFTSpecC;
   vecDFTSpecR_f32 * pDFTSpecR;

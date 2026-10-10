@@ -585,6 +585,38 @@ uint64_t PCalExtractorTrivial::getFinalPCal(cf32* out)
 }
 
 
+// ---- per-block accumulation (fxcorr-f parallel form, see pcal.h) ----
+// The entire integration state is the linear fold-add accumulator
+// pcal_real[0 .. 2*N_bins); getFinalPCal() folds and DFTs it, both linear, so
+// parking one block's accumulator and adding the parked states back in block
+// order reproduces the serial result bit for bit.
+
+size_t PCalExtractorTrivial::getAccumSize() const
+{
+    return (size_t)_cfg->N_bins*2;
+}
+
+bool PCalExtractorTrivial::getAccum(f32 *out, uint64_t *samples)
+{
+    vectorCopy_f32(_cfg->pcal_real, out, _cfg->N_bins*2);
+    *samples = _samplecount;
+    return true;
+}
+
+bool PCalExtractorTrivial::addAccum(const f32 *in, uint64_t samples)
+{
+    vectorAdd_f32_I(in, /*srcdst*/_cfg->pcal_real, _cfg->N_bins*2);
+    _samplecount += samples;
+    return true;
+}
+
+void PCalExtractorTrivial::resetAccum()
+{
+    vectorZero_f32(_cfg->pcal_real, _cfg->N_bins*2);
+    _samplecount = 0;
+}
+
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 // DERIVED CLASS: extraction of PCal signals with non-zero offset via spectral shift
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -798,6 +830,37 @@ uint64_t PCalExtractorShifting::getFinalPCal(cf32* out)
         out[n].im = _cfg->dft_out[idx].im;
     }
     return _samplecount;
+}
+
+// ---- per-block accumulation (fxcorr-f parallel form, see pcal.h) ----
+// The integration state is the linear complex fold-add accumulator
+// pcal_complex[0 .. 2*N_bins); the rotator/rotated buffers are per-block
+// temporaries.  getFinalPCal() folds the two halves and DFTs, both linear, so
+// the block-ordered reduction of the raw accumulators is exact.
+
+size_t PCalExtractorShifting::getAccumSize() const
+{
+    return (size_t)_cfg->N_bins*4;	// 2*N_bins cf32
+}
+
+bool PCalExtractorShifting::getAccum(f32 *out, uint64_t *samples)
+{
+    vectorCopy_cf32(_cfg->pcal_complex, (cf32*)out, _cfg->N_bins*2);
+    *samples = _samplecount;
+    return true;
+}
+
+bool PCalExtractorShifting::addAccum(const f32 *in, uint64_t samples)
+{
+    vectorAdd_cf32_I(/*src*/(const cf32*)in, /*srcdst*/_cfg->pcal_complex, _cfg->N_bins*2);
+    _samplecount += samples;
+    return true;
+}
+
+void PCalExtractorShifting::resetAccum()
+{
+    vectorZero_cf32(_cfg->pcal_complex, _cfg->N_bins*2);
+    _samplecount = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////
@@ -1212,6 +1275,36 @@ uint64_t PCalExtractorImplicitShift::getFinalPCal(cf32* out)
         }
     }
     return _samplecount;
+}
+
+// ---- per-block accumulation (fxcorr-f parallel form, see pcal.h) ----
+// Same linear fold-add state as the trivial extractor; getFinalPCal() applies
+// a real-to-complex pass, one cf32 fold and the DFT -- all linear in
+// pcal_real, so the block-ordered reduction of the raw accumulators is exact.
+
+size_t PCalExtractorImplicitShift::getAccumSize() const
+{
+    return (size_t)_cfg->N_bins*2;
+}
+
+bool PCalExtractorImplicitShift::getAccum(f32 *out, uint64_t *samples)
+{
+    vectorCopy_f32(_cfg->pcal_real, out, _cfg->N_bins*2);
+    *samples = _samplecount;
+    return true;
+}
+
+bool PCalExtractorImplicitShift::addAccum(const f32 *in, uint64_t samples)
+{
+    vectorAdd_f32_I(in, /*srcdst*/_cfg->pcal_real, _cfg->N_bins*2);
+    _samplecount += samples;
+    return true;
+}
+
+void PCalExtractorImplicitShift::resetAccum()
+{
+    vectorZero_f32(_cfg->pcal_real, _cfg->N_bins*2);
+    _samplecount = 0;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
