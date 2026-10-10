@@ -495,10 +495,12 @@ fi
 last=${BATCHES[-1]}
 for i in "${!DSTATION[@]}"; do
 	# 软链落在 raw 根下（Q2）：workdir 里不再散落软链，raw 区整体可在大盘上；
-	# 目标用绝对路径——相对目标跨文件系统会断。多 datastream 站的 DATA TABLE
-	# 每 ds 一行，各链到本 ds 的文件（data-spec 5.2）
+	# 目标用**相对路径**（2026-10-10，data-spec 5.2）：链接与目标同在 raw/ 树内、按链接
+	# 所在目录解析——整树改名/换挂载前缀都不必重建。v5-plan Q2 曾用绝对目标，其理由
+	# "相对目标跨文件系统会断"不成立（那是硬链接的限制；符号链接只是路径字符串）。
+	# 多 datastream 站的 DATA TABLE 每 ds 一行，各链到本 ds 的文件（data-spec 5.2）
 	rel=$(vdifrel "${DSTATION[$i]}" "${DSDI[$i]}" "${DSNDS[$i]}" "$last")
-	ln -sf "$FXCORR_ROOT_RAW/$rel" "$FXCORR_ROOT_RAW/${DSFILE[$i]}"
+	ln -sf "$rel" "$FXCORR_ROOT_RAW/${DSFILE[$i]}"
 done
 if [ "${#BATCHES[@]}" -gt 1 ]; then
 	echo "make_testdata.sh: DATA TABLE links point at batch $last (last of ${#BATCHES[@]})" >&2
