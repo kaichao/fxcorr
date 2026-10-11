@@ -44,6 +44,7 @@ using namespace std;
 // the parallel region, so event writes are serialised by a critical section.
 static bool g_timing = false;
 static bool g_timing_trace = false;
+static bool g_timing_brief = false;
 static FILE *g_timing_out = 0;
 static double g_tt_read, g_tt_swp, g_tt_setup, g_tt_hdr, g_tt_proc, g_tt_reduce,
               g_tt_copy, g_tt_write, g_tt_ac, g_tt_subtail, g_tt_start;
@@ -65,6 +66,51 @@ static inline double epochsec()
 	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
 }
 
+// ---------------------------------------------------------------- timing tiers
+// Three tiers share the 23 STAGE_LAP call sites; only the output path differs
+// (tier comments at the initialisation below):
+//   aggregate -- one summary line at exit, unchanged
+//   brief     -- one TSV row per probe at exit (the table below drives it)
+//   trace     -- every lap buffered in memory, written once at exit
+struct TimingEvent
+{
+	double ts;		// epoch seconds at the lap
+	double dur;		// seconds since the timer's previous lap
+	int tid;
+	int line;
+	const char *file;	// basename of the lap site
+	const char *label;
+};
+static vector<TimingEvent> g_trace_buf;
+
+struct TimingProbe
+{
+	const char *label;
+	const char *file;
+	int line;
+	double *total;		// the matching g_tt_* accumulator
+	double first_ts;	// epoch seconds of the first lap (0 = not seen)
+};
+// order matches the pipeline diagrams in app-fxcorr docs/timing/
+static TimingProbe g_probes[] = {
+	{"init",    "main.cpp", 860, &g_tt_init,    0},
+	{"repl",    "main.cpp", 738, &g_tt_repl,    0},
+	{"read",    "main.cpp", 879, &g_tt_read,    0},
+	{"swp",     "main.cpp", 934, &g_tt_swp,     0},
+	{"setup",   "main.cpp", 958, &g_tt_setup,   0},
+	{"hdr",     "main.cpp", 960, &g_tt_hdr,     0},
+	{"blk",     "main.cpp", 995, &g_tt_blk,     0},
+	{"proc",    "main.cpp", 1019, &g_tt_proc,    0},
+	{"reduce",  "main.cpp", 1089, &g_tt_reduce,  0},
+	{"copy",    "main.cpp", 1130, &g_tt_copy,    0},
+	{"write",   "main.cpp", 1142, &g_tt_write,   0},
+	{"ac",      "main.cpp", 1113, &g_tt_ac,      0},
+	{"subtail", "main.cpp", 1242, &g_tt_subtail, 0},
+	{"fin",     "main.cpp", 1283, &g_tt_fin,     0},
+	{"del",     "main.cpp", 1270, &g_tt_del,     0},
+	{0, 0, 0, 0, 0}
+};
+
 static void timing_event(const char *label, const char *file, int line,
                          double dur, double ts)
 {
@@ -73,9 +119,65 @@ static void timing_event(const char *label, const char *file, int line,
 	int thread = omp_get_thread_num();
 	#pragma omp critical(fxcorr_timing)
 	{
-		fprintf(g_timing_out, "%.6f\tfxcorr-f\t%d\t%d\t%s:%d\t%s\t%.6f\n",
-		        ts, (int)getpid(), thread, base, line, label, dur);
-		fflush(g_timing_out);
+		if(g_timing_trace)
+		{
+			TimingEvent ev;
+			ev.ts = ts;
+			ev.dur = dur;
+			ev.tid = thread;
+			ev.line = line;
+			ev.file = base;
+			ev.label = label;
+			g_trace_buf.push_back(ev);
+		}
+		else if(g_timing_brief)
+		{
+			for(TimingProbe *p = g_probes; p->label != 0; p++)
+				if(strcmp(p->label, label) == 0)
+				{
+					if(p->first_ts == 0.0)
+						p->first_ts = ts;
+					break;
+				}
+		}
+	}
+}
+
+// write the tier's product: brief = one row per probe (first timestamp +
+// accumulated total), trace = the whole buffer.  Called on the normal exit
+// path and from fail(), so an aborted task still leaves its events behind.
+static void timing_finish(void)
+{
+	static bool done = false;
+	if(done || !g_timing)
+		return;
+	done = true;
+	if(g_timing_trace)
+	{
+		for(size_t i=0;i<g_trace_buf.size();i++)
+		{
+			const TimingEvent &e = g_trace_buf[i];
+			fprintf(g_timing_out, "%.6f\tfxcorr-f\t%d\t%d\t%s:%d\t%s\t%.6f\n",
+			        e.ts, (int)getpid(), e.tid, e.file, e.line, e.label, e.dur);
+		}
+		g_trace_buf.clear();
+	}
+	else if(g_timing_brief)
+	{
+		for(TimingProbe *p = g_probes; p->label != 0; p++)
+		{
+			if(p->first_ts == 0.0)
+				continue;	// probe never reached (e.g. aborted early)
+			fprintf(g_timing_out, "%.6f\tfxcorr-f\t%d\t%d\t%s:%d\t%s\t%.6f\n",
+			        p->first_ts, (int)getpid(), 0, p->file, p->line, p->label,
+			        *p->total);
+		}
+	}
+	fflush(g_timing_out);
+	if(g_timing_out != stderr)
+	{
+		fclose(g_timing_out);
+		g_timing_out = stderr;	// harmless default if anything runs on
 	}
 }
 
@@ -95,7 +197,7 @@ struct StageTimer
 		double t = nowsec();
 		double d = t - t0;
 		t0 = t;
-		if(g_timing_trace)
+		if(g_timing_trace || g_timing_brief)
 			timing_event(label, file, line, d, epochsec());
 		return d;
 	}
@@ -117,6 +219,7 @@ static string jobIdentifier(const string &inputfile)
 static int fail(DifxMonitor &monitor, const string &msg)
 {
 	cerr << msg << endl;
+	timing_finish();	// brief rows / trace buffer survive an aborted task
 	monitor.alert(msg, DIFX_ALERT_LEVEL_ERROR);
 	monitor.status(DIFX_STATE_ABORTING, msg, 0.0, 0, 0, 0.0, 0.0);
 	return EXIT_FAILURE;
@@ -381,22 +484,43 @@ int main(int argc, char **argv)
 		if(env == 0 || env[0] == '\0')
 			omp_set_num_threads(1);
 	}
-	// stage timing: any of FXCORR_TIMING=1 / FXCORR_TIMING_FILE /
-	// FXCORR_TIMING_TRACE=1 enables it (see the header block above)
+	// stage timing, three tiers (app-fxcorr docs/timing/design.md):
+	//   1 aggregate: FXCORR_TIMING=1 -- one summary line, unchanged (output
+	//     file via FXCORR_TIMING_FILE)
+	//   2 brief: FXCORR_TIMING_BRIEF=1|<path> -- one TSV row per probe at
+	//     exit, first timestamp + accumulated total (<=20 rows; 1 = stderr,
+	//     a path = that file)
+	//   3 trace: FXCORR_TIMING_TRACE=<path>|1 -- every lap buffered in memory
+	//     and written once at exit; 1 = <workdir>/fxcorr-f-<batch>.timing.tsv
+	// Trace wins over brief wins over aggregate when several are set.
 	{
 		const char *timingenv = getenv("FXCORR_TIMING");
 		const char *fileenv = getenv("FXCORR_TIMING_FILE");
 		const char *traceenv = getenv("FXCORR_TIMING_TRACE");
+		const char *briefenv = getenv("FXCORR_TIMING_BRIEF");
+		bool trace_path = (traceenv != 0 && strchr(traceenv, '/') != 0);
+		bool brief_path = (briefenv != 0 && strchr(briefenv, '/') != 0);
+		g_timing_trace = (traceenv != 0
+		                  && (strcmp(traceenv, "1") == 0 || trace_path));
+		g_timing_brief = (briefenv != 0
+		                  && (strcmp(briefenv, "1") == 0 || brief_path))
+		              && !g_timing_trace;
 		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0)
 		        || (fileenv != 0 && fileenv[0] != '\0')
-		        || (traceenv != 0 && strcmp(traceenv, "1") == 0);
-		g_timing_trace = (traceenv != 0 && strcmp(traceenv, "1") == 0);
+		        || g_timing_trace || g_timing_brief;
 		g_timing_out = stderr;
-		if(g_timing && fileenv != 0 && fileenv[0] != '\0')
+		const char *outpath = 0;
+		if(g_timing_trace && trace_path)
+			outpath = traceenv;
+		else if(g_timing_brief && brief_path)
+			outpath = briefenv;
+		else if(fileenv != 0 && fileenv[0] != '\0')
+			outpath = fileenv;
+		if(g_timing && outpath != 0)
 		{
-			FILE *f = fopen(fileenv, "a");
+			FILE *f = fopen(outpath, "a");
 			if(f == 0)
-				cerr << "fxcorr-f: cannot open timing file " << fileenv << ", using stderr" << endl;
+				cerr << "fxcorr-f: cannot open timing file " << outpath << ", using stderr" << endl;
 			else
 				g_timing_out = f;
 		}
@@ -410,6 +534,18 @@ int main(int argc, char **argv)
 		workdir = wd;
 	if(argc > 3)
 		workdir = argv[3];	// argument takes precedence over the environment
+
+	// FXCORR_TIMING_TRACE=1 without a path: name the trace dump after the
+	// workdir and batch, which are only known here
+	if(g_timing_trace && g_timing_out == stderr)
+	{
+		string tp = workdir + "/fxcorr-f-" + batchid + ".timing.tsv";
+		FILE *f = fopen(tp.c_str(), "a");
+		if(f != 0)
+			g_timing_out = f;
+		else
+			cerr << "fxcorr-f: cannot open timing file " << tp << ", using stderr" << endl;
+	}
 	// hand the resolved workdir to the shared root resolver (V5 P5): the
 	// library opens .input/.calc/.im paths through it, so every relative path
 	// in the config set lands on the same roots this tool uses below
@@ -1153,19 +1289,23 @@ int main(int argc, char **argv)
 
 	if(g_timing)
 	{
-		// parallel stages are sums over threads (CPU-seconds; divide by
-		// nthreads for the per-thread view), the rest are wall seconds of the
-		// single serial stream
-		double total = nowsec() - g_tt_start;
-		fprintf(g_timing_out,
-		        "TIMING fxcorr-f batch=%s station=%s ds=%d nthreads=%d nsubints=%d"
-		        " total=%g init=%g repl=%g blk=%g read=%g swp=%g setup=%g hdr=%g"
-		        " proc=%g reduce=%g copy=%g write=%g ac=%g subtail=%g fin=%g del=%g\n",
-		        batchid.c_str(), station.c_str(), dsarg, nthreads, nsubints, total,
-		        g_tt_init, g_tt_repl, g_tt_blk, g_tt_read, g_tt_swp, g_tt_setup,
-		        g_tt_hdr, g_tt_proc, g_tt_reduce, g_tt_copy, g_tt_write, g_tt_ac,
-		        g_tt_subtail, g_tt_fin, g_tt_del);
-		fflush(g_timing_out);
+		if(!g_timing_trace && !g_timing_brief)
+		{
+			// parallel stages are sums over threads (CPU-seconds; divide by
+			// nthreads for the per-thread view), the rest are wall seconds of
+			// the single serial stream
+			double total = nowsec() - g_tt_start;
+			fprintf(g_timing_out,
+			        "TIMING fxcorr-f batch=%s station=%s ds=%d nthreads=%d nsubints=%d"
+			        " total=%g init=%g repl=%g blk=%g read=%g swp=%g setup=%g hdr=%g"
+			        " proc=%g reduce=%g copy=%g write=%g ac=%g subtail=%g fin=%g del=%g\n",
+			        batchid.c_str(), station.c_str(), dsarg, nthreads, nsubints, total,
+			        g_tt_init, g_tt_repl, g_tt_blk, g_tt_read, g_tt_swp, g_tt_setup,
+			        g_tt_hdr, g_tt_proc, g_tt_reduce, g_tt_copy, g_tt_write, g_tt_ac,
+			        g_tt_subtail, g_tt_fin, g_tt_del);
+			fflush(g_timing_out);
+		}
+		timing_finish();	// brief rows / trace buffer
 	}
 
 	return EXIT_SUCCESS;
