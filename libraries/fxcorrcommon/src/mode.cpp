@@ -676,6 +676,14 @@ float Mode::unpack(int sampleoffset, int subloopindex)
   return 1.0;
 }
 
+// gcc 11's -O2 (the build default) does not auto-vectorise; the per-channel
+// loops below are element-wise complex ops through the inline generic*
+// helpers (architecture.h), so this one function gets -O3.  Deliberately no
+// -march/-ffast-math: the vectorisation stays SSE2 (x86-64 baseline) with no
+// FMA contraction, every element is rounded exactly as in the -O2 build, and
+// the products stay bit-identical (checked against the OMP=1 reference in
+// fxcorr-f's four-station runs).
+__attribute__((optimize("O3")))
 void Mode::process(int index, int subloopindex)  //frac sample error is in microseconds
 {
   // slot for the per-block accumulators (no-op when they are off); index is

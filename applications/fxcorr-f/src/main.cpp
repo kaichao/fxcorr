@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <sys/stat.h>
+#include <unistd.h>	// getpid (timing event lines)
 
 #include <fxcorrcommon/configuration.h>
 #include <fxcorrcommon/mode.h>
@@ -27,12 +28,23 @@
 
 using namespace std;
 
-// ---- stage timing (FXCORR_TIMING=1; measurement only, no behaviour change) ----
-// Accumulates per-stage wall-clock times and prints one TIMING line at exit,
-// for sizing the serial and parallel parts of the subint loop.  Off by default:
-// every nowsec() call is then skipped, so an instrumented build does the same
-// work as an uninstrumented one (use it for the OMP 1-vs-N comparisons too).
+// ---- stage timing (FXCORR_TIMING; measurement only, no behaviour change) ----
+// Three switches, all off by default (every nowsec() call is then skipped, so
+// an instrumented build does the same work as an uninstrumented one):
+//
+//   FXCORR_TIMING=1            enable; one aggregate TIMING line at exit
+//   FXCORR_TIMING_FILE=<path>  send the output to <path> (appended) instead
+//                              of stderr; setting it alone also enables
+//   FXCORR_TIMING_TRACE=1      also write one TSV event line per completed
+//                              stage (enables the timer too):
+//     <epoch sec>\t<prog>\t<pid>\t<thread>\t<file:line>\t<label>\t<sec>
+//
+// The aggregate line is the production form (per-stage totals); the event
+// lines are for debugging and detailed optimisation.  Workers lap from inside
+// the parallel region, so event writes are serialised by a critical section.
 static bool g_timing = false;
+static bool g_timing_trace = false;
+static FILE *g_timing_out = 0;
 static double g_tt_read, g_tt_swp, g_tt_setup, g_tt_hdr, g_tt_proc, g_tt_reduce,
               g_tt_copy, g_tt_write, g_tt_ac, g_tt_subtail, g_tt_start;
 static double g_tt_init, g_tt_repl, g_tt_blk, g_tt_fin, g_tt_del;
@@ -44,19 +56,47 @@ static inline double nowsec()
 	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
 }
 
-// lap() returns the seconds since construction (or the previous lap) and
-// returns 0 when timing is off
+// wall clock for the event timestamps: they must be comparable across
+// processes, so epoch seconds, not the monotonic clock the durations use
+static inline double epochsec()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
+}
+
+static void timing_event(const char *label, const char *file, int line,
+                         double dur, double ts)
+{
+	const char *base = strrchr(file, '/');
+	base = (base != 0) ? base+1 : file;
+	int thread = omp_get_thread_num();
+	#pragma omp critical(fxcorr_timing)
+	{
+		fprintf(g_timing_out, "%.6f\tfxcorr-f\t%d\t%d\t%s:%d\t%s\t%.6f\n",
+		        ts, (int)getpid(), thread, base, line, label, dur);
+		fflush(g_timing_out);
+	}
+}
+
+// STAGE_LAP(timer, label): the one lap form -- returns the seconds since the
+// timer's construction (or previous lap); with tracing on it also writes one
+// event line, and label + __FILE__:__LINE__ name the step in both outputs
+#define STAGE_LAP(timer, label) (timer).lap(label, __FILE__, __LINE__)
+
 struct StageTimer
 {
 	double t0;
 	StageTimer() : t0(g_timing ? nowsec() : 0.0) {}
-	double lap()
+	double lap(const char *label, const char *file, int line)
 	{
 		if(!g_timing)
 			return 0.0;
 		double t = nowsec();
 		double d = t - t0;
 		t0 = t;
+		if(g_timing_trace)
+			timing_event(label, file, line, d, epochsec());
 		return d;
 	}
 };
@@ -341,10 +381,25 @@ int main(int argc, char **argv)
 		if(env == 0 || env[0] == '\0')
 			omp_set_num_threads(1);
 	}
-	// stage timing (FXCORR_TIMING=1)
+	// stage timing: any of FXCORR_TIMING=1 / FXCORR_TIMING_FILE /
+	// FXCORR_TIMING_TRACE=1 enables it (see the header block above)
 	{
 		const char *timingenv = getenv("FXCORR_TIMING");
-		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0);
+		const char *fileenv = getenv("FXCORR_TIMING_FILE");
+		const char *traceenv = getenv("FXCORR_TIMING_TRACE");
+		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0)
+		        || (fileenv != 0 && fileenv[0] != '\0')
+		        || (traceenv != 0 && strcmp(traceenv, "1") == 0);
+		g_timing_trace = (traceenv != 0 && strcmp(traceenv, "1") == 0);
+		g_timing_out = stderr;
+		if(g_timing && fileenv != 0 && fileenv[0] != '\0')
+		{
+			FILE *f = fopen(fileenv, "a");
+			if(f == 0)
+				cerr << "fxcorr-f: cannot open timing file " << fileenv << ", using stderr" << endl;
+			else
+				g_timing_out = f;
+		}
 		if(g_timing)
 			g_tt_start = nowsec();
 	}
@@ -544,7 +599,7 @@ int main(int argc, char **argv)
 		m->setDumpKurtosis(dokurtosis);
 		replicas.push_back(m);
 	}
-	g_tt_repl += tr.lap();
+	g_tt_repl += STAGE_LAP(tr, "repl");
 
 	// P3: per-block accumulators on every Mode, the primary included (it is
 	// worker 0).  Each block's autocorrelation and weight land in their own
@@ -552,25 +607,21 @@ int main(int argc, char **argv)
 	// serial accumulation sequence -- instead of summing per-thread segment
 	// totals, which reorders the floating point additions.  Cost: ~21 MB per
 	// Mode for a 1310-block, 8-band, 128-channel, dual-polarisation config.
-	StageTimer tb;
 	// the per-block slots are the base of the reduction below, so they are
 	// allocated at every thread count (the serial run reduces its own block
 	// slots back in block order -- numerically identical to the direct
 	// accumulation, and it keeps the reduce code on one path).  Each Mode
 	// only gets the slots of the stretch its thread will process -- the
 	// per-thread share of the subint plus slack for the per-fftloop rounding
-	// (setBlockSlotBase in the parallel region maps blocks onto slots).  At
-	// 32000 blocks the full allocation costs ~0.5 s of first-touch page
-	// faults per replica, so this is what keeps the thread count useful.
+	// (setBlockSlotBase below maps blocks onto slots).  The allocation itself
+	// runs inside the parallel region, one thread per Mode, so its page-fault
+	// cost (0.8 s serially at 32000 blocks) lands on the team too.
+	int slotcount;
 	{
 		int bps = config.getBlocksPerSend(0);
 		int nbuf = config.getNumBufferedFFTs(0);
-		int slotcount = (bps + nthreads - 1)/nthreads + (bps + nbuf - 1)/nbuf + 8;
-		mode->enableBlockAccumulators(slotcount);
-		for(size_t rt=0;rt<replicas.size();rt++)
-			replicas[rt]->enableBlockAccumulators(slotcount);
+		slotcount = (bps + nthreads - 1)/nthreads + (bps + nbuf - 1)/nbuf + 8;
 	}
-	g_tt_blk += tb.lap();
 
 	// autocorrelation averaging batch, same formula as core.cpp:769-783
 	int numbufferedffts = config.getNumBufferedFFTs(0);
@@ -670,7 +721,7 @@ int main(int argc, char **argv)
 		return fail(monitor, oss.str());
 	}
 	long long batchstartabsns = (long long)batchstartsec*1000000000LL + (long long)batchstartns;
-	g_tt_init += ti.lap();
+	g_tt_init += STAGE_LAP(ti, "init");
 
 	for(int s=0;s<nsubints;s++)
 	{
@@ -689,7 +740,7 @@ int main(int argc, char **argv)
 		StageTimer st;
 		int datasec = 0, datans = 0;
 		int bytes = reader.readSubint(scan, offsetsec, offsetns, databuf, sendbytes, &datasec, &datans);
-		g_tt_read += st.lap();
+		g_tt_read += STAGE_LAP(st, "read");
 
 		// P6: accumulate subint bytes into datasegment-sized blocks and feed
 		// the switched power detector (vdiffile.cpp:945-964).  Subint reads
@@ -744,7 +795,7 @@ int main(int argc, char **argv)
 		// P1: input datarate diagnostics, upstream datastream.cpp:631-634
 		monitor.diagnosticDataConsumed(bytes);
 		monitor.diagnosticInputDatarate((double)bytes / ((double)subintns/1.0e9));
-		g_tt_swp += st.lap();
+		g_tt_swp += STAGE_LAP(st, "swp");
 
 		mode->zeroAutocorrelations();
 		if(dokurtosis)
@@ -768,9 +819,9 @@ int main(int argc, char **argv)
 				m->resetpcal();
 		}
 
-		g_tt_setup += st.lap();
+		g_tt_setup += STAGE_LAP(st, "setup");
 		writer.writeSubintHeader(scan, offsetsec, offsetns, mode, validflags);
-		g_tt_hdr += st.lap();
+		g_tt_hdr += STAGE_LAP(st, "hdr");
 
 		// same loop structure as core.cpp:786-801: buffered slot reuse over fftloops
 		int fftloops = (blockspersend + numbufferedffts - 1)/numbufferedffts;
@@ -798,6 +849,19 @@ int main(int argc, char **argv)
 			double t_proc_l = 0.0, t_reduce_l = 0.0, t_copy_l = 0.0, t_write_l = 0.0, t_ac_l = 0.0;
 			int localbase = 0;	// slots this thread has used so far
 
+			// allocate this Mode's per-block slots (idempotent, the first
+			// subint does the work).  The barrier publishes every Mode's
+			// slots to the cross-Mode reduction below before it reads them.
+			double t_blk_l;
+			{
+				StageTimer ta;
+				m->enableBlockAccumulators(slotcount);
+				t_blk_l = STAGE_LAP(ta, "blk");
+			}
+			#pragma omp atomic
+			g_tt_blk += t_blk_l;
+			#pragma omp barrier
+
 			for(int fftloop=0;fftloop<fftloops;fftloop++)
 			{
 				int numffts = blockspersend - fftloop*numbufferedffts;
@@ -816,7 +880,7 @@ int main(int argc, char **argv)
 						int i = fftloop*numbufferedffts + b;
 						m->process(i, b);
 					}
-					t_proc_l += ts.lap();
+					t_proc_l += STAGE_LAP(ts, "proc");
 				}
 				localbase += bend - bstart;
 				#pragma omp barrier
@@ -886,7 +950,7 @@ int main(int argc, char **argv)
 							}
 						}
 					}
-					t_reduce_l += ts.lap();
+					t_reduce_l += STAGE_LAP(ts, "reduce");
 				}
 				if(t == 0)
 				{
@@ -910,7 +974,7 @@ int main(int argc, char **argv)
 							}
 						}
 					}
-					t_ac_l += ts.lap();
+					t_ac_l += STAGE_LAP(ts, "ac");
 				}
 				else
 				{
@@ -927,7 +991,7 @@ int main(int argc, char **argv)
 							mode->setDataWeight(j, b, m->getDataWeight(j, b));
 						}
 					}
-					t_copy_l += ts.lap();
+					t_copy_l += STAGE_LAP(ts, "copy");
 				}
 				#pragma omp barrier
 
@@ -939,7 +1003,7 @@ int main(int argc, char **argv)
 					StageTimer ts;
 					for(int j=t;j<nrecordedbands;j+=nthreads)
 						writer.writeSpectraBand(j, fftloop, mode);
-					t_write_l += ts.lap();
+					t_write_l += STAGE_LAP(ts, "write");
 				}
 
 				if(t == 0)
@@ -974,7 +1038,7 @@ int main(int argc, char **argv)
 					for(int wt=0;wt<nthreads;wt++)
 						slotbase[wt] += (int)((long long)(wt+1)*numffts/nthreads)
 						              - (int)((long long)wt*numffts/nthreads);
-					t_ac_l += ts.lap();
+					t_ac_l += STAGE_LAP(ts, "ac");
 				}
 				else
 				{
@@ -987,7 +1051,7 @@ int main(int argc, char **argv)
 						m->zeroKurtosis();
 					if(haspcal)
 						m->resetpcal();
-					t_copy_l += ts.lap();
+					t_copy_l += STAGE_LAP(ts, "copy");
 				}
 				#pragma omp barrier
 			}
@@ -1039,7 +1103,7 @@ int main(int argc, char **argv)
 		if(dokurtosis)
 			sendKurtosis(&monitor, config, 0, dsindex, mode, scan, scanstartsec, offsetsec, offsetns,
 			             (blockspersend/2.0)*blockns, (double)blockspersend*blockns, blockspersend, config.getJobName());
-		g_tt_subtail += st2.lap();
+		g_tt_subtail += STAGE_LAP(st2, "subtail");
 	}
 
 	if(haspcal)
@@ -1067,7 +1131,7 @@ int main(int argc, char **argv)
 		delete mode;
 		for(Mode *m : replicas)
 			delete m;
-		g_tt_del += td.lap();
+		g_tt_del += STAGE_LAP(td, "del");
 	}
 
 	// Products must be on disk before this task calls itself done: a full
@@ -1080,7 +1144,7 @@ int main(int argc, char **argv)
 		StageTimer tf;
 		if(!writer.finalise())
 			return fail(monitor, "fxcorr-f: station products for batch " + batchid + " are incomplete (see above)");
-		g_tt_fin += tf.lap();
+		g_tt_fin += STAGE_LAP(tf, "fin");
 	}
 
 	// upstream ending sequence (fxmanager.cpp terminate/DONE): Ending then Done
@@ -1093,25 +1157,15 @@ int main(int argc, char **argv)
 		// nthreads for the per-thread view), the rest are wall seconds of the
 		// single serial stream
 		double total = nowsec() - g_tt_start;
-		cerr << "TIMING fxcorr-f"
-		     << " batch=" << batchid << " station=" << station << " ds=" << dsarg
-		     << " nthreads=" << nthreads << " nsubints=" << nsubints
-		     << " total=" << total
-		     << " init=" << g_tt_init
-		     << " repl=" << g_tt_repl
-		     << " blk=" << g_tt_blk
-		     << " read=" << g_tt_read
-		     << " swp=" << g_tt_swp
-		     << " setup=" << g_tt_setup
-		     << " hdr=" << g_tt_hdr
-		     << " proc=" << g_tt_proc
-		     << " reduce=" << g_tt_reduce
-		     << " copy=" << g_tt_copy
-		     << " write=" << g_tt_write
-		     << " ac=" << g_tt_ac
-		     << " subtail=" << g_tt_subtail
-		     << " fin=" << g_tt_fin
-		     << " del=" << g_tt_del << endl;
+		fprintf(g_timing_out,
+		        "TIMING fxcorr-f batch=%s station=%s ds=%d nthreads=%d nsubints=%d"
+		        " total=%g init=%g repl=%g blk=%g read=%g swp=%g setup=%g hdr=%g"
+		        " proc=%g reduce=%g copy=%g write=%g ac=%g subtail=%g fin=%g del=%g\n",
+		        batchid.c_str(), station.c_str(), dsarg, nthreads, nsubints, total,
+		        g_tt_init, g_tt_repl, g_tt_blk, g_tt_read, g_tt_swp, g_tt_setup,
+		        g_tt_hdr, g_tt_proc, g_tt_reduce, g_tt_copy, g_tt_write, g_tt_ac,
+		        g_tt_subtail, g_tt_fin, g_tt_del);
+		fflush(g_timing_out);
 	}
 
 	return EXIT_SUCCESS;

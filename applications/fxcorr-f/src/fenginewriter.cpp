@@ -8,6 +8,8 @@
 #include <fxcorrcommon/mpifxcorr.h>	// FLAGS_PER_INT
 #include <fxcorrcommon/architecture.h>	// cf32, f32
 
+#include "ompcompat.h"
+
 using namespace std;
 
 // .sp / pcal.bin / autocorr.bin file layouts follow fxcorr/data-spec.md 5.3
@@ -126,14 +128,23 @@ bool FEngineWriter::finalise()
 {
 	bool ok = true;
 
+	// The band files are independent of one another and each close can block
+	// on the writeback of its own 131 MB (measured: 0.8 s for the serial loop
+	// on a busy page cache), so the closes run on the team.  The error flags
+	// are collected and ok is cleared outside the parallel region.
+	vector<char> closeok(nrecordedbands, 1);
+	#pragma omp parallel for schedule(dynamic)
 	for(int j=0;j<nrecordedbands;j++)
 	{
 		if(spfiles[j] == NULL)
 			continue;
 		if(!closeChecked(spfiles[j], spnames[j]))
-			ok = false;
+			closeok[j] = 0;
 		spfiles[j] = NULL;	// the dtor must not close it a second time
 	}
+	for(int j=0;j<nrecordedbands;j++)
+		if(!closeok[j])
+			ok = false;
 	if(pcalfile != NULL)
 	{
 		if(!closeChecked(pcalfile, outdir + "/pcal.bin"))

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
+#include <unistd.h>	// getpid (timing event lines)
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -28,10 +29,17 @@
 
 using namespace std;
 
-// ---- stage timing (FXCORR_TIMING=1; measurement only, no behaviour change) ----
-// Same instrument as fxcorr-f: per-stage wall-clock accumulators, one TIMING
-// line at exit; every nowsec() call is skipped when the switch is off.
+// ---- stage timing (FXCORR_TIMING; measurement only, no behaviour change) ----
+// Same instrument as fxcorr-f (see its main.cpp for the full comment):
+// FXCORR_TIMING=1 aggregates one TIMING line at exit, FXCORR_TIMING_FILE=<path>
+// sends the output there instead of stderr, FXCORR_TIMING_TRACE=1 adds one
+// TSV event line per completed stage
+//   <epoch sec>\t<prog>\t<pid>\t<thread>\t<file:line>\t<label>\t<sec>
+// Setting any of the three enables the timer; every nowsec() call is skipped
+// when it is off.
 static bool g_timing = false;
+static bool g_timing_trace = false;
+static FILE *g_timing_out = 0;
 static double g_tt_read, g_tt_zero, g_tt_xmac, g_tt_wacc, g_tt_uvshift, g_tt_cbw,
               g_tt_auto, g_tt_addsub, g_tt_start;
 
@@ -42,17 +50,47 @@ static inline double nowsec()
 	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
 }
 
+// wall clock for the event timestamps: they must be comparable across
+// processes, so epoch seconds, not the monotonic clock the durations use
+static inline double epochsec()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
+}
+
+static void timing_event(const char *label, const char *file, int line,
+                         double dur, double ts)
+{
+	const char *base = strrchr(file, '/');
+	base = (base != 0) ? base+1 : file;
+	int thread = omp_get_thread_num();
+	#pragma omp critical(fxcorr_timing)
+	{
+		fprintf(g_timing_out, "%.6f\tfxcorr-x\t%d\t%d\t%s:%d\t%s\t%.6f\n",
+		        ts, (int)getpid(), thread, base, line, label, dur);
+		fflush(g_timing_out);
+	}
+}
+
+// STAGE_LAP(timer, label): the one lap form -- returns the seconds since the
+// timer's construction (or previous lap); with tracing on it also writes one
+// event line, and label + __FILE__:__LINE__ name the step in both outputs
+#define STAGE_LAP(timer, label) (timer).lap(label, __FILE__, __LINE__)
+
 struct StageTimer
 {
 	double t0;
 	StageTimer() : t0(g_timing ? nowsec() : 0.0) {}
-	double lap()
+	double lap(const char *label, const char *file, int line)
 	{
 		if(!g_timing)
 			return 0.0;
 		double t = nowsec();
 		double d = t - t0;
 		t0 = t;
+		if(g_timing_trace)
+			timing_event(label, file, line, d, epochsec());
 		return d;
 	}
 };
@@ -771,10 +809,25 @@ int main(int argc, char **argv)
 		if(env == 0 || env[0] == '\0')
 			omp_set_num_threads(1);
 	}
-	// stage timing (FXCORR_TIMING=1)
+	// stage timing: any of FXCORR_TIMING=1 / FXCORR_TIMING_FILE /
+	// FXCORR_TIMING_TRACE=1 enables it (see the header block above)
 	{
 		const char *timingenv = getenv("FXCORR_TIMING");
-		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0);
+		const char *fileenv = getenv("FXCORR_TIMING_FILE");
+		const char *traceenv = getenv("FXCORR_TIMING_TRACE");
+		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0)
+		        || (fileenv != 0 && fileenv[0] != '\0')
+		        || (traceenv != 0 && strcmp(traceenv, "1") == 0);
+		g_timing_trace = (traceenv != 0 && strcmp(traceenv, "1") == 0);
+		g_timing_out = stderr;
+		if(g_timing && fileenv != 0 && fileenv[0] != '\0')
+		{
+			FILE *f = fopen(fileenv, "a");
+			if(f == 0)
+				cerr << "fxcorr-x: cannot open timing file " << fileenv << ", using stderr" << endl;
+			else
+				g_timing_out = f;
+		}
 		if(g_timing)
 			g_tt_start = nowsec();
 	}
@@ -1389,11 +1442,11 @@ int main(int argc, char **argv)
 			validblocks += localvalid;
 		}
 
-		g_tt_read += st.lap();
+		g_tt_read += STAGE_LAP(st, "read");
 		// zero the per-subint accumulation (threadcrosscorrs, baselineweights, results)
 		xmac.zeroSubint();
 		vectorZero_cf32(subintresults, coreresultlength);
-		g_tt_zero += st.lap();
+		g_tt_zero += STAGE_LAP(st, "zero");
 
 		// XMAC + uvshift/average, batched exactly like core.cpp:786-1057
 		int xcblockcount = 0, xcshiftcount = 0;
@@ -1406,9 +1459,9 @@ int main(int argc, char **argv)
 			{
 				StageTimer tx;
 				xmac.xmacBatch(fftloop, readers, currentpolyco);
-				g_tt_xmac += tx.lap();
+				g_tt_xmac += STAGE_LAP(tx, "xmac");
 				xmac.accumulateWeights(fftloop, readers);
-				g_tt_wacc += tx.lap();
+				g_tt_wacc += STAGE_LAP(tx, "wacc");
 			}
 			xcblockcount += numffts;
 			if(xcblockcount == maxxcblocks)
@@ -1416,7 +1469,7 @@ int main(int argc, char **argv)
 				double nsoffset = (xcshiftcount*maxxcblocks + ((double)maxxcblocks)/2.0)*blockns;
 				StageTimer tu;
 				xmac.uvshiftAndAverage(offsetsec, nsoffset, maxxcblocks*blockns, currentpolyco, subintresults);
-				g_tt_uvshift += tu.lap();
+				g_tt_uvshift += STAGE_LAP(tu, "uvshift");
 				xcblockcount = 0;
 				xcshiftcount++;
 			}
@@ -1426,28 +1479,28 @@ int main(int argc, char **argv)
 			double nsoffset = (xcshiftcount*maxxcblocks + ((double)xcblockcount)/2.0)*blockns;
 			StageTimer tu;
 			xmac.uvshiftAndAverage(offsetsec, nsoffset, xcblockcount*blockns, currentpolyco, subintresults);
-			g_tt_uvshift += tu.lap();
+			g_tt_uvshift += STAGE_LAP(tu, "uvshift");
 		}
 
 		// baseline weights -> floatresults section (core.cpp:1065-1107, no locks)
 		{
 			StageTimer tc;
 			xmac.copyBaselineWeights((f32*)subintresults);
-			g_tt_cbw += tc.lap();
+			g_tt_cbw += STAGE_LAP(tc, "cbw");
 		}
 
 		// autocorrelations come from autocorr.bin (one record per subint)
 		{
 			StageTimer ta;
 			integrator.addAutocorrs(s, autocorrFiles, subintresults);
-			g_tt_auto += ta.lap();
+			g_tt_auto += STAGE_LAP(ta, "auto");
 		}
 
 		{
 			StageTimer ts;
 			if(integrator.addSubint(subintresults))
 				integrationswritten++;
-			g_tt_addsub += ts.lap();
+			g_tt_addsub += STAGE_LAP(ts, "addsub");
 		}
 	}
 
@@ -1518,20 +1571,15 @@ int main(int argc, char **argv)
 	if(g_timing && !merge)
 	{
 		double total = nowsec() - g_tt_start;
-		cerr << "TIMING fxcorr-x"
-		     << " batch=" << batchid
-		     << " dsgroup=" << (sharded ? to_string(dsgroup) : string("all"))
-		     << " nthreads=" << omp_get_max_threads()
-		     << " nsubints=" << nsubints
-		     << " total=" << total
-		     << " read=" << g_tt_read
-		     << " zero=" << g_tt_zero
-		     << " xmac=" << g_tt_xmac
-		     << " wacc=" << g_tt_wacc
-		     << " uvshift=" << g_tt_uvshift
-		     << " cbw=" << g_tt_cbw
-		     << " auto=" << g_tt_auto
-		     << " addsub=" << g_tt_addsub << endl;
+		fprintf(g_timing_out,
+		        "TIMING fxcorr-x batch=%s dsgroup=%s nthreads=%d nsubints=%d"
+		        " total=%g read=%g zero=%g xmac=%g wacc=%g uvshift=%g cbw=%g"
+		        " auto=%g addsub=%g\n",
+		        batchid.c_str(), (sharded ? to_string(dsgroup) : string("all")).c_str(),
+		        omp_get_max_threads(), nsubints, total,
+		        g_tt_read, g_tt_zero, g_tt_xmac, g_tt_wacc, g_tt_uvshift,
+		        g_tt_cbw, g_tt_auto, g_tt_addsub);
+		fflush(g_timing_out);
 	}
 
 	return EXIT_SUCCESS;

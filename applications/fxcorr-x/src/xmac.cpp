@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
 
 using namespace std;
@@ -289,6 +290,13 @@ void XmacEngine::zeroSubint()
 	}
 }
 
+// gcc 11's -O2 (the build default) does not auto-vectorise; the inner loops
+// here are element-wise complex multiply-adds -- pure throughput work -- so
+// this one function gets -O3.  Deliberately no -march/-ffast-math: the
+// vectorisation stays SSE2 (the x86-64 baseline) with no FMA contraction,
+// every element is rounded exactly as in the -O2 build, and the products
+// stay bit-identical (checked against the SWIN reference).
+__attribute__((optimize("O3")))
 void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &readers, Polyco *currentpolyco)
 {
 	// if necessary, work out the pulsar bins (core.cpp:803-812).  The FFT
@@ -473,6 +481,8 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 	}
 }
 
+// same -O3 rationale as xmacBatch above (element-wise loops, SSE2 baseline)
+__attribute__((optimize("O3")))
 void XmacEngine::accumulateWeights(int fftloop, const vector<vector<SpReader *> > &readers)
 {
 	if(pulsarbin)
