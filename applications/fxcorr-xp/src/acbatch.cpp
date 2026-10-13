@@ -40,13 +40,15 @@ AcBatchCollector::AcBatchCollector(Configuration *conf, int confindex, int ds) :
 	hascrosspol = config->writeAutoCorrs(configindex) && config->getMaxProducts() > 2;
 }
 
-AutocorrBatch AcBatchCollector::collect(Mode *mode)
+AutocorrBatch AcBatchCollector::collect(Mode *mode, bool datastreamsaveraged)
 {
 	AutocorrBatch b;
 
 	// fxcorr-f averaged the spectra in frequency first (writeAutocorrelationBatch);
-	// v9 has no STA, so the datastreamsaveraged pre-average case (P9) cannot occur
-	mode->averageFrequency();
+	// P9: an STA dump above the post-average channel count pre-averages and the
+	// average step here must then be skipped (core.cpp:1263-1268)
+	if(!datastreamsaveraged)
+		mode->averageFrequency();
 
 	// parallel section, in the results layout's total-band order
 	b.w.resize(ntotalbands);

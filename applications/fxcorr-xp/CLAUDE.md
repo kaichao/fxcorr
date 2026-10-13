@@ -1,7 +1,8 @@
 # fxcorr-xp 目录说明
 
-**最后更新**：2026-10-13（**新建**——v9 链的 core 侧；设计见 `fxcorr/v9-plan.md`，
-阶段 1 判据 3/5 已实测通过）
+**最后更新**：2026-10-13（**阶段 2 完成**——STA/kurtosis 移植、zoom/crosspol 验证、
+ds 级并行位一致、判据 4/6/7 实测通过；**修复 crosspol 的 readsection 越界崩**（见
+"关键实现要点"）。阶段 1（判据 3/5）同日早些时候完成；设计见 `fxcorr/v9-plan.md`）
 
 v9 链的站级+基线一体化工具（**x′**）：无 MPI，从 fxcorr-x 生长而来并**并入站级栈**。
 每个 datastream 一个 `Mode`，数据来自 fxcorr-fp 的 **`stream.bin`**（1× 时间槽排布数据，
@@ -32,16 +33,16 @@ fxcorr-xp merge --experiment [workdir]         # 实验级归并 → SWIN（唯�
   同幂等语义，原来由 fxcorr-f 写（v9-plan D6/D7）。`autocorr.bin` 与 `band_XX.sp`
   **取消**（谱与自相关在内存直取）。
 - **挡掉的配置**（启动即报错，不静默；v9-plan D11）：多相位中心、pulsar binning、
-  相位阵（阶段 2 后补）；`FXCORR_STA` / `FXCORR_KURTOSIS` 置位同样报错（STA/kurtosis
-  的发送端从 f 搬来、阶段 2 移植）。zoom 与 crosspol 的代码已完整搬入（MemReader
-  切片语义 / ac 记录 crosspol 段），阶段 2 专项验证。
+  相位阵（按需后补）。**`FXCORR_STA` / `FXCORR_KURTOSIS` 已支持**（阶段 2 从 f 移植；
+  语义与 f 一致，含 P9 的 STA 前平均分支；见"关键实现要点"）。zoom 与 crosspol 已
+  验证（判据 4 逐字节，见测试节）。
 - `FXCORR_LOGLEVEL` 同 fxcorr-x（log.h 为拷贝，改一处必须同步另一处）。
 
 ## 文件与来源对照
 
 | 本目录 | 作用 | 来源 |
 |---|---|---|
-| main.cpp | 命令形态 / batch.json / 根解析 / merge 两子命令（**未改**）、挡掉项、站级阶段 + XMAC 阶段主循环、三档时间戳（采集点 station/read/zero/xmac/wacc/uvshift/cbw/auto/addsub，TSV prog 列 = `fxcorr-xp`） | 从 fxcorr-x/main.cpp 生长：删 beam 分支（相位阵挡掉）、删 `.sp` reader 构造与并行读段；新增站级阶段（见下）与产物收尾 |
+| main.cpp | 命令形态 / batch.json / 根解析 / merge 两子命令（**未改**）、挡掉项、站级阶段 + XMAC 阶段主循环、`sendSTA`/`sendKurtosis`（阶段 2 从 f 逐字拷入）、三档时间戳（采集点 station/read/zero/xmac/wacc/uvshift/cbw/auto/addsub，TSV prog 列 = `fxcorr-xp`） | 从 fxcorr-x/main.cpp 生长：删 beam 分支（相位阵挡掉）、删 `.sp` reader 构造与并行读段；新增站级阶段（见下）与产物收尾 |
 | spreader.h | **纯接口**（`SpReader`：`numChannels/spectra/weights` 三个虚方法 + 虚析构） | 从 fxcorr-x/src/spreader.{h,cpp} 改造：文件读实现删除，只留 XmacEngine 实际调用的接口面——**xmac.cpp 因此一行未改** |
 | memreader.{h,cpp} | `MemReader : SpReader`——一个 (ds, total band) 的谱视图，从 Mode 的槽直取 | 新写（对应 fxcorr-x 的 SpReader 文件读；带宽/槽语义与 f 的 `writeSpectraBand` 一致） |
 | streamreader.{h,cpp} | `stream.bin` 顺序读：header 校验 + 每 subint 定长 record（status/validbytes/时间戳/flags/data） | 新写；格式 = fxcorr-fp StreamWriter 的镜像（两处 static_assert 定长） |
@@ -80,8 +81,26 @@ fxcorr-xp merge --experiment [workdir]         # 实验级归并 → SWIN（唯�
 `copyBaselineWeights`）是 x 现役代码原样，在每个 subint 的站级阶段**之后**串行执行；
 `addAutocorrs` 消费本 subint 的 `acrecords`。
 
+### STA / kurtosis（阶段 2 移植）
+
+- `sendSTA`/`sendKurtosis` 与 fxcorr-f 逐字相同；**站级阶段从 ds 并行区内调用**，
+  因此调用点带 `#pragma omp critical(fxcorr_sta)`（f 只在 t=0 调、无并发；staSend
+  在 container 模式下自带 fopen/fclose，并发调用需序列化）。container 模式的
+  `.sta` 落盘路径 = `meta/difxmsg/<exp>_<batch>.sta`（manager 角色无站后缀；f 是
+  `<exp>_<batch>_<station>.sta`）。
+- P9 的**预平均分支**：`minpostavfreqchannels >= STADumpChannels` 时 STA 前先
+  `averageFrequency()`，`AcBatchCollector::collect(mode, datastreamsaveraged=true)`
+  跳过自己的平均（core.cpp:1263-1268）——两处必须成对，否则平均被折叠两次。
+- kurtosis：`zeroKurtosis` 每 subint 在 setup 段、`sendKurtosis` 在 subint 尾
+  （pcal 段之后，f 的 main 次序）；`setDumpKurtosis(dokurtosis)` 在 Mode 构造后设置。
+
 ### 其它易错点
 
+- **crosspol 的段内偏移**：`addAutocorrs` 的 `readsection` 在 parallel 段与 cross-pol
+  段**各自从 offset=0 起**（只有 resultindex/weightindex 跨段连续）。阶段 2 初版把
+  offset 放在 lambda 外跨段累积 → cross-pol 段 `&ac[4096]` 越界读、段错误
+  （`genericAdd_32fc_I` 的 src 指向垃圾地址；文件读版从连续流读、无此对应物）——
+  由 crosspol 样本抓出，修复处见 integrate.cpp 的注释。
 - **槽索引 vs 块索引**：`getFreqs`/`getDataWeight` 的第二个参数是**槽号**（b），
   `getBlockAc`/`getBlockPcal` 的 block 是**全局块号**（index）——混用即静默错数据。
 - **MemReader 的 zoom 语义**：Mode 内部 `fftoutputs[zoomband]` 就是父 recorded band
@@ -109,11 +128,37 @@ fxcorr-xp merge --experiment [workdir]         # 实验级归并 → SWIN（唯�
 - 测试机上裸构建：`autoreconf -i && ./configure --prefix=/usr/local/difx && make
   && make install`。镜像（`fxcorr/docker/Dockerfile`）的 COPY 行待镜像重建时加。
 
-## 测试（2026-10-13，v9 阶段 1）
+## 测试（2026-10-13）
 
 样本副本均在 `/root/fxcortest/`（每个 = 原 workdir 的 `cp -r`，清产物后两条链各跑
-一遍；`.input` 的 `OUTPUT FILENAME` 已改指副本自己的 `vis/`——原值是指向源 workdir 的
-绝对路径，直接跑会把 PCAL 写回去）。两条链均 `OMP_NUM_THREADS=1`。
+一遍；`.input` 的 `OUTPUT FILENAME` 与 config 链（CALC→IM）的绝对路径已改指副本——
+原值指向源 workdir，直接跑会把产物写回去）。两条链均 `OMP_NUM_THREADS=1`（并行
+位一致单独测）。
+
+### 阶段 2（判据 4/6/7）
+
+- **STA / kurtosis**：v9sta（p8reg raw、`CHANS TO AVG=4` 激活 P9 平均分支）上
+  v8 f 与 v9 xp 各带 `FXCORR_STA=1 FXCORR_KURTOSIS=1 FXCORR_RUN_MODE=container` →
+  `.sta` 记录流 `cmp_sta.py` 对拍 **422 条逐位相同**（0 mismatch），SWIN 逐字节一致。
+- **zoom**：v9zoom（batch 指 `test-zoom.input`；freq 0 = 4096ch 主带 / freq 1 =
+  1024ch zoom）全量 SWIN：`cmp_swin_zoom.py` 12 条记录 vis 最大相对差 **0** +
+  文件**逐字节一致**。
+- **crosspol**：v9crosspol（POL PRODUCTS 4 + WRITE AUTOCORRS）全量 SWIN **逐字节
+  一致**（**首轮段错误**——修复 `readsection` 的段内 offset 越界，见"关键实现要点"；
+  该 bug 阶段 1 无 crosspol 样本、未能暴露）。
+- **ds 级并行位一致**：v9mds 上 xp `OMP_NUM_THREADS=1/2/4` 的分片 `.part` **三者
+  逐字节相同**，且都等于 v8 基线（v9-plan D8 机理的实测确认）。
+- **判据 6（中间物 1×）**：同配置同数据（p4 的 v8 fengine vs v9pcal 的 v9 fengine）
+  147.9 MB → 8.58 MB，**≈17.3×**（>16× 的余量来自 autocorr.bin 的消失；每站纯谱
+  67.1 MB → 4.27 MB）。
+- **内存**：xp 跑 v9mds（4 ds、512 块/subint、4096 通道、OMP=4）峰值 RSS **221 MB**
+  （≈55 MB/ds；对照 f 单 ds 46 MB）——≤GB 量级，与 v9-plan §7 的 8 ds 估算相容。
+- **失败路径**：截断 stream.bin → `failed to read subint N` rc=1；缺失 → `cannot
+  read .../stream.bin` rc=1；fp 侧写不进去（FXCORR_FENGINE_ROOT 指非目录）→
+  `cannot create ...` rc=1——三项全部失败可见。
+- **回归重跑**（crosspol 修复后）：v9pcal 判据 3/5 复确认全部 IDENTICAL。
+
+### 阶段 1（判据 3/5）
 
 - **判据 3（分片 .part 逐字节，v8 x 分片 vs v9 xp 分片）**——三个样本全过：
   - `v9pcal`（p4 副本：2 站 T1/T2 单组、4 tones pcal、4 subints）：
@@ -130,6 +175,6 @@ fxcorr-xp merge --experiment [workdir]         # 实验级归并 → SWIN（唯�
   合法双源配置需要 vex2difx——测试机没有；代码与 pulsar/相位阵同段同通路）。
   顺带确认：非法配置（pointing centre 不是第一个相位中心）下 xp 的 rc=139 段错误
   是 **fxcorr-x 既有行为**（同输入下 fxcorr-x 同样 rc=139），非 v9 引入。
-- 未实测项（阶段 2）：zoom、crosspol、STA/kurtosis、ds 级并行的多线程位数一致性
-  （阶段 1 判据均为 OMP=1；站级并行的位一致机理 = 每 ds 单 Mode 字块序，与线程数无关，
-  但多线程实测留给阶段 2）、内存实测。
+- 未实测项：多相位中心 / pulsar binning / 相位阵（启动挡掉，按需后补）；gaps 七用例
+  的 xp 侧重跑（阶段 0 的 f/fp 诊断一致与 a1 病态样本的判据 3 已覆盖，全数重跑属
+  编排级回归、随全链回归一起做）；性能标定（阶段 3：fxcorr-xp 线程数扫描、两链 A/B）。

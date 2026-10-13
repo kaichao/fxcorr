@@ -29,8 +29,13 @@ class AcBatchCollector {
 public:
 	AcBatchCollector(Configuration *config, int configindex, int dsindex);
 
-	/** Averages the spectra in frequency and copies out one ac batch record. */
-	AutocorrBatch collect(Mode *mode);
+	/**
+	 * Copies out one ac batch record.  Averages the spectra in frequency
+	 * first, unless the caller already did: P9's STA dump above the
+	 * post-average channel count pre-averages (core.cpp:1181-1187), and the
+	 * average step here must then be skipped (core.cpp:1263-1268).
+	 */
+	AutocorrBatch collect(Mode *mode, bool datastreamsaveraged = false);
 
 private:
 	Configuration *config;

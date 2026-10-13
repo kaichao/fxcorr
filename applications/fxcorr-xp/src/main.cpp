@@ -103,15 +103,15 @@ struct TimingProbe
 // station lap covers the whole per-ds station stage the read lap used to
 // feed, and read now only reads the stream.bin records)
 static TimingProbe g_probes[] = {
-	{"station", "main.cpp", 1669, &g_tt_station, 0},
-	{"read",    "main.cpp", 1541, &g_tt_read,    0},
-	{"zero",    "main.cpp", 1674, &g_tt_zero,    0},
-	{"xmac",    "main.cpp", 1687, &g_tt_xmac,    0},
-	{"wacc",    "main.cpp", 1689, &g_tt_wacc,    0},
-	{"uvshift", "main.cpp", 1697, &g_tt_uvshift, 0},
-	{"cbw",     "main.cpp", 1714, &g_tt_cbw,     0},
-	{"auto",    "main.cpp", 1722, &g_tt_auto,    0},
-	{"addsub",  "main.cpp", 1729, &g_tt_addsub,  0},
+	{"station", "main.cpp", 1866, &g_tt_station, 0},
+	{"read",    "main.cpp", 1683, &g_tt_read,    0},
+	{"zero",    "main.cpp", 1871, &g_tt_zero,    0},
+	{"xmac",    "main.cpp", 1884, &g_tt_xmac,    0},
+	{"wacc",    "main.cpp", 1886, &g_tt_wacc,    0},
+	{"uvshift", "main.cpp", 1894, &g_tt_uvshift, 0},
+	{"cbw",     "main.cpp", 1911, &g_tt_cbw,     0},
+	{"auto",    "main.cpp", 1919, &g_tt_auto,    0},
+	{"addsub",  "main.cpp", 1926, &g_tt_addsub,  0},
 	{0, 0, 0, 0, 0}
 };
 
@@ -227,6 +227,150 @@ static int fail(DifxMonitor &monitor, const string &msg)
 	monitor.alert(msg, DIFX_ALERT_LEVEL_ERROR);
 	monitor.status(DIFX_STATE_ABORTING, msg, 0.0, 0, 0, 0.0, 0.0);
 	return EXIT_FAILURE;
+}
+
+// BINARY_STA records, one per recorded band, per autocorrelation batch
+// (algo-plan.md P1; core.cpp averageAndSendAutocorrs 1195-1253, V1
+// single-thread form).  nsoffsetns/nswidthns describe the current ac batch
+// (centre offset and width in ns).
+// P9: datastreamsaveraged means the caller already ran averageFrequency()
+// for this batch (core.cpp:1181-1187); the renormalisation and the channel
+// count then refer to the averaged spectrum (core.cpp:1249-1254).
+// fxcorr-xp: lifted verbatim from fxcorr-f's main.cpp.  The station stage
+// calls it from the ds-parallel region, so the call sites hold an
+// omp critical -- fxcorr-f only ever called it from thread 0.
+static void sendSTA(DifxMonitor *monitor, Configuration &config, int configindex, int dsindex,
+                    Mode *mode, int scan, long long scanstartsec, int subintsec, int subintns,
+                    double nsoffsetns, double nswidthns, bool datastreamsaveraged, const string &jobname)
+{
+	// core.cpp:1191-1192: no STA at all when one record does not fit the MTU
+	int recordsize = sizeof(DifxMessageSTARecord) + sizeof(f32)*config.getSTADumpChannels();
+	if(recordsize > config.getMTU())
+		return;
+
+	int nrecordedbands = config.getDNumRecordedBands(configindex, dsindex);
+	for(int band=0;band<nrecordedbands;band++)
+	{
+		int freqindex = config.getDRecordedFreqIndex(configindex, dsindex, band);
+		int freqchannels = config.getFNumChannels(freqindex);
+		f32 weight = mode->getWeight(false, band);
+
+		// minimum weight gate, core.cpp:1218-1220 (dodgy packet protection)
+		double stasamples = 0.001*nswidthns*2*config.getFreqTableBandwidth(freqindex);
+		if(weight < 0.333*stasamples/(2*freqchannels))
+			continue;
+
+		// core.cpp:1224: energy -> power normalisation
+		f32 renormvalue = 1.0f/(2*freqchannels*weight);
+		// core.cpp:1227-1232: on an averaged spectrum channels are summed
+		// below, not averaged, so correct both factors
+		if(datastreamsaveraged)
+		{
+			renormvalue /= config.getFChannelsToAverage(freqindex);
+			freqchannels /= config.getFChannelsToAverage(freqindex);
+		}
+
+		// core.cpp:1234-1237: fold to the requested STA dump resolution
+		int nchan = config.getSTADumpChannels();
+		if(freqchannels < nchan)
+			nchan = freqchannels;
+		int chans_to_avg = freqchannels/nchan;
+
+		cf32 *acdata = mode->getAutocorrelation(false, band);
+		DifxMessageSTARecord *record = (DifxMessageSTARecord *)malloc(recordsize);
+		memset(record, 0, recordsize);
+
+		record->messageType = STA_AUTOCORRELATION;
+		record->dsindex = dsindex;
+		record->coreindex = 0;
+		record->threadindex = 0;
+		snprintf(record->identifier, DIFX_MESSAGE_PARAM_LENGTH, "%s",
+		         jobname.substr(0, DIFX_MESSAGE_PARAM_LENGTH-1).c_str());
+		record->nChan = nchan;
+		record->scan = scan;
+		// core.cpp:1208-1214: sec is day-of-observation seconds (the code,
+		// not the "since scan start" comment, is authoritative)
+		record->sec = (int)scanstartsec + subintsec;
+		record->ns = subintns + (int)nsoffsetns;
+		if(record->ns >= 1000000000)
+		{
+			record->ns -= 1000000000;
+			record->sec++;
+		}
+		record->nswidth = (int)nswidthns;
+		record->bandindex = band;
+		// sum (not average) of chans_to_avg adjacent real parts, core.cpp:1244-1247.
+		// Upstream indexes acdata as f32* with stride 2 (= cf32 stride 1); the
+		// P1 port kept the factor 2 with a cf32* pointer and folded every
+		// second chans_to_avg block instead of adjacent channels (fixed P9,
+		// caught by the averaged-branch STA bitwise comparison).
+		for(int k=0;k<nchan;k++)
+		{
+			record->data[k] = acdata[k*chans_to_avg].re;
+			for(int l=1;l<chans_to_avg;l++)
+				record->data[k] += acdata[k*chans_to_avg+l].re;
+		}
+		// vectorMulC_f32_I(renormvalue, ...): energy -> power
+		for(int k=0;k<nchan;k++)
+			record->data[k] *= renormvalue;
+
+		monitor->staSend(record, sizeof(DifxMessageSTARecord) + sizeof(f32)*nchan);
+		free(record);
+	}
+}
+
+// BINARY_STA records with messageType STA_KURTOSIS, one per recorded band,
+// per subint (algo-plan.md P9; core.cpp averageAndSendKurtosis 1378-1434,
+// V1 single-thread form).  The mode has accumulated s1/s2 in process(); the
+// excess-kurtosis statistic is folded and copied out by
+// calculateAndAverageKurtosis.  nsoffsetns/nswidthns describe the whole
+// subint (centre offset and width); unlike the autocorrelation STA there is
+// no weight gate and no renormalisation (core.cpp:1420-1431).
+static void sendKurtosis(DifxMonitor *monitor, Configuration &config, int configindex, int dsindex,
+                         Mode *mode, int scan, long long scanstartsec, int subintsec, int subintns,
+                         double nsoffsetns, double nswidthns, int numblocks, const string &jobname)
+{
+	bool valid = mode->calculateAndAverageKurtosis(numblocks, config.getSTADumpChannels());
+	if(!valid)
+		return;
+
+	int nrecordedbands = config.getDNumRecordedBands(configindex, dsindex);
+	for(int band=0;band<nrecordedbands;band++)
+	{
+		int freqindex = config.getDRecordedFreqIndex(configindex, dsindex, band);
+		int freqchannels = config.getFNumChannels(freqindex);
+		int nchan = config.getSTADumpChannels();
+		if(freqchannels < nchan)
+			nchan = freqchannels;
+
+		int recordsize = sizeof(DifxMessageSTARecord) + sizeof(f32)*nchan;
+		DifxMessageSTARecord *record = (DifxMessageSTARecord *)malloc(recordsize);
+		memset(record, 0, recordsize);
+
+		record->messageType = STA_KURTOSIS;
+		record->dsindex = dsindex;
+		record->coreindex = 0;
+		record->threadindex = 0;
+		snprintf(record->identifier, DIFX_MESSAGE_PARAM_LENGTH, "%s",
+		         jobname.substr(0, DIFX_MESSAGE_PARAM_LENGTH-1).c_str());
+		record->nChan = nchan;
+		record->scan = scan;
+		record->sec = (int)scanstartsec + subintsec;
+		record->ns = subintns + (int)nsoffsetns;
+		if(record->ns >= 1000000000)
+		{
+			record->ns -= 1000000000;
+			record->sec++;
+		}
+		record->nswidth = (int)nswidthns;
+		record->bandindex = band;
+		f32 *sk = mode->getKurtosis(band);
+		for(int k=0;k<nchan;k++)
+			record->data[k] = sk[k];
+
+		monitor->staSend(record, recordsize);
+		free(record);
+	}
 }
 
 // Valid FFT blocks of one subint's flags: the stream record carries one
@@ -1240,34 +1384,29 @@ int main(int argc, char **argv)
 		return rc;
 	}
 
-	// v9 stage-1 restrictions (fxcorr/v9-plan.md D11): the station stage is new
-	// code in this tool, so the configurations it cannot yet reproduce
-	// bit-for-bit are refused up front rather than run wrong -- multi phase
-	// centre, pulsar binning and phased arrays (the set the shard mode used to
-	// refuse, now unconditional because every fxcorr-xp correlation runs the
-	// station stack); zoom and crosspol are carried in the code but validated
-	// in stage 2.  FXCORR_STA / FXCORR_KURTOSIS producers moved here from
-	// fxcorr-f and are not ported yet, so they refuse rather than silently drop.
+	// v9 restrictions (fxcorr/v9-plan.md D11): the station stage is new code in
+	// this tool, so the configurations it does not reproduce are refused up
+	// front rather than run wrong -- multi phase centre, pulsar binning and
+	// phased arrays (the set the shard mode used to refuse, now unconditional
+	// because every fxcorr-xp correlation runs the station stack); zoom and
+	// crosspol are carried in the code and validated in stage 2.
 	{
 		int nphasecentres = model->getNumPhaseCentres(scan);
 		if(nphasecentres != 1)
-			return fail(monitor, "fxcorr-xp: v9 stage 1 supports a single phase centre only (got "
-			            + std::to_string((long long)nphasecentres) + "); multi phase centre is a stage-2 item");
+			return fail(monitor, "fxcorr-xp: v9 supports a single phase centre only (got "
+			            + std::to_string((long long)nphasecentres) + "); multi phase centre is not implemented");
 		if(config.pulsarBinOn(configindex))
-			return fail(monitor, "fxcorr-xp: v9 stage 1 does not support pulsar binning (stage-2 item)");
+			return fail(monitor, "fxcorr-xp: v9 does not support pulsar binning");
 		if(config.phasedArrayOn(configindex))
-			return fail(monitor, "fxcorr-xp: v9 stage 1 does not support phased array configurations (stage-2 item)");
-		bool dosta = false;
-		if(const char *staenv = getenv("FXCORR_STA"))
-			dosta = (strcmp(staenv, "1") == 0);
-		if(dosta)
-			return fail(monitor, "fxcorr-xp: FXCORR_STA is not implemented in v9 stage 1 (the STA sender came from fxcorr-f and is ported in stage 2)");
-		bool dokurtosis = false;
-		if(const char *kurtosisenv = getenv("FXCORR_KURTOSIS"))
-			dokurtosis = (strcmp(kurtosisenv, "1") == 0);
-		if(dokurtosis)
-			return fail(monitor, "fxcorr-xp: FXCORR_KURTOSIS is not implemented in v9 stage 1 (stage-2 item)");
+			return fail(monitor, "fxcorr-xp: v9 does not support phased array configurations");
 	}
+	// P9: STA / kurtosis dump switches, fxcorr-f environment semantics
+	bool dosta = false;
+	if(const char *staenv = getenv("FXCORR_STA"))
+		dosta = (strcmp(staenv, "1") == 0);
+	bool dokurtosis = false;
+	if(const char *kurtosisenv = getenv("FXCORR_KURTOSIS"))
+		dokurtosis = (strcmp(kurtosisenv, "1") == 0);
 
 	// ---- 分片模式：只处理一个 ds 组，输出 D16 而不是 SWIN --------------------
 	// 一组 = 跨站、含全部极化的一批 datastream，它们覆盖同一个频段组；成员从
@@ -1349,6 +1488,9 @@ int main(int argc, char **argv)
 		modes[ds] = config.getMode(configindex, ds);
 		if(!modes[ds]->initialisedOK())
 			return fail(monitor, "fxcorr-xp: mode initialisation failed for station " + station);
+		// P9: Mode::process accumulates the kurtosis s1/s2 per FFT block only
+		// when this is set (mode.cpp:1236, upstream core.cpp:702)
+		modes[ds]->setDumpKurtosis(dokurtosis);
 		streams[ds] = new StreamReader(sdir + "/stream.bin", batchid, station,
 		                               dswithinstation, subintns, blockspersend,
 		                               numbufferedffts, nsubints);
@@ -1570,8 +1712,11 @@ int main(int argc, char **argv)
 				m->setOffsets(sr->scan(), sr->offsetSec(), sr->offsetNs());
 				if(pcaltexts[ds] != 0)
 					m->resetpcal();
+				if(dokurtosis)
+					m->zeroKurtosis();	// core.cpp:703-704
 
 				int acblockcount = 0;
+				int acshiftcount = 0;
 				for(int fftloop=0;fftloop<fftloops;fftloop++)
 				{
 					int numffts = blockspersend - fftloop*numbufferedffts;
@@ -1638,9 +1783,31 @@ int main(int argc, char **argv)
 					{
 						if(pcaltexts[ds] != 0)
 							pcaltexts[ds]->accumulateWeight(m);	// before zeroAutocorrelations clears weights
-						acrecords[ds].push_back(accollectors[ds]->collect(m));
+						// P9: an STA dump may demand the post-average spectrum
+						// (core.cpp:1181-1187): average before the dump and
+						// let the record collector skip its own average
+						bool datastreamsaveraged = false;
+						if(dosta && config.getMinPostAvFreqChannels(configindex) >= config.getSTADumpChannels())
+						{
+							m->averageFrequency();
+							datastreamsaveraged = true;
+						}
+						if(dosta)
+						{
+							// the station stage runs one thread per datastream;
+							// fxcorr-f only ever sent STA from thread 0
+							#pragma omp critical(fxcorr_sta)
+							{
+								sendSTA(&monitor, config, configindex, ds, m, scan, scanstartsec,
+								        expectedsec, expectedns,
+								        (acshiftcount*maxacblocks + maxacblocks/2.0)*blockns,
+								        maxacblocks*blockns, datastreamsaveraged, config.getJobName());
+							}
+						}
+						acrecords[ds].push_back(accollectors[ds]->collect(m, datastreamsaveraged));
 						m->zeroAutocorrelations();
 						acblockcount = 0;
+						acshiftcount++;
 					}
 				}
 				// trailing partial batch (fxcorr-f main, same as core.cpp)
@@ -1648,7 +1815,24 @@ int main(int argc, char **argv)
 				{
 					if(pcaltexts[ds] != 0)
 						pcaltexts[ds]->accumulateWeight(m);
-					acrecords[ds].push_back(accollectors[ds]->collect(m));
+					// P9: same pre-STA averaging as the full batch above
+					bool datastreamsaveraged = false;
+					if(dosta && config.getMinPostAvFreqChannels(configindex) >= config.getSTADumpChannels())
+					{
+						m->averageFrequency();
+						datastreamsaveraged = true;
+					}
+					if(dosta)
+					{
+						#pragma omp critical(fxcorr_sta)
+						{
+							sendSTA(&monitor, config, configindex, ds, m, scan, scanstartsec,
+							        expectedsec, expectedns,
+							        (acshiftcount*maxacblocks + acblockcount/2.0)*blockns,
+							        acblockcount*blockns, datastreamsaveraged, config.getJobName());
+						}
+					}
+					acrecords[ds].push_back(accollectors[ds]->collect(m, datastreamsaveraged));
 					m->zeroAutocorrelations();
 				}
 
@@ -1663,6 +1847,19 @@ int main(int argc, char **argv)
 						// start of the intTime that just completed
 						long long totalns = batchstartabsns + (long long)(s+1-subintsperint)*(long long)subintns;
 						pcaltexts[ds]->flush(totalns/1000000000LL, (int)(totalns%1000000000LL));
+					}
+				}
+
+				// P9: kurtosis covers the whole subint, not an ac batch
+				// (core.cpp:1062-1063; single-thread numblocks = blockspersend)
+				if(dokurtosis)
+				{
+					#pragma omp critical(fxcorr_sta)
+					{
+						sendKurtosis(&monitor, config, configindex, ds, m, scan, scanstartsec,
+						             expectedsec, expectedns,
+						             (blockspersend/2.0)*blockns, (double)blockspersend*blockns,
+						             blockspersend, config.getJobName());
 					}
 				}
 			}

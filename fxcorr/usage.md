@@ -1,6 +1,6 @@
 # fxcorr 工具命令行手册
 
-**最后更新**：2026-10-13（**V9：v9 链两工具**——新增 **`fxcorr-fp`**（站级前端，写 1× `stream.bin`）与 **`fxcorr-xp`**（core 侧：读 stream.bin + 站级栈 + XMAC，写 pcal.bin 与 PCAL 文本）两节；v9-plan 阶段 0/1，判据实测见各自目录 CLAUDE.md）。**此前** 2026-10-02（**数据定位两态**（V8 `v8-plan.md` §2）：fxcorr-f 不再读 `.input` 的 DATA TABLE 定位数据——任务 headers `real_path`（可选）> 命名规则推导，DATA TABLE 软链机制退役；本手册的「通用约定」、fxcorr-f 节与端到端示例同步；**当日已实施**（`v8-plan.md` §2.3 判据 1–3、模块级全链与容器内 real_path 直投实测通过）。**此前 2026-09-30**（**V7 P5a 开工**：`run_bench.sh` 增跨节点映射三变量与**每节点**的内存/流量采样，见「通用约定」末条；fxcorr 侧的跨节点属 P5b、等 scalebox 编排。**此前 2026-09-29**（**V7 P3 前**：`fxcorr-x` 增 `FXCORR_X_GROUPS_ONLY=1`——只报 ds 组划分就退出、无副作用的诊断出口，供 `test/input/run_consistency.sh` 对拍"两处 ds 组实现"；**此前 2026-09-28**（**V6 的两级 `merge`（形态 A）已实施并验证**，其余 V6 项仍标 ⚠：`fxcorr-x merge <batch>` 现在只写 `vis-parts/<batch_id>/merged.part`、**新增的** `merge --experiment` 才写 SWIN 且是唯一写入者；四条定则（实验的认定与 config 来源、缺 batch 的判据取 `batches/*.json` 而非 `meta/batches.index`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）见 `data-spec` 5.9 末条，判据见 `fxcorr/test/multids/README.md` 判据 13–15。2026-09-27 补：两级 `merge`（形态 A）命令行形态、环境变量作用域说明与"其它实验级文件的并发语义（已核实，见 `v6-plan.md` S4.1 末表）"小节。路线见 `v6-plan.md`。**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
+**最后更新**：2026-10-13（**V9：v9 链两工具**——新增 **`fxcorr-fp`**（站级前端，写 1× `stream.bin`）与 **`fxcorr-xp`**（core 侧：读 stream.bin + 站级栈 + XMAC，写 pcal.bin 与 PCAL 文本）两节；v9-plan 阶段 0/1/2 完成（判据 1–7 实测见各自目录 CLAUDE.md；xp 的 STA/kurtosis 已支持、按需后补项只剩多相位中心/pulsar/相位阵）。**此前** 2026-10-02（**数据定位两态**（V8 `v8-plan.md` §2）：fxcorr-f 不再读 `.input` 的 DATA TABLE 定位数据——任务 headers `real_path`（可选）> 命名规则推导，DATA TABLE 软链机制退役；本手册的「通用约定」、fxcorr-f 节与端到端示例同步；**当日已实施**（`v8-plan.md` §2.3 判据 1–3、模块级全链与容器内 real_path 直投实测通过）。**此前 2026-09-30**（**V7 P5a 开工**：`run_bench.sh` 增跨节点映射三变量与**每节点**的内存/流量采样，见「通用约定」末条；fxcorr 侧的跨节点属 P5b、等 scalebox 编排。**此前 2026-09-29**（**V7 P3 前**：`fxcorr-x` 增 `FXCORR_X_GROUPS_ONLY=1`——只报 ds 组划分就退出、无副作用的诊断出口，供 `test/input/run_consistency.sh` 对拍"两处 ds 组实现"；**此前 2026-09-28**（**V6 的两级 `merge`（形态 A）已实施并验证**，其余 V6 项仍标 ⚠：`fxcorr-x merge <batch>` 现在只写 `vis-parts/<batch_id>/merged.part`、**新增的** `merge --experiment` 才写 SWIN 且是唯一写入者；四条定则（实验的认定与 config 来源、缺 batch 的判据取 `batches/*.json` 而非 `meta/batches.index`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）见 `data-spec` 5.9 末条，判据见 `fxcorr/test/multids/README.md` 判据 13–15。2026-09-27 补：两级 `merge`（形态 A）命令行形态、环境变量作用域说明与"其它实验级文件的并发语义（已核实，见 `v6-plan.md` S4.1 末表）"小节。路线见 `v6-plan.md`。**分片架构已落地**：`cmp_swin.py` 的 `--by-key` 按键匹配、`run_batch.sh` 的 `FXCORR_X_SHARD=1`。**分片架构的前三步全部落地**：`fxcorr-sim station` 增 `ds_index` 参数与多 datastream 生成、`fxcorr-x` 增 `ds_group` 分片模式与 `merge` 子命令——见各自小节，判据见 `fxcorr/test/multids/README.md`）
 
 覆盖五个改造应用的命令行接口：`fxcorr-sim`（仿真数据生成器）、`fxcorr-f`（Station-based）、**`fxcorr-fp`**（v9 链的站级前端：读帧 + 对齐 → `stream.bin`）、`fxcorr-x`（Baseline-based，含 `merge` 子命令）、**`fxcorr-xp`**（v9 链的 core 侧：读 `stream.bin` + 站级栈 + XMAC）。目录布局、batch.json 格式与 D16 `vis-parts/` 规范见 `data-spec.md`，容量与分片方案的论证见 `data-volume.md` §7。
 
@@ -220,9 +220,9 @@ frac sample / autocorr）再走原样搬来的 XMAC 与积分——v8 链（f+x�
 - **站级产物由本工具写**（原来由 fxcorr-f 写，同格式同位置同幂等语义）：各 ds 目录的
   `pcal.bin` 与 `vis/<exp>.difx/PCAL_<mjd>_<sec>_<station>_ds<N>`；`autocorr.bin`
   **取消**（谱与自相关在内存直取）。
-- **挡掉的配置**（启动即报错，不静默）：多相位中心 / pulsar binning / 相位阵；
-  `FXCORR_STA` / `FXCORR_KURTOSIS` 置位（发送端阶段 2 移植）。zoom 与 crosspol 的代码
-  已完整搬入，阶段 2 专项验证。
+- **挡掉的配置**（启动即报错，不静默）：多相位中心 / pulsar binning / 相位阵。
+  **`FXCORR_STA` / `FXCORR_KURTOSIS` 已支持**（阶段 2 从 fxcorr-f 移植、语义一致）；
+  zoom 与 crosspol 已实测（判据 4 逐字节）。
 
 示例：
 

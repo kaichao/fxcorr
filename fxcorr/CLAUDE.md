@@ -1,13 +1,14 @@
 # fxcorr 改造工作区
 
-**最后更新**：2026-10-13（**V9 阶段 0/1 完成**——阶段 0：新建 **`applications/fxcorr-fp`**
+**最后更新**：2026-10-13（**V9 阶段 0/1/2 完成**——阶段 0：新建 **`applications/fxcorr-fp`**
 （v9 链的 datastream 侧：读帧 + 对齐 + 簿记 → `stream.bin`（1×），零 DSP；判据 1/2/7
 通过；格式入 `data-spec` 5.3.1）。**阶段 1**：新建 **`applications/fxcorr-xp`**（core 侧
 x′：读 stream.bin + 站级栈（每 ds 一个 Mode）+ 原样搬来的 XmacEngine/Integrator，写
-pcal.bin 与 PCAL 文本；`install-difx` 已注册、命令入 `usage.md`）；**判据 3/5 实测通过**
-（分片 `.part`、pcal.bin、PCAL 文本与 v8 链**逐字节一致**，样本含 2 站单组、4 ds
-双极化、a1 病态数据；顺带提前验证了判据 4 的全量 SWIN 逐字节一致）。两阶段文档见各自
-目录 CLAUDE.md；阶段 0 的顺带修复见下条）。
+pcal.bin 与 PCAL 文本；判据 3/5 通过——分片 `.part`、pcal.bin、PCAL 文本与 v8 链逐字节
+一致）。**阶段 2**：STA/kurtosis 移植、zoom/crosspol 验证、ds 级并行位一致
+（OMP=1/2/4 逐字节）、内存实测（221 MB/4ds）——**判据 4/6/7 全绿**（fengine ≈17.3×
+缩减；**顺带修复 crosspol 的 readsection 越界崩**）。三阶段文档见各自目录 CLAUDE.md；
+阶段 0 的顺带修复见下条；剩阶段 3（性能标定）与阶段 4（变体 A，后置））。
 **此前** 2026-10-13（**V9 阶段 0 细节**：判据 1/2/7 实测通过（f 的 setData 序列与
 stream.bin 逐字节一致；gaps 七用例 f 侧全绿 + 新资产 `test/gaps/run_v9_compare.sh`
 15 场景 f/fp 诊断逐行一致）；**顺带修掉 `Mode::blockPcalCapable` 无 pcal 配置的空指针
@@ -95,7 +96,7 @@ with …` 停链），而记录与比对都是**逐字符**的。定案两条：
 | `algo-plan.md` | 活 | 2026-09-27 | 算法改进的设计与实施记录（P0–P12）；09-27 按 V6 多节点部署修订 P2 节"同实验 batch 串行"前提 |
 | `fxcorr-sim-arch.md` | 活 | 2026-09-27 | fxcorr-sim 架构与公共信号模型 |
 | `data-volume.md` | 活 | 2026-09-27 | **数据量与容量分析**：体积公式（权威，§1.3）、算法级粒度、落盘数据表、瓶颈与优化杠杆、**§7 计算单元的分片方案**（§7.6 = 频段维度该不该进 batch，含编号位数依据） |
-| `v9-plan.md` | 活（**进行中**；**阶段 0（fxcorr-fp）与阶段 1（fxcorr-xp）完成**，阶段 2 未开始） | 2026-10-13 | **当前版本的路线**（V9：FFT 从 f 移到 x——新建 `fxcorr-fp`/`fxcorr-xp` 双工具、1× 中间数据流 `stream.bin`、SWIN 逐字节判据、阶段 0–4） |
+| `v9-plan.md` | 活（**进行中**；**阶段 0/1/2 完成**，剩阶段 3（性能标定）与阶段 4（变体 A，后置）） | 2026-10-13 | **当前版本的路线**（V9：FFT 从 f 移到 x——新建 `fxcorr-fp`/`fxcorr-xp` 双工具、1× 中间数据流 `stream.bin`、SWIN 逐字节判据、阶段 0–4） |
 | `v8-plan.md` | 活（**已收尾**，2026-10-13 §5；§5.5 声明 V9 主题） | 2026-10-13 | V8 的收尾（编排接入全部落地、判据 9b 落位、数据定位重构稳定运行）——**已交接 v9-plan.md** |
 | `v7-plan.md` | 活（**已定稿**；判据 11 过 10，9b 移交 V8） | 2026-09-30 | V7 的路线与实测（目标集群多核标定、P4 mpifxcorr 单节点对照、P5a 跨节点、P6 容器对照）——**未完成项已移交 v8-plan.md** |
 | `v6-plan.md` | 活（**S0–S3 与 S4.1 已完成，余 S4.2 编排侧 / S4.3 / S5 / S6**） | 2026-09-28 | **当前版本的路线**（V6：规模与部署——S1 真实规模验证、S2 压测轻量模式、S3 规模验证含 mpifxcorr 对照、S4 编排对接（两级 merge 形态 A）、S5 条件触发、S6 工程债；含多节点部署形态） |
