@@ -95,7 +95,7 @@ generate_and_run()
 	# DATA TABLE 的路径相对进程 cwd 解析（fxcorr-f/CLAUDE.md），必须在 workdir 里跑
 	(cd "$WORKDIR" && FXCORR_LOGLEVEL=verbose fxcorr-f "$BATCHID" "$STATION" .) > "$readposout" 2>&1 ||
 		fail "fxcorr-f 退出码非零（见 $readposout）"
-	zero_weight_runs "$WORKDIR/fengine/$BATCHID/$STATION/ds_0/band_00.sp" > "$zeroout"
+	zero_weight_runs "$WORKDIR/fengine/$BATCHID"/*/"$STATION/ds_0/band_00.sp" > "$zeroout"
 
 	# 判据二：check_reader 有 finding 时退出码为 1，另存供 require_absolute 判定
 	VDIF="$WORKDIR/raw/$STATION/${STATION}_${BATCHID}.vdif"

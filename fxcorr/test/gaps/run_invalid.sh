@@ -61,7 +61,7 @@ run_one()
 	(cd "$WORKDIR" && FXCORR_LOGLEVEL=verbose fxcorr-f "$BATCHID" "$STATION" .) > "$log" 2>&1 ||
 		fail "fxcorr-f 退出码非零（见 $log）"
 	python3 "$SCRIPTDIR/sp_valid.py" \
-		"$WORKDIR/fengine/$BATCHID/$STATION/ds_0/band_00.sp" --machine > "$log.invalid"
+		"$WORKDIR/fengine/$BATCHID"/*/"$STATION/ds_0/band_00.sp" --machine > "$log.invalid"
 	ABS_RC=0
 	python3 "$CHECKER" --log "$log" --vdif "$VDIF" --batch-json "$BATCHJSON" \
 		--fps "$FPS" > "$log.check" 2>&1 || ABS_RC=$?

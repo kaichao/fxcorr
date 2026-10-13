@@ -72,7 +72,7 @@ generate_and_run()
 	rm -rf "$WORKDIR/fengine"
 	(cd "$WORKDIR" && FXCORR_LOGLEVEL=verbose fxcorr-f "$BATCHID" "$STATION" .) > "$log" 2>&1 ||
 		fail "fxcorr-f 退出码非零（见 $log）"
-	invalid_per_subint "$WORKDIR/fengine/$BATCHID/$STATION/ds_0/band_00.sp" > "$log.invalid"
+	invalid_per_subint "$WORKDIR/fengine/$BATCHID"/*/"$STATION/ds_0/band_00.sp" > "$log.invalid"
 
 	# 判据二：check_reader 有 finding 时退出码为 1，另存供 require_absolute 判定
 	VDIF="$WORKDIR/raw/$STATION/${STATION}_${BATCHID}.vdif"

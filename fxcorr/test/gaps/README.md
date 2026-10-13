@@ -1,6 +1,9 @@
 # 缺口与 filler 处理检验（FXSIM_GAPS）
 
-**最后更新**：2026-09-19（七个 `run_*.sh` 的判据都已收敛到 `reader/check_reader.py`；新增
+**最后更新**：2026-10-13（**v9 双链对照**：新增 `run_v9_compare.sh` + `stream_valid.py`
+（V9 阶段 0——15 个场景上 fxcorr-fp 与 fxcorr-f 的诊断逐行一致、无效块逐 subint 一致）；
+**组层路径修复**：五个脚本读 `.sp` 的路径补 `*/` 组层，见下节）。
+**此前** 2026-09-19（七个 `run_*.sh` 的判据都已收敛到 `reader/check_reader.py`；新增
 `run_mixed.sh`（据它修掉 B7，见 `reader-model.md` 4.10）、`run_pattern.sh`（FILL_PATTERN
 定案，见 4.11）、`run_invalid.sh`（invalid 位定案，见 4.12））
 
@@ -384,6 +387,27 @@ subint 3: 对照    0  invalid  372      subint 4: 对照    0  invalid    0
 ```
 
 定案与实施见 `fxcorr/reader-model.md` 4.12。
+
+## v9 双链对照（`run_v9_compare.sh`，2026-10-13，V9 阶段 0）
+
+v9 链的 **fxcorr-fp**（`v9-plan.md`）与 fxcorr-f 共用同一份 datareader：本目录的七个
+用例都应在 fp 上得到同样的读取行为。`run_v9_compare.sh` 把七个用例的默认场景
+（15 个数据变体：无中断对照 / boundary A·B / filler 两种 / window / startoffset /
+mixed M1·M2 两形式 / pattern 三形态 / invalid 位置位）各造一次数据，f 与 fp 各跑一次，
+判据：
+
+- `GAPCHECK` / `READPOS` 诊断行**逐行一致**（两个工具同一份 datareader 源码）；
+- 无效块**逐 subint 一致**——f 的 `band_00.sp` 用 `sp_valid.py`、fp 的 `stream.bin`
+  用 **`stream_valid.py --machine`**（两者输出同格式；flags 同源，同一份 fillValidFlags
+  位图）。
+
+用法：`./run_v9_compare.sh <workdir>`（workdir 须已有 config 与 `.input`；2026-10-13
+实测 15 场景全绿）。
+
+**组层路径（2026-10-13 修）**：`run_boundary` / `run_filler` / `run_mixed` /
+`run_pattern` / `run_invalid` 五个脚本读 `.sp` 的路径补了 `*/` 组层
+（`fengine/<batch>/*/<station>/ds_0/band_00.sp`）——2026-10-09 起 fengine 加了 ds 组
+目录层（`data-spec` 5.3），这五个脚本此前仍按旧布局找文件、读不到 `.sp`。
 
 ## 坑（续）
 
