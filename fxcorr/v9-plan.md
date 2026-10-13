@@ -7,7 +7,8 @@
 实测见 `applications/fxcorr-fp/CLAUDE.md` 与 `applications/fxcorr-xp/CLAUDE.md`；
 **阶段 3（工具级性能标定，判据 8）A/B 两段当日完成**（p419 真实规模：两链 A/B、
 xp OMP 1–16 扫描、中间 I/O），实录见 `fxcorr/test/v9/README.md`；
-剩阶段 4（变体 A，后置））
+**阶段 4（变体 A）同日决定不做**——v9-B 已拿到减量大头，A 的增量与代价不成比例，
+理由与条件触发见 §11）
 **主题**：**中间数据减量重构**——把 FFT（连同相位旋转、分数样本校正等频域步骤）从
 f 侧下移到 x 侧，f/x 之间只传 2-bit 原始数据（**1×**），与 mpifxcorr 的 core 侧现算同构。
 **前置**：V8 已收尾（`v8-plan.md` §5；§5.5 为主题声明）。
@@ -63,7 +64,7 @@ FFT 之前是纯工程改动——障碍是站级输入迁移、任务结构重�
 | # | 决策 | 内容 |
 |---|---|---|
 | D1 | 工具形态 | 新建 `fxcorr-fp` / `fxcorr-xp` 两个二进制（applications/ 下新目录，模板照 fxcorr-f/x）；现役 f/x **零改动**，双链并存可对比 |
-| D2 | 起步变体 | **B（稳妥）**：fp 输出 1× 重排数据流、xp 读它——格式/对齐/坏帧集中在 fp，xp 的"数据输入"接口干净。**A（激进）**（xp 直读 raw、fp 取消）留后置（§11） |
+| D2 | 起步变体 | **B（稳妥）**：fp 输出 1× 重排数据流、xp 读它——格式/对齐/坏帧集中在 fp，xp 的"数据输入"接口干净。**A（激进）**（xp 直读 raw、fp 取消）后置——**2026-10-13 决定不做**（§11） |
 | D3 | 中间格式 | 新格式 **`stream.bin`**（自定义、固定记录长、顺序读写；§4）——不落 VDIF、不落 fp32，内容 = `DataReader::readSubint` 的产物序列（槽排布后数据 + 有效位 + 时间戳） |
 | D4 | 布局 | **不变**：`fengine/<batch>/<g>/<station>/ds_<N>/stream.bin`——fengine 的目录约定、组级 purge 的删除单元、根解析（`FxcorrPath`）全部零改动，只是目录内容物换了 |
 | D5 | 站级栈去向 | unpack、pcal 提取、FFT、条纹旋转、frac sample、autocorr、kurtosis、STA **全部跟 FFT 走（xp）**——它们在 `Mode::process` 内部一体实现，xp 用自己的 `Mode` 即零额外工作；fp **零 DSP**（不解包） |
@@ -258,7 +259,7 @@ xp 的 subint 驱动顺序（每 ds 的 setData/setOffsets 与 f 逐字对齐—
 | 1 | **xp 工具**：站级栈 + MemReader + autocorr 内存接入 + PCAL/pcal.bin（单 ds 组、小样本 4st） | 判据 3/5（单组逐字节）——**2026-10-13 完成**，实测见 `applications/fxcorr-xp/CLAUDE.md`（三个样本：pcal 单组 / 4 ds 双极化 / a1 病态；判据 4 的全量 SWIN 逐字节亦顺带通过；挡掉项 pulsar/相位阵/STA/kurtosis 实测） |
 | 2 | xp 并行定标（ds 级并行）+ zoom/crosspol + STA/kurtosis + 内存实测 | 判据 4/6/7 全绿——**2026-10-13 完成**，实测见 `applications/fxcorr-xp/CLAUDE.md`（zoom/crosspol/STA-CHANS4 三样本 SWIN 逐字节；STA 记录 422 条逐位；OMP=1/2/4 位一致；fengine ≈17.3× 缩减；峰值 RSS 221 MB/4ds；失败路径可见。**顺带修复 crosspol 的 readsection 段内 offset 越界崩**——阶段 1 无 crosspol 样本、由阶段 2 抓出） |
 | 3 | 工具级性能标定（两链 A/B：计时分层、xp 线程数扫描、中间 I/O） | 判据 8——**2026-10-13 完成（A/B 两段）**：A 段（测试机小样本预标定 + `test/v9/bench_pair.sh` 固化，含零段计时修复）；B 段（p419 真实规模，批 00000001：两链 A/B、xp OMP 1–16 扫描、中间 I/O）——fengine **15.8×** 减量、单组串联 **−26%**、xp 拐点 OMP=8，实录见 `test/v9/README.md`；构建第 9/10 坑见 `build.md` 追加节 |
-| 4（后置） | **变体 A**：xp 直读 raw（datareader 三层迁 `fxcorrcommon`、fp 取消） | 同判据 3/4；中间存储归零 |
+| 4 | **变体 A**（xp 直读 raw、fp 取消）：**2026-10-13 决定不做**——v9-B 已拿到减量大头（15.8×），A 的增量与代价不成比例（理由与条件触发见 §11） | —（不做） |
 
 ## 10. 风险与对策
 
@@ -276,8 +277,12 @@ xp 的 subint 驱动顺序（每 ds 的 setData/setOffsets 与 f 逐字对齐—
 
 ## 11. 后置（明确不做 / 延后）
 
-- **变体 A**（xp 直读 raw、fp 取消、中间存储归零）——阶段 4；前置是把 datareader 三层
-  （reader/timeline/corrections）从 `fxcorr-f/src` 迁入 `fxcorrcommon`（纯搬移）。
+- ~~**变体 A**（xp 直读 raw、fp 取消、中间存储归零）~~——**2026-10-13 决定不做**。
+  v9-B 已拿到 16× 减量的大头（实测 15.8×）；A 的增量仅剩 1× 中间物（≈2.1 GB/批，
+  本地部署下 tmpfs 完全容纳、页缓存口径的中间 I/O ≈2 s/批），而代价不成比例：读侧
+  并入 xp（职责增肥、数据输入接口不再干净）、datareader 三层迁库触及现役 f（回归面
+  扩大）、fp（任务级并行）与 xp（线程级并行）两级并行分开调度的自由度丧失。
+  **条件触发**：若将来块长/数据量使中间物落盘的 tmpfs 过盘真正成为瓶颈，可重开评估。
 - **F 阶段块并行**（组内 ds 数 < 线程数时用 f 的 P3 归约复刻）——性能数据出来再议。
 - STA/kurtosis 之外的 P9 尾部（kurtosis 复归一化细节）以对拍为准，不额外设计。
 - 共享盘供给（`data-volume.md` §5.1）、mpifxcorr 的内存流水线形态（谱不落盘的对齐）
