@@ -181,11 +181,14 @@ void Integrator::addAutocorrs(const vector<vector<AutocorrBatch> > &records, cf3
 			const AutocorrBatch &batch = records[ds][rec];
 			int resultindex = config->getCoreResultAutocorrOffset(configindex, ds);
 			int weightindex = config->getCoreResultACWeightOffset(configindex, ds)*2;
-			// the record's sections are flat, concatenated in total-band order;
-			// offset walks that concatenation as resultindex walks the results
-			int offset = 0;
+			// resultindex/weightindex continue across the parallel and
+			// cross-pol sections (core.cpp concatenates them in the results
+			// layout); offset is the section's own flat position and restarts
+			// at 0 for the cross-pol section -- the file-reading form read
+			// both sections from one continuous stream and had no equivalent
 			auto readsection = [&](const vector<cf32> &ac, const vector<f32> &w)
 			{
+				int offset = 0;
 				for(int k=0;k<ntotalbands;k++)
 				{
 					int freqindex = config->getDTotalFreqIndex(configindex, ds, k);
