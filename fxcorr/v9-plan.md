@@ -1,7 +1,9 @@
 # fxcorr V9 计划
 
 **日期**：2026-10-13（设计轮；**启动**——拍板：FFT 从 f 侧移到 x 侧，新建两个对应工具
-`fxcorr-fp` / `fxcorr-xp`，**不动现役 fxcorr-f / fxcorr-x**，便于新旧链对比）
+`fxcorr-fp` / `fxcorr-xp`，**不动现役 fxcorr-f / fxcorr-x**，便于新旧链对比。
+**同日实施**：阶段 0（fxcorr-fp，判据 1/2/7）与阶段 1（fxcorr-xp，判据 3/5）完成，
+实测见 `applications/fxcorr-fp/CLAUDE.md` 与 `applications/fxcorr-xp/CLAUDE.md`）
 **主题**：**中间数据减量重构**——把 FFT（连同相位旋转、分数样本校正等频域步骤）从
 f 侧下移到 x 侧，f/x 之间只传 2-bit 原始数据（**1×**），与 mpifxcorr 的 core 侧现算同构。
 **前置**：V8 已收尾（`v8-plan.md` §5；§5.5 为主题声明）。
@@ -249,7 +251,7 @@ xp 的 subint 驱动顺序（每 ds 的 setData/setOffsets 与 f 逐字对齐—
 | 阶段 | 内容 | 判据 |
 |---|---|---|
 | 0 | **fp 工具**（裁剪 + StreamWriter + SWP + 诊断）；`stream.bin` 格式定稿 | 判据 1/2/7（gaps 全跑）——**2026-10-13 完成**，实测见 `applications/fxcorr-fp/CLAUDE.md` |
-| 1 | **xp 工具**：站级栈 + MemReader + autocorr 内存接入 + PCAL/pcal.bin（单 ds 组、小样本 4st） | 判据 3/5（单组逐字节） |
+| 1 | **xp 工具**：站级栈 + MemReader + autocorr 内存接入 + PCAL/pcal.bin（单 ds 组、小样本 4st） | 判据 3/5（单组逐字节）——**2026-10-13 完成**，实测见 `applications/fxcorr-xp/CLAUDE.md`（三个样本：pcal 单组 / 4 ds 双极化 / a1 病态；判据 4 的全量 SWIN 逐字节亦顺带通过；挡掉项 pulsar/相位阵/STA/kurtosis 实测） |
 | 2 | xp 并行定标（ds 级并行）+ zoom/crosspol + STA/kurtosis + 内存实测 | 判据 4/6/7 全绿 |
 | 3 | 工具级性能标定（两链 A/B：计时分层、xp 线程数扫描、中间 I/O） | 判据 8 |
 | 4（后置） | **变体 A**：xp 直读 raw（datareader 三层迁 `fxcorrcommon`、fp 取消） | 同判据 3/4；中间存储归零 |

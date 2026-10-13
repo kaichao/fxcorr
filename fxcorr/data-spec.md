@@ -1,7 +1,10 @@
 # fxcorr 数据规范文档（完整版）
 
 **版本**：1.2
-**最后更新**：2026-10-10（**DATA TABLE 软链目标改相对路径**（5.2）——链接与目标同在 `raw/`
+**最后更新**：2026-10-13（**V9 阶段 0/1**：新增 **5.3.1 `stream.bin`**——v9 链
+`fxcorr-fp` → `fxcorr-xp` 的 1× 中间格式；同链里 `band_XX.sp` / `autocorr.bin` 取消、
+`pcal.bin` 与 PCAL 文本改由 `fxcorr-xp` 写（5.3 生产者行与 5.4 文本行已注；实测记录见
+`applications/fxcorr-{fp,xp}/CLAUDE.md`））。**此前** 2026-10-10（**DATA TABLE 软链目标改相对路径**（5.2）——链接与目标同在 `raw/`
 树内，相对目标按链接所在目录解析，整树改名/换挂载前缀都不必重建；唯一消费者 mpifxcorr 的
 两条路径（本体 open、`run_bench.sh::softlink_bid` 拆目标串）均已核对兼容）。**订正 v5-plan
 Q2**："相对目标跨文件系统会断"的理由不成立（那是硬链接的限制），绝对目标才是改名/挂载别名
@@ -299,7 +302,8 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 > 见 `fxcorr/workdir-template/fengine/README.md`。
 > **`batch.json`（D9）见 `fxcorr/workdir-template/batches/README.md`**——它原先写在本节，2026-09-27 移回它自己的目录。
 
-- 编号：D8；生产者：`fxcorr-f`；消费者：`fxcorr-x`；
+- 编号：D8；生产者：`fxcorr-f`；消费者：`fxcorr-x`（**v9 链见 5.3.1**：生产者
+  `fxcorr-fp`、消费者 `fxcorr-xp`）；
 - 布局：`fengine/<batch_id>/<g>/<station>/ds_<N>/`——**组层是生命周期单位**（组级 purge 整目录删除，2026-10-09）；**单 datastream 站同样是 `ds_0/`**（无平铺特例）。f 任务 = `(batch_id, station, ds_index)`，`ds_index` 与 `raw/` 文件名的 `_ds<N>` 同口径（见 5.2）；
 - 四层编号各回答一个问题：`<batch_id>` **哪段时间**（`batches/<batch_id>.json`）、`<g>` **哪个 ds 组**（`.input` BASELINE 表的连通分量，第 8 节）、`<station>/ds_<N>` **哪个站哪路记录**（`.input` 的 DATASTREAM 表）、`band_<xx>.sp` **哪个 recorded band**（`.input` 的 FREQ 表，`xx` 是**该 ds 内**的序号而非全局 band 号）；
 - 生命周期：该 batch 的 x 跑完后可删；
@@ -354,6 +358,11 @@ valid flags、两组时间戳），**1× 数据量**（raw 量级，取代原 16
 `Mode::setData`/`setOffsets` 的参数一一对应（逐字节判据见 `v9-plan.md` §8、实施记录见
 `applications/fxcorr-fp/CLAUDE.md`）。
 
+**v9 阶段 1（2026-10-13）**：`fxcorr-xp` 已建成并按本格式消费（每 subint 一条 record
+原样重放，header 与 `.input` 交叉校验）——v8/v9 双链在同一数据上的分片 `.part`、全量
+SWIN、`pcal.bin` 与 PCAL 文本**逐字节一致**（实施与判据记录见
+`applications/fxcorr-xp/CLAUDE.md`）。
+
 ### 5.4 X-Engine 输出（vis/，SWIN）
 
 > 实物、逐文件说明与 **SWIN 74 字节记录头**见 `fxcorr/workdir-template/vis/README.md`。
@@ -367,7 +376,8 @@ valid flags、两组时间戳），**1× 数据量**（raw 量级，取代原 16
   （只打一行计数）。单节点串行 batch 天然满足；多节点并行失效——约束与场景见
   `vis/README.md`，方案见 5.9 末条与第 12 节；
 - `PCAL_<mjd>_<sec>_<station>` / `SWITCHEDPOWER_*` 两个**文本**文件也落在本目录
-  （由 f 生成，格式与 mpifxcorr 逐字节一致，可与基准 diff 对拍）；它们的并发语义
+  （由 f 生成、格式与 mpifxcorr 逐字节一致，可与基准 diff 对拍；**v9 链**：PCAL 文本
+  改由 `fxcorr-xp` 写、SWITCHEDPOWER 仍归 `fxcorr-fp`，见 5.3.1）；它们的并发语义
   见第 12 节的待确认表；
 - 生命周期：**长期保留**。
 

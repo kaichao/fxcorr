@@ -1,6 +1,11 @@
 # fxcorr-x 目录说明
 
-**最后更新**：2026-09-28（**V6 S4.1 已实施并验证**：`merge` 拆成**两级**——batch 级只写 `vis-parts/<batch_id>/merged.part`、新增实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；判据 A–F 在测试机全过，见调用方式与"分片实现要点"末条。**分片模式与 `merge` 子命令于 2026-09-27 实施**：`ds_group` 分片、D16 `vis-parts/`；2026-09-17 主体）
+**最后更新**：2026-10-13（**v9 派生提示**：`applications/fxcorr-xp`（v9 链的 x′，见
+`fxcorr/v9-plan.md` 阶段 1）从本目录生长——`xmac.{h,cpp}` / `integrate.{h,cpp}` /
+`log.h` / `ompcompat.h` 在那边有拷贝或改造版（xmac.cpp 逐字节照搬、xmac.h 仅注释；
+integrate 的 `addAutocorrs` 改为收内存记录），`main.cpp` 的 merge 两子命令与分片/防呆/
+DifxMessage/时间戳机制原样继承。**改本目录这些文件时必须同步检查 xp**，位一致回归 =
+`applications/fxcorr-xp/CLAUDE.md` 的判据 3/4/5。**此前** 2026-09-28（**V6 S4.1 已实施并验证**：`merge` 拆成**两级**——batch 级只写 `vis-parts/<batch_id>/merged.part`、新增实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；判据 A–F 在测试机全过，见调用方式与"分片实现要点"末条。**分片模式与 `merge` 子命令于 2026-09-27 实施**：`ds_group` 分片、D16 `vis-parts/`；2026-09-17 主体）
 
 baseline-based 相关器后端（X-Engine）：无 MPI 串行程序，读 fxcorr-f 的 .sp / autocorr.bin 产物，做 XMAC 与长期积分，可见度直出 SWIN（`vis/<experiment>.difx/`）。算法照 mpifxcorr 的 `Core::processdata()` 切分移植，写盘复用 fxcorrcommon 的 Visibility（零改造）。
 
