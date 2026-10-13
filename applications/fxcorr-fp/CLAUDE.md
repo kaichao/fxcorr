@@ -1,7 +1,8 @@
 # fxcorr-fp 目录说明
 
-**最后更新**：2026-10-13（**新建**——v9 链的 datastream 侧；设计见 `fxcorr/v9-plan.md`，
-阶段 0 判据 1/2/7 已实测通过）
+**最后更新**：2026-10-13（**阶段 3 性能标定**——p419 真实规模：fp **0.07–0.2 s/任务**
+（RSS 3.5 MB；页缓存口径），对照 f 的 8.4–8.6 s；全表见 `fxcorr/test/v9/README.md`。
+**新建**——v9 链的 datastream 侧；设计见 `fxcorr/v9-plan.md`，阶段 0 判据 1/2/7 已实测通过）
 
 v9 链的站级前端（**f′ / f-passthrough**）：无 MPI 串行程序，逐站读一个 batch 的本地原始
 数据，做**读帧 + 帧对齐 + 坏帧/缺口簿记**，把 `DataReader::readSubint` 的产物原样写成

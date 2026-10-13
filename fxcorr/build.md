@@ -1,6 +1,8 @@
 # fxcorr 构建手册
 
-**最后更新**：2026-09-29（V7：新增「目标集群构建（V7，Slurm）」一节——Slurm 集群上实测的**七个坑**与一键脚本 `build.sh`/`env.sh`；此前 2026-09-20 V5 P4 容器镜像合并为单镜像）
+**最后更新**：2026-10-13（**V9 轮追加**——p419 新节点（cstu0030）重建，第 9/10 坑与
+`build.sh` 重建；此前 2026-09-29（V7：新增「目标集群构建（V7，Slurm）」一节——Slurm
+集群上实测的**七个坑**与一键脚本 `build.sh`/`env.sh`；此前 2026-09-20 V5 P4 容器镜像合并为单镜像））
 
 覆盖本仓库全部组件的两种构建方式：**集成构建**（`install-difx` 编排器，推荐）与**独立构建**（单包 autotools，调试/重编译常用）。
 
@@ -208,6 +210,22 @@ python3 install-difx --noipp --doonly=difxcalc11      # 需要 GSL，见坑 8
 
 **不要改 DiFX 源码来绕这些坑**——七项全是环境事实，补软链与 pc 文件即可；改源码会让本仓库与
 上游分叉，而这些差异换一台装齐 FFTW 的机器就不存在。
+
+### V9 轮追加（2026-10-13，p419 新节点重建）
+
+V9（FFT 下移）的工具级标定换到重新申请的节点：账号 **cstu0030**（入口 `ssh p419-n0` →
+`ssh -p 50022 <计算节点IP>`），源码 `~/fxcorr`（rsync 自 mac）、安装前缀 `~/fxcorr/install`。
+`build.sh` 照上述八坑重建，`--doonly` 加 `fxcorr-fp,fxcorr-xp`（install-difx 早已注册两者），
+**又撞两坑**——同为"上游脚本/环境"模式，补软链与环境变量解决，仍不改源码：
+
+| # | 现象 | 处理 |
+|---|---|---|
+| 9 | vdifio 处 `vdifPhase.c: fftw3.h: No such file`——`libraries/vdifio/utils/Makefile.am:50` 写的是 `vdifPhase_CFLAGS = $(FFTW_CFLAGS) $(INCLUDES)`，而 configure 定义的是 **`FFTW3_CFLAGS`**（上游变量名笔误，带 3）→ `-I` 列表为空 | 构建前把 `fftw3.h` 软链进 `libraries/vdifio/utils/`（in-tree 构建的 `-I.` 即该目录，编译命令只带 `-I. -I.. -I../src`） |
+| 10 | fxcorrcommon 处 `configure: error: Package requirements (difxmessage >= 2.9.0) were not met: No package 'difxmessage' found`（而 `install/lib/pkgconfig/difxmessage.pc` 明明在）——install-difx 只把 `<cwd>/pkgconfig` 前置进 `PKG_CONFIG_PATH`（空钩子，无人往里放 pc），各组件装完的 pc 都落在 `$DIFXROOT/lib/pkgconfig` | 构建环境显式 `PKG_CONFIG_PATH=…:$DIFXROOT/lib/pkgconfig`（一键脚本已固化） |
+
+两个新修与八坑一并固化在 **`fxcorr/test/v9/build.sh`**（2026-10-13 自现场重建版入仓；
+配套 `env.sh` 同目录）——用法 = 拷到源码树根后 `cd ~/fxcorr && bash build.sh`，详见
+`test/v9/README.md` 的"现场部署"节。
 
 ## 相关
 

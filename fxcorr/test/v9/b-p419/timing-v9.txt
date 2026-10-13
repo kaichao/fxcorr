@@ -1,0 +1,36 @@
+TIMING fxcorr-fp batch=00000001 station=BA ds=0 nsubints=100 total=0.0768529 init=0.0291677 read=0.0303675 swp=0.000596679 write=0.0162601 fin=4.9554e-05 del=0.000104338
+TIMING fxcorr-fp batch=00000001 station=BA ds=1 nsubints=100 total=0.0673363 init=0.020569 read=0.0298588 swp=0.000604128 write=0.0158165 fin=5.1505e-05 del=0.000112519
+TIMING fxcorr-fp batch=00000001 station=BA ds=2 nsubints=100 total=0.0717817 init=0.0269941 read=0.028544 swp=0.000572693 write=0.0152115 fin=5.3684e-05 del=0.000105869
+TIMING fxcorr-fp batch=00000001 station=BA ds=3 nsubints=100 total=0.0669955 init=0.0197575 read=0.0302927 swp=0.000577202 write=0.0159493 fin=5.1175e-05 del=8.1206e-05
+TIMING fxcorr-fp batch=00000001 station=BA ds=4 nsubints=100 total=0.0718349 init=0.0259738 read=0.0288378 swp=0.000612542 write=0.01596 fin=5.3414e-05 del=0.000104509
+TIMING fxcorr-fp batch=00000001 station=BA ds=5 nsubints=100 total=0.0702043 init=0.0218101 read=0.0311563 swp=0.000559394 write=0.0162376 fin=4.6544e-05 del=8.6717e-05
+TIMING fxcorr-fp batch=00000001 station=BA ds=6 nsubints=100 total=0.145924 init=0.0246447 read=0.0280556 swp=0.000591395 write=0.0921781 fin=5.6925e-05 del=0.000100778
+TIMING fxcorr-fp batch=00000001 station=BA ds=7 nsubints=100 total=0.0755311 init=0.0211207 read=0.0369555 swp=0.000587469 write=0.0164124 fin=5.2134e-05 del=9.3128e-05
+TIMING fxcorr-fp batch=00000001 station=BX ds=0 nsubints=100 total=0.0720769 init=0.0214239 read=0.0339722 swp=0.000593747 write=0.0156124 fin=5.6804e-05 del=0.000108489
+TIMING fxcorr-fp batch=00000001 station=BX ds=1 nsubints=100 total=0.0787761 init=0.0205263 read=0.0409075 swp=0.000562916 write=0.0163352 fin=4.8064e-05 del=8.5617e-05
+TIMING fxcorr-fp batch=00000001 station=BX ds=2 nsubints=100 total=0.0700773 init=0.0240521 read=0.0292182 swp=0.000623734 write=0.0156954 fin=5.7735e-05 del=0.00012141
+TIMING fxcorr-fp batch=00000001 station=BX ds=3 nsubints=100 total=0.0724507 init=0.0209703 read=0.034202 swp=0.000565833 write=0.016261 fin=5.1764e-05 del=8.5437e-05
+TIMING fxcorr-fp batch=00000001 station=BX ds=4 nsubints=100 total=0.0665537 init=0.0230263 read=0.0269943 swp=0.00061055 write=0.0154586 fin=6.0755e-05 del=9.8158e-05
+TIMING fxcorr-fp batch=00000001 station=BX ds=5 nsubints=100 total=0.167799 init=0.0202989 read=0.0384654 swp=0.000573566 write=0.107985 fin=5.1474e-05 del=0.000110069
+TIMING fxcorr-fp batch=00000001 station=BX ds=6 nsubints=100 total=0.0685178 init=0.0236822 read=0.0277914 swp=0.000591186 write=0.0159793 fin=5.1274e-05 del=0.000109699
+TIMING fxcorr-fp batch=00000001 station=BX ds=7 nsubints=100 total=0.0711109 init=0.0210736 read=0.0328815 swp=0.000596272 write=0.0161043 fin=5.2794e-05 del=0.000111369
+TIMING fxcorr-fp batch=00000001 station=S6 ds=0 nsubints=100 total=0.06604 init=0.0234535 read=0.0265542 swp=0.000583448 write=0.0149752 fin=5.3875e-05 del=0.000107308
+TIMING fxcorr-fp batch=00000001 station=S6 ds=1 nsubints=100 total=0.0667135 init=0.0196164 read=0.0306141 swp=0.000567032 write=0.0154396 fin=5.1364e-05 del=0.000107489
+TIMING fxcorr-fp batch=00000001 station=S6 ds=2 nsubints=100 total=0.0689398 init=0.0225779 read=0.030426 swp=0.000557849 write=0.014917 fin=5.3865e-05 del=9.8428e-05
+TIMING fxcorr-fp batch=00000001 station=S6 ds=3 nsubints=100 total=0.067677 init=0.0195103 read=0.0317387 swp=0.000573532 write=0.0153662 fin=5.2704e-05 del=0.000106578
+TIMING fxcorr-fp batch=00000001 station=S6 ds=4 nsubints=100 total=0.15154 init=0.0216606 read=0.0270512 swp=0.000590734 write=0.101768 fin=5.2594e-05 del=0.000105978
+TIMING fxcorr-fp batch=00000001 station=S6 ds=5 nsubints=100 total=0.068016 init=0.0203705 read=0.0309223 swp=0.00057899 write=0.0156604 fin=5.3214e-05 del=0.000107388
+TIMING fxcorr-fp batch=00000001 station=S6 ds=6 nsubints=100 total=0.0736735 init=0.023016 read=0.0344174 swp=0.00062714 write=0.0151407 fin=5.7605e-05 del=0.000108918
+TIMING fxcorr-fp batch=00000001 station=S6 ds=7 nsubints=100 total=0.0676252 init=0.0199694 read=0.0308073 swp=0.000555915 write=0.0158289 fin=5.4034e-05 del=0.000100767
+TIMING fxcorr-fp batch=00000001 station=SX ds=0 nsubints=100 total=0.0696526 init=0.0243038 read=0.0292918 swp=0.000575258 write=0.0150064 fin=5.3684e-05 del=0.000112848
+TIMING fxcorr-fp batch=00000001 station=SX ds=1 nsubints=100 total=0.0669293 init=0.0194499 read=0.0306424 swp=0.000560557 write=0.0157904 fin=5.5644e-05 del=0.000106808
+TIMING fxcorr-fp batch=00000001 station=SX ds=2 nsubints=100 total=0.0746703 init=0.0247443 read=0.0329693 swp=0.00058184 write=0.0159315 fin=4.8544e-05 del=8.2736e-05
+TIMING fxcorr-fp batch=00000001 station=SX ds=3 nsubints=100 total=0.132063 init=0.0219461 read=0.0672521 swp=0.000638892 write=0.0417662 fin=5.0233e-05 del=0.000115909
+TIMING fxcorr-fp batch=00000001 station=SX ds=4 nsubints=100 total=0.072209 init=0.0236514 read=0.0292092 swp=0.00411051 write=0.0147638 fin=4.7183e-05 del=0.000116789
+TIMING fxcorr-fp batch=00000001 station=SX ds=5 nsubints=100 total=0.0681421 init=0.0196045 read=0.031652 swp=0.000573112 write=0.0158585 fin=4.8113e-05 del=9.9958e-05
+TIMING fxcorr-fp batch=00000001 station=SX ds=6 nsubints=100 total=0.0651645 init=0.0226219 read=0.0263751 swp=0.000557746 write=0.0151409 fin=5.2424e-05 del=0.000105908
+TIMING fxcorr-fp batch=00000001 station=SX ds=7 nsubints=100 total=0.0680478 init=0.0194407 read=0.0318363 swp=0.000587485 write=0.0157086 fin=5.4094e-05 del=0.000111558
+TIMING fxcorr-xp batch=00000001 dsgroup=0 nthreads=1 nsubints=100 total=69.464 read=0.412742 station=52.5606 zero=0.0237344 xmac=13.8486 wacc=2.21831 uvshift=0.0148129 cbw=0.00170703 auto=0.00556153 addsub=0.0321041
+TIMING fxcorr-xp batch=00000001 dsgroup=1 nthreads=1 nsubints=100 total=68.7973 read=0.238347 station=52.0489 zero=0.02357 xmac=13.8401 wacc=2.24563 uvshift=0.0149317 cbw=0.0017653 auto=0.00551954 addsub=0.0324646
+TIMING fxcorr-xp batch=00000001 dsgroup=2 nthreads=1 nsubints=100 total=69.2402 read=0.243697 station=51.9921 zero=0.0255636 xmac=13.8694 wacc=2.2238 uvshift=0.0140951 cbw=0.0017653 auto=0.00555135 addsub=0.0309242
+TIMING fxcorr-xp batch=00000001 dsgroup=3 nthreads=1 nsubints=100 total=69.9247 read=0.207917 station=53.0538 zero=0.0237399 xmac=13.8425 wacc=2.18719 uvshift=0.0143071 cbw=0.00185319 auto=0.00549063 addsub=0.0320186

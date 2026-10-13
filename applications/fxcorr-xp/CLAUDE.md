@@ -1,8 +1,12 @@
 # fxcorr-xp 目录说明
 
-**最后更新**：2026-10-13（**阶段 2 完成**——STA/kurtosis 移植、zoom/crosspol 验证、
-ds 级并行位一致、判据 4/6/7 实测通过；**修复 crosspol 的 readsection 越界崩**（见
-"关键实现要点"）。阶段 1（判据 3/5）同日早些时候完成；设计见 `fxcorr/v9-plan.md`）
+**最后更新**：2026-10-13（**阶段 3（性能标定）完成**——p419 真实规模（批 00000001、
+4 站 × 8 ds）：fp 0.07–0.2 s/任务、xp 68.8–69.9 s/组（OMP=1）、**拐点 OMP=8**
+（15.6 s/组）；`station` ≈ 8×(f 的 proc+reduce)（**站级代价守恒**实测）；fengine
+**15.8×** 减量。**此前阶段 2**：STA/kurtosis 移植、zoom/crosspol 验证、ds 级并行
+位一致、判据 4/6/7 实测通过；**修复 crosspol 的 readsection 越界崩**（见"关键实现
+要点"）。阶段 1（判据 3/5）同日早些时候完成；设计与 B 段全表见 `fxcorr/v9-plan.md`
+与 `fxcorr/test/v9/README.md`）
 
 v9 链的站级+基线一体化工具（**x′**）：无 MPI，从 fxcorr-x 生长而来并**并入站级栈**。
 每个 datastream 一个 `Mode`，数据来自 fxcorr-fp 的 **`stream.bin`**（1× 时间槽排布数据，
@@ -137,6 +141,16 @@ fxcorr-xp merge --experiment [workdir]         # 实验级归并 → SWIN（唯�
 一遍；`.input` 的 `OUTPUT FILENAME` 与 config 链（CALC→IM）的绝对路径已改指副本——
 原值指向源 workdir，直接跑会把产物写回去）。两条链均 `OMP_NUM_THREADS=1`（并行
 位一致单独测）。
+
+### 阶段 3（判据 8，p419 真实规模；全表见 `fxcorr/test/v9/README.md`）
+
+批 00000001（4 站 × 8 ds × 0.512 s，OMP=1 串行）：fp **0.07–0.2 s/任务**（RSS 3.5 MB）、
+xp **68.8–69.9 s/组**（RSS 400–417 MB）；对照 v8（f 8.4–8.6 s、x 24.2–30.4 s）单组
+串联 **−26%**；xp OMP 扫描 1/2/4/8/16：total 69.5 → 42.3 → 29.3 → **15.6** → 16.1 s
+（`station` 完美 2× 阶梯到 8 = 组内 ds 数；`xmac` 1–4 线程平坦、≥8 才分）；fengine
+33.77 GB → 2.135 GB（**15.8×**）。**结构验证**：`station` 52.0 s ≈ 8×（f 的
+proc 5.41 + reduce 0.94）= 50.8 s——同一份 `Mode::process` 的代价守恒（页缓存口径，
+详见 README）。
 
 ### 阶段 2（判据 4/6/7）
 

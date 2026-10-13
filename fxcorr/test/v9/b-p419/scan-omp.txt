@@ -1,0 +1,4 @@
+xp grp0 omp=2 wall=42.32 rss=415876kB
+xp grp0 omp=4 wall=29.34 rss=415952kB
+xp grp0 omp=8 wall=15.62 rss=416908kB
+xp grp0 omp=16 wall=16.13 rss=416480kB

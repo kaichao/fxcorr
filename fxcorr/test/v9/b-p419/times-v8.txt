@@ -1,0 +1,36 @@
+f BA ds0 wall=8.47 rss=50292kB
+f BA ds1 wall=8.54 rss=50284kB
+f BA ds2 wall=8.46 rss=48164kB
+f BA ds3 wall=8.63 rss=48164kB
+f BA ds4 wall=8.65 rss=47904kB
+f BA ds5 wall=8.45 rss=48164kB
+f BA ds6 wall=8.56 rss=50292kB
+f BA ds7 wall=8.55 rss=50292kB
+f BX ds0 wall=8.45 rss=50292kB
+f BX ds1 wall=8.49 rss=50276kB
+f BX ds2 wall=8.60 rss=47976kB
+f BX ds3 wall=8.40 rss=47976kB
+f BX ds4 wall=8.64 rss=48164kB
+f BX ds5 wall=8.48 rss=48156kB
+f BX ds6 wall=8.47 rss=50096kB
+f BX ds7 wall=8.55 rss=50288kB
+f S6 ds0 wall=8.61 rss=50284kB
+f S6 ds1 wall=10.26 rss=50220kB
+f S6 ds2 wall=9.09 rss=48148kB
+f S6 ds3 wall=8.63 rss=48156kB
+f S6 ds4 wall=8.64 rss=48152kB
+f S6 ds5 wall=8.55 rss=48132kB
+f S6 ds6 wall=8.63 rss=50100kB
+f S6 ds7 wall=8.59 rss=49732kB
+f SX ds0 wall=8.58 rss=49552kB
+f SX ds1 wall=8.57 rss=50224kB
+f SX ds2 wall=8.71 rss=48164kB
+f SX ds3 wall=8.63 rss=48136kB
+f SX ds4 wall=8.56 rss=48164kB
+f SX ds5 wall=8.81 rss=47552kB
+f SX ds6 wall=8.54 rss=50108kB
+f SX ds7 wall=8.60 rss=50236kB
+x grp0 wall=24.24 rss=89132kB
+x grp1 wall=25.16 rss=89288kB
+x grp2 wall=25.80 rss=89132kB
+x grp3 wall=30.43 rss=89324kB

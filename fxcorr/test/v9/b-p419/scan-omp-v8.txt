@@ -1,0 +1,4 @@
+x grp0 omp=1 wall=27.53 rss=89160kB
+x grp0 omp=2 wall=20.30 rss=89348kB
+x grp0 omp=4 wall=17.63 rss=89164kB
+x grp0 omp=8 wall=12.93 rss=89208kB

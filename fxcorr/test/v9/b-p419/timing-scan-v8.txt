@@ -1,0 +1,4 @@
+TIMING fxcorr-x batch=00000001 dsgroup=0 nthreads=1 nsubints=100 total=27.5035 read=11.2241 zero=0.0202895 xmac=13.1509 wacc=2.0816 uvshift=0.0148012 cbw=0.00171094 auto=0.188252 addsub=0.0719566
+TIMING fxcorr-x batch=00000001 dsgroup=0 nthreads=2 nsubints=100 total=20.2892 read=5.48782 zero=0.0202665 xmac=13.2159 wacc=1.29648 uvshift=0.0152582 cbw=0.00211063 auto=0.080852 addsub=0.0609477
+TIMING fxcorr-x batch=00000001 dsgroup=0 nthreads=4 nsubints=100 total=17.6205 read=3.35185 zero=0.0205523 xmac=13.2001 wacc=0.782391 uvshift=0.0127926 cbw=0.0020008 auto=0.0771669 addsub=0.124912
+TIMING fxcorr-x batch=00000001 dsgroup=0 nthreads=8 nsubints=100 total=12.9187 read=1.41322 zero=0.0217888 xmac=10.675 wacc=0.619465 uvshift=0.0115104 cbw=0.00234799 auto=0.0774937 addsub=0.0451363
