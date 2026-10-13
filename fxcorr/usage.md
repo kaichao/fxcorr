@@ -163,6 +163,38 @@ FXCORR_WORKDIR=/data/proj fxcorr-f 00000001 T1  # 环境变量定义（位置参
 
 ---
 
+## fxcorr-fp
+
+```
+fxcorr-fp <batch_id> <station> [workdir] [ds_index]
+```
+
+**v9 链的站级前端**（`v9-plan.md`，2026-10-13 新建，从 fxcorr-f 裁剪而来）：读帧 +
+帧对齐 + 坏帧/缺口簿记，把 `DataReader::readSubint` 的产物写成 **`stream.bin`**
+（1× 数据流，格式见 data-spec 5.3.1）。**零 DSP**：不解包、无 FFT、不构造 Mode——
+站级处理栈（unpack / pcal / FFT / 条纹旋转 / frac sample / autocorr / STA）全部在
+v9 链的 **fxcorr-xp** 侧。
+
+- 参数、workdir / `FXCORR_WORKDIR`、`FXCORR_REAL_PATH`（数据定位两态）、batch.json /
+  `.input` 加载、ds 组与输出目录布局（`<FENGINE_ROOT>/<batch>/<g>/<station>/ds_<N>/`）、
+  DifxMessage 节奏（mpiId = dsindex+1、Starting → 每 subint 两条 Diagnostic →
+  Ending/Done）、`FXCORR_LOGLEVEL`、时间戳三档（`FXCORR_TIMING*`，采集点
+  init/read/swp/write/fin/del，TSV 的 prog 列为 `fxcorr-fp`）——**全部与 fxcorr-f 相同**
+  （见上一节；本工具完全串行，不认 `OMP_NUM_THREADS`）。
+- 产物：`stream.bin`；**SWITCHEDPOWER 文本仍由本工具写**（原始帧字节统计）；
+  `band_XX.sp` / `autocorr.bin` 不再产生；`pcal.bin` 与 PCAL 文本由 fxcorr-xp 写。
+- **`FXCORR_STA` / `FXCORR_KURTOSIS` 置位时报一行警告后忽略**（两类记录由
+  fxcorr-xp 产出，避免开关挂错工具时无声失效）。
+
+示例：
+
+```bash
+fxcorr-fp 00000001 T1            # 当前目录为项目根
+fxcorr-fp 00000001 T1 /data/proj 0   # 显式 workdir 与 ds 0
+```
+
+---
+
 ## fxcorr-x
 
 两份职责：**处理**（一个 batch 的互相关，产可见度）与**归并**（把分片产出合成为正式 SWIN）。

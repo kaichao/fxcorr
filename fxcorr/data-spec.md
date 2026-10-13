@@ -306,6 +306,54 @@ fxcorr-sim 是 datasim 的替身（datasim 因上游 IPP 依赖无法构建）�
 - **多节点部署必须落 tmpfs**（`/dev/shm`）：产生率 GB/s 级，SATA SSD 差两个数量级；同节点的并发组数受 tmpfs 容量约束（见 `data-volume.md` §5.1 与 `v6-plan.md`）；
 - **改这三种文件的布局时必须递增其 Header 的 `version`**，并同步 README 与本节。
 
+#### 5.3.1 `stream.bin`（v9 链，2026-10-13）
+
+v9 链（`fxcorr-fp` → `fxcorr-xp`，见 `v9-plan.md`——FFT 从 f 侧移到 x 侧）里本目录的
+内容物随之变化：**`band_XX.sp` / `autocorr.bin` 取消**（谱与自相关在 xp 内存中直取）、
+**`pcal.bin` 改由 `fxcorr-xp` 写**（格式不变）、新增 **`stream.bin`**（fp 写、xp 读）。
+`<batch>/<g>/<station>/ds_<N>/` 的布局、组级 purge 与生命周期语义**完全不变**。
+
+`stream.bin` 的内容 = `DataReader::readSubint` 的逐 subint 产物（时间槽排布的原始数据、
+valid flags、两组时间戳），**1× 数据量**（raw 量级，取代原 16× 的 fp32 谱）；xp 顺序读、
+原样重放 `setValidFlags`/`setData`/`setOffsets`，不做任何重新对齐。**主机字节序**
+（全线 x86-64/aarch64 LE，同 `.sp`）。
+
+**Header（92 B，固定长）**：
+
+| 偏移 | 类型 | 字段 | 说明 |
+|---|---|---|---|
+| 0 | char[8] | magic | `"FXCORR9S"` |
+| 8 | u32 | version | 1 |
+| 12 | char[32] | batch_id | |
+| 44 | char[16] | station | |
+| 60 | u32 | ds_index | 站内 datastream 序号（`ds_<N>` 同口径） |
+| 64 | u32 | subintns | |
+| 68 | u32 | blockspersend | |
+| 72 | u32 | numbufferedffts | |
+| 76 | u32 | nsubints | |
+| 80 | u32 | sendbytes | 每 subint record 数据区字节数 |
+| 84 | u32 | framebytes | 诊断用 |
+| 88 | u32 | framespersec | 诊断用 |
+
+**record（每 subint 一条，定长 `28 + 4×flagwords + sendbytes` B）**：
+
+| 偏移 | 类型 | 字段 | 说明 |
+|---|---|---|---|
+| 0 | u32 | status | 0 = ok；1 = invalid subint（readSubint 返回 0） |
+| 4 | u32 | validbytes | readSubint 返回值原样（可 < sendbytes；0 = invalid） |
+| 8 | u32 | scan | |
+| 12 | i32 | sec | readSubint 输出的数据秒（invalid 时为 `INVALID_SUBINT` 常量） |
+| 16 | u32 | ns | readSubint 输出的纳秒 |
+| 20 | u32 | offsetsec | 循环算给 `setOffsets` 的秒 |
+| 24 | u32 | offsetns | 循环算给 `setOffsets` 的纳秒 |
+| 28 | u32[flagwords] | flags | valid flags（每 FFT 块 1 位、30 位/字，同 `.sp`；位 = 0 无效） |
+| 28+4×flagwords | u8[sendbytes] | data | 帧对齐后数据；`[validbytes, sendbytes)` 补 0 |
+
+尺寸 = `92 + nsubints × (28 + 4×flagwords + sendbytes)`，`flagwords = ceil(blockspersend/30)`。
+`status/validbytes/scan/sec/ns/offsetsec/offsetns/flags/data` 与 fxcorr-f 喂给
+`Mode::setData`/`setOffsets` 的参数一一对应（逐字节判据见 `v9-plan.md` §8、实施记录见
+`applications/fxcorr-fp/CLAUDE.md`）。
+
 ### 5.4 X-Engine 输出（vis/，SWIN）
 
 > 实物、逐文件说明与 **SWIN 74 字节记录头**见 `fxcorr/workdir-template/vis/README.md`。

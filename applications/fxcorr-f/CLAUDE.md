@@ -1,6 +1,12 @@
 # fxcorr-f 目录说明
 
-**最后更新**：2026-10-02（**V8 数据定位已实施**：f 不再读 `.input` 的 DATA TABLE 定位数据，改 `FXCORR_REAL_PATH`（任务 headers `real_path`）> 命名规则推导两级，DATA TABLE 软链退役；`DataReader` 构造加 `dataFilesOverride`、`main.cpp` 加 `resolveDataFiles`，判据 1–3、模块级全链（判据 4）与容器内 real_path 直投均实测通过，见 `fxcorr/v8-plan.md` §2。**此前 2026-09-19**（V4：reader 拆成三层、真值判据固化；见 `fxcorr/v4-plan.md`））
+**最后更新**：2026-10-13（**v9 阶段 0**：`datareader.{h,cpp}` / `corrections.h` /
+`frametimeline.h` / `log.h` 在 `applications/fxcorr-fp/` 有一份**逐字节拷贝**（v9 链
+的 datastream 侧）——**改这四处必须同步 fxcorr-fp**，回归判据
+`fxcorr/test/gaps/run_v9_compare.sh`（15 场景上 f 与 fp 的 GAPCHECK/READPOS 诊断
+**逐行一致**、无效块逐 subint 一致）。同日修掉 `Mode::blockPcalCapable` 在无 pcal
+配置下的空指针崩溃（`libraries/CLAUDE.md`；f 侧回归 = gaps 七用例全绿）。
+**此前** 2026-10-02（**V8 数据定位已实施**：f 不再读 `.input` 的 DATA TABLE 定位数据，改 `FXCORR_REAL_PATH`（任务 headers `real_path`）> 命名规则推导两级，DATA TABLE 软链退役；`DataReader` 构造加 `dataFilesOverride`、`main.cpp` 加 `resolveDataFiles`，判据 1–3、模块级全链（判据 4）与容器内 real_path 直投均实测通过，见 `fxcorr/v8-plan.md` §2。**此前 2026-09-19**（V4：reader 拆成三层、真值判据固化；见 `fxcorr/v4-plan.md`））
 
 station-based 相关器前端（F-Engine）：无 MPI 串行程序，逐站处理一个 batch 的本地原始数据，产出 band_XX.sp / pcal.bin / autocorr.bin（格式见 `fxcorr/data-spec.md` 5.3）。对拍目标为 mpifxcorr 的 station-based 段，核心算法（解包/条纹旋转/分数采样/FFT/自相关）零改动复用 fxcorrcommon 的 Mode。
 
