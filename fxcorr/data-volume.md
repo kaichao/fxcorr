@@ -464,7 +464,7 @@ S2.5 单点实测的外推）。**结论不变：必须走 S2 的轻量模式，
 > **对 SATA 超载 ~18×、对 tmpfs 约 1.6×**——与本节 t25362 实时口径"132× / ✓"同方向，
 > 倍数因 mini 数据率低而缩小。**tmpfs 不是无限快**：写带宽 ≈ 2.3 GB/s，并发上限由此反推
 > （f 写 120 MB/s/任务 → ≈19 并发）。f 与 x 单任务均为 **CPU 限制**（介质 A/B 同速，
-> 详见 `app-fxcorr/docs/node-tuning.md` §3.1）。
+> 详见 `app-fxcorr/docs/archive/node-tuning.md` §3.1）。
 
 **三条结论**：
 
