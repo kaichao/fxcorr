@@ -105,13 +105,13 @@ struct TimingProbe
 static TimingProbe g_probes[] = {
 	{"station", "main.cpp", 1866, &g_tt_station, 0},
 	{"read",    "main.cpp", 1683, &g_tt_read,    0},
-	{"zero",    "main.cpp", 1871, &g_tt_zero,    0},
-	{"xmac",    "main.cpp", 1884, &g_tt_xmac,    0},
-	{"wacc",    "main.cpp", 1886, &g_tt_wacc,    0},
-	{"uvshift", "main.cpp", 1894, &g_tt_uvshift, 0},
-	{"cbw",     "main.cpp", 1911, &g_tt_cbw,     0},
-	{"auto",    "main.cpp", 1919, &g_tt_auto,    0},
-	{"addsub",  "main.cpp", 1926, &g_tt_addsub,  0},
+	{"zero",    "main.cpp", 1874, &g_tt_zero,    0},
+	{"xmac",    "main.cpp", 1887, &g_tt_xmac,    0},
+	{"wacc",    "main.cpp", 1889, &g_tt_wacc,    0},
+	{"uvshift", "main.cpp", 1897, &g_tt_uvshift, 0},
+	{"cbw",     "main.cpp", 1914, &g_tt_cbw,     0},
+	{"auto",    "main.cpp", 1922, &g_tt_auto,    0},
+	{"addsub",  "main.cpp", 1929, &g_tt_addsub,  0},
 	{0, 0, 0, 0, 0}
 };
 
@@ -1865,10 +1865,13 @@ int main(int argc, char **argv)
 			}
 			g_tt_station += STAGE_LAP(ts, "station");
 		}
-		// zero the per-subint accumulation (threadcrosscorrs, baselineweights, results)
+		// zero the per-subint accumulation (threadcrosscorrs, baselineweights, results).
+		// Own timer: the station stage sits between the read lap and this one, and
+		// reusing st would charge the whole station stage to zero.
+		StageTimer tz;
 		xmac.zeroSubint();
 		vectorZero_cf32(subintresults, coreresultlength);
-		g_tt_zero += STAGE_LAP(st, "zero");
+		g_tt_zero += STAGE_LAP(tz, "zero");
 
 		// XMAC + uvshift/average, batched exactly like core.cpp:786-1057
 		int xcblockcount = 0, xcshiftcount = 0;

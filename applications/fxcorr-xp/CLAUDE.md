@@ -117,7 +117,10 @@ fxcorr-xp merge --experiment [workdir]         # 实验级归并 → SWIN（唯�
 - **挡掉的位置**：restriction 段在多相位/pulsar/相位阵/STA/kurtosis 上启动即 fail——
   注意它**在 reader 构造之前**，但根一致性检查与 batch.json 读取在其前。
 - **时间戳探针**：`g_probes` 的行号必须与 `STAGE_LAP` 站点同步（brief 档输出
-  `file:line`）；加行/删行后重新 grep 回填。
+  `file:line`）；加行/删行后重新 grep 回填。另：**每个 lap 要用独立 timer**——
+  xp 把站级段插在 read 与 zero 之间，zero 若复用 `st` 会把整段站级耗时算进 zero
+  （阶段 3 A 段抓出：显示 0.897 s，改独立 timer 后 0.00038 s，与 v8 x 的 0.00036
+  量级一致；修复只动计时、产物位一致）。
 
 ## 构建与注册
 
