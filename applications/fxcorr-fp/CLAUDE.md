@@ -70,7 +70,8 @@ fxcorr-fp <batch_id> <station> [workdir] [ds_index]
 - install-difx 注册 4 处（components 字典、setNormalComponentsFalse、apptargets、
   --doonly 帮助文本）——2026-10-13 已加。
 - 测试机上裸构建：`autoreconf -i && ./configure --prefix=/usr/local/difx && make
-  && make install`。镜像（`fxcorr/docker/Dockerfile`）的 COPY 行待镜像重建时加。
+  && make install`。镜像（`fxcorr/docker/Dockerfile`）的 COPY 行**已加**（2026-10-13，
+  随 v9 接入重建：`fxcorr/fxcorr:latest` = `e41dfca36e4f`，容器内 `fxcorr-fp` 可用）。
 
 ## 测试（2026-10-13，v9 阶段 0）
 

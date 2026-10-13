@@ -95,12 +95,14 @@ COPY --from=builder /usr/local/difx/lib/*.so* /usr/local/difx/lib/
 COPY --from=builder /usr/local/difx/share /usr/local/difx/share
 
 # 串行链路全部命令：前处理 vex2difx/difxcalc、造数 fxcorr-sim、
-# 运行 fxcorr-f/fxcorr-x、后处理 difx2fits
+# 运行 fxcorr-f/fxcorr-x（v8 链）与 fxcorr-fp/fxcorr-xp（v9 链）、后处理 difx2fits
 COPY --from=builder /usr/local/difx/bin/vex2difx /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difxcalc /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-sim /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-f /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-x /usr/local/difx/bin/
+COPY --from=builder /usr/local/difx/bin/fxcorr-fp /usr/local/difx/bin/
+COPY --from=builder /usr/local/difx/bin/fxcorr-xp /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difx2fits /usr/local/difx/bin/
 
 # fxcorr 的规范适配脚本（V5 P5 Q15/Q16）：原 difx 程序（vex2difx / difxcalc /

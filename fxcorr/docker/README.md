@@ -18,6 +18,8 @@
 | `fxcorr-sim` | 造仿真 VDIF（datasim 的替身） |
 | `fxcorr-f` | `run_batch.sh` 逐站 F 引擎 |
 | `fxcorr-x` | `run_batch.sh` 单 batch X 引擎 |
+| `fxcorr-fp` | v9 链（`fxcorr/v9-plan.md`）：逐站读帧 → `stream.bin`，零 DSP |
+| `fxcorr-xp` | v9 链：站级栈 + X 引擎一体（含 merge 两子命令） |
 | `difx2fits` | 后处理：SWIN → FITS |
 | `wrap_vex2difx.sh` / `wrap_difxcalc.sh` | 前处理封装（V5 P5）：在 config/ 内调用原程序 + 把产物里的绝对路径规范化回相对 |
 | `wrap_difx2fits.sh` | 后处理封装（V5 P5）：SWIN → FITS，产物落 `FXCORR_PRODUCT_ROOT`；实验级 |
