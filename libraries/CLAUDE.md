@@ -60,3 +60,12 @@ libraries/<name>/
   开启后每块的贡献落在自己的槽位、主线程按块序累加。判据：**同一个 f 任务在 `OMP_NUM_THREADS` 1 / 8 / 24 下，`.sp` 与 `autocorr.bin` 三者逐字节相同**。布局取 `[crosspol][block][band][chan]`（block 维在前，给将来的加速器留的形状，见 `v7-plan.md` §19.3）。
   **改一处不够**：`process()` 里 autocorr 的写入要经 `acTarget()`、weight 的累加要经 `addWeight()`——`mode.cpp` 原有**六处** `weights[...] += ...` 是直接写的、绕过 `addWeight`。只改 autocorr 时差异从 530122 字节降到 9440 字节，**剩下那 9440 全在 acweight 上**（每条记录一个 float，正是 band 段的 weight 字段）。`clearBlockAccumulators` 由 `process()` 自己在开头调用（每块每 subint 只处理一次），**不要**改到 `zeroAutocorrelations()` 里去清全部槽——那会为每个 Mode 每个 subint 白写 ~10 MB。
   **第二批（2026-10-11）**：接口扩展为 **`enableBlockAccumulators(int slotcount)`**（只分配本线程的槽）+ **`setBlockSlotBase(int)`**（全局块索引→槽的映射，每并行批由调用方设置；`slot = index - blockslotbase`）——全量槽在 32000 块配置下 ~1 GB/副本、首次触碰的 page fault 随线程数叠加（OMP=8 白付 3.7 s），按段分配后 RSS 7.9→1.8 GB、blk 3.7→0.8 s。新增 **per-block pcal 槽**（`getBlockPcal`/`addPcalBlock`/`blockPcalCapable()`，配 `PCal` 的 `getAccumSize/getAccum/addAccum/resetAccum`——**只有线性原始累加器能这样归约，finalize 后的 DFT 输出不行**）与 weight 的 **`getWeightReduced`/`setWeightReduced`**（供分片归约做读-改-写、保持串行加序）。`Mode::addPcal`（段归约，实际是死代码）已删。
+- **无 phasecal 配置下的崩溃修复（2026-10-13，v9 阶段 0 发现）**：`PCal ** extractor` /
+  `cf32 ** pcalresults` 只在 `getDPhaseCalIntervalHz > 0` 时分配（`mode.cpp` 构造函数），
+  此前**不在成员初始化列表里**——无 pcal 的配置下它们是未初始化指针。P3 第二批的
+  `blockPcalCapable()` 用 `extractor == 0` 表示"无 pcal 提取器"，于是**无 pcal 配置在
+  `enableBlockAccumulators` → `blockPcalCapable` 处必崩**（SIGSEGV；P3 之前的代码只在
+  `haspcal` 保护下碰 extractor，这个未初始化一直没暴露；P3 的回归面全是带 pcal 的配置）。
+  修复：成员初始化列表加 `pcalresults(0), extractor(0)`（析构本就用
+  `getDPhaseCalIntervalHz > 0` 守卫，构造/析构对称）。回归：`fxcorr/test/gaps/` 七个
+  用例（无 pcal 的 test 配置）全 PASS。

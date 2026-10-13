@@ -30,7 +30,7 @@ pthread_mutex_t FFTinitMutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int chanstoavg, int bpersend, int gsamples, int nrecordedfreqs, double recordedbw, double * recordedfreqclkoffs, double * recordedfreqclkoffsdelta, double * recordedfreqphaseoffs, double * recordedfreqlooffs, int nrecordedbands, int nzoombands, int nbits, Configuration::datasampling sampling, Configuration::complextype tcomplex, int unpacksamp, bool fbank, bool linear2circular, int fringerotorder, int arraystridelen, bool cacorrs, double bclock)
-  : config(conf), configindex(confindex), datastreamindex(dsindex), recordedbandchannels(recordedbandchan), channelstoaverage(chanstoavg), blockspersend(bpersend), guardsamples(gsamples), fftchannels(recordedbandchan*2), numrecordedfreqs(nrecordedfreqs), numrecordedbands(nrecordedbands), numzoombands(nzoombands), numbits(nbits), unpacksamples(unpacksamp), fringerotationorder(fringerotorder), arraystridelength(arraystridelen), recordedbandwidth(recordedbw), blockclock(bclock), filterbank(fbank), linear2circular(linear2circular), calccrosspolautocorrs(cacorrs), recordedfreqclockoffsets(recordedfreqclkoffs), recordedfreqclockoffsetsdelta(recordedfreqclkoffsdelta), recordedfreqphaseoffset(recordedfreqphaseoffs), recordedfreqlooffsets(recordedfreqlooffs)
+  : config(conf), configindex(confindex), datastreamindex(dsindex), recordedbandchannels(recordedbandchan), channelstoaverage(chanstoavg), blockspersend(bpersend), guardsamples(gsamples), fftchannels(recordedbandchan*2), numrecordedfreqs(nrecordedfreqs), numrecordedbands(nrecordedbands), numzoombands(nzoombands), numbits(nbits), unpacksamples(unpacksamp), fringerotationorder(fringerotorder), arraystridelength(arraystridelen), recordedbandwidth(recordedbw), blockclock(bclock), filterbank(fbank), linear2circular(linear2circular), calccrosspolautocorrs(cacorrs), recordedfreqclockoffsets(recordedfreqclkoffs), recordedfreqclockoffsetsdelta(recordedfreqclkoffsdelta), recordedfreqphaseoffset(recordedfreqphaseoffs), recordedfreqlooffsets(recordedfreqlooffs), pcalresults(0), extractor(0)
 {
   // P3: per-block accumulators are opt-in (see mode.h).  Off by default so
   // that mpifxcorr and every serial consumer keep the original code path.
@@ -415,6 +415,12 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
     kscratch = 0;
   }
   // Phase cal stuff
+  // extractor/pcalresults are initialised to 0 in the member init list: a
+  // configuration without phase cal never allocates them, and
+  // Mode::blockPcalCapable() reads extractor == 0 as "no pcal extractor".
+  // Before P3 nothing read the pointer in that state, so the missing
+  // initialisation went unnoticed (no-pcal configurations crashed in
+  // enableBlockAccumulators once P3 called blockPcalCapable unconditionally).
   PCal::setMinFrequencyResolution(1e6);
   if(config->getDPhaseCalIntervalHz(configindex, datastreamindex) > 0)
   {
