@@ -21,13 +21,17 @@
 | `fxcorr-fp` | v9 链（`fxcorr/v9-plan.md`）：逐站读帧 → `stream.bin`，零 DSP |
 | `fxcorr-xp` | v9 链：站级栈 + X 引擎一体（含 merge 两子命令） |
 | `difx2fits` | 后处理：SWIN → FITS |
+| `mpifxcorr` | **MPI 一体化对照程序（2026-10-14 起进镜像）**：对比实验用；容器内自带 OpenMPI（见下） |
 | `wrap_vex2difx.sh` / `wrap_difxcalc.sh` | 前处理封装（V5 P5）：在 config/ 内调用原程序 + 把产物里的绝对路径规范化回相对 |
 | `wrap_difx2fits.sh` | 后处理封装（V5 P5）：SWIN → FITS，产物落 `FXCORR_PRODUCT_ROOT`；实验级 |
 | `roots.sh` | 上面三个脚本 source 的目录根解析（与库内 `FxcorrPath` 同规则） |
 | `make_testdata.sh` / `run_batch.sh` | 两个编排脚本（V7 P6 起进镜像，此前留在宿主，容器化调用必须 `--bind` 源码目录才能跑） |
 | `fxinput.py` | **`run_batch.sh` 的运行期依赖**（2026-09-29 起）：`.input` 解析、三条前置校验、DATA TABLE 软链、ds 组划分都从它的内嵌段搬到了这里。`run_batch.sh` 按 `$SCRIPTDIR/fxinput.py` 找，**两者必须同目录**——漏了它，容器里每次跑批都以 "No such file or directory" 立刻失败 |
 
-`mpifxcorr` 不进镜像（MPI 环境不进容器，`run_bench.sh` 对拍仍宿主直跑）。
+`mpifxcorr` **2026-10-14 起进镜像**（对比实验：与编排侧同基础镜像系，两侧浮点环境一致）
+——容器内自带 OpenMPI（builder 装 `openmpi-bin`/`libopenmpi-dev` 编译，runtime 装
+`openmpi-bin` 供 libmpi + 容器内 mpirun）；`run_bench.sh` 对拍可在容器内跑，宿主直跑
+（集群 HPC-X 版）仍可用。
 
 ## 构建
 

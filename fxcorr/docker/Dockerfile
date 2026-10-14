@@ -1,14 +1,15 @@
 # fxcorr/fxcorr：串行链路单镜像（两段式）
-# stage 1 builder：debian 13 + 构建工具链，全量编译安装到 /usr/local/difx
-# stage 2 runtime：debian 13-slim + 运行时依赖 + 从 builder COPY 的 .so / share /
-# 六个可执行 + 四个 fxcorr 编排脚本（roots.sh 与三个 wrap_*.sh，见文件末尾）
+# stage 1 builder：debian 13 + 构建工具链（含 OpenMPI），全量编译安装到 /usr/local/difx
+# stage 2 runtime：debian 13-slim + 运行时依赖（含 mpirun）+ 从 builder COPY 的 .so / share /
+# 可执行（含 mpifxcorr，2026-10-14 起）+ fxcorr 编排脚本（roots.sh 与 wrap_*.sh，见文件末尾）
 # 取代 v2 的 6 个镜像（fxcorr-builder/base/f/x/sim/difx-tools），构建不再是链式的。
 # 构建上下文 = 仓库根（见 Makefile：../..），COPY 仓库后在 stage 1 内完成编译。
 
 # ---------- stage 1：builder（构建期内容不进运行段） ----------
 FROM debian:13 AS builder
 
-# 构建工具链 + 依赖（--noipp 不装 IPP；mpifxcorr 跳过，不装 MPI）
+# 构建工具链 + 依赖（--noipp 不装 IPP；**含 OpenMPI**——mpifxcorr 进镜像，
+# 2026-10-14 起：openmpi-bin 提供 mpicxx/mpirun wrapper，libopenmpi-dev 提供 mpi.h）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         autoconf \
@@ -29,21 +30,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openmpi-bin \
+        libopenmpi-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
 # LDFLAGS=-no-pie：仅链接阶段关 PIE（difxcalc11 的 .o 由 gcc 默认编译、f77 链接却
 # 按 PIE 处理，报 relocation R_X86_64_32S）。编译参数保持默认——实测 -fno-pie
 # 编译会改变 fxcorr-f 运行行为（数据范围越界）。
+# MPICXX：install-difx 从该环境变量取 mpifxcorr 的 C++ 编译器（`os.environ.get('MPICXX')`，
+# 缺失在 mpifxcorr 段直接 TypeError），容器内即 OpenMPI 的 mpicxx。
+# fxcorr-f/fp/x/xp/sim 的 dompicxx=False、不吃该变量（仍用默认 g++）；difxfilterbank
+# (dompicxx=True) 随之从"无 MPI 降级"变为 MPI 构建。
 ENV DIFX_VERSION=2.9.1 \
     DIFXROOT=/usr/local/difx \
     DIFX_PREFIX=/usr/local/difx \
     PKG_CONFIG_PATH=/usr/local/difx/lib/pkgconfig:/usr/local/difx/lib64/pkgconfig \
-    MPICXX=g++ \
+    MPICXX=mpicxx \
     LDFLAGS=-no-pie
 
 WORKDIR /src
 COPY . /src
 
-# install-difx 常规组件构建；mpifxcorr 不进镜像（免装 MPI）；
-# difx2profile/vis2screen 依赖 mpifxcorr 安装的 fxcorr.pc，一并跳过（均不在容器需求清单）
+# install-difx 常规组件构建；**mpifxcorr 进镜像**（2026-10-14：对比实验 C9——与
+# 编排侧 fxcorr-agent 同基础镜像系、两侧浮点环境一致）；difx2profile/vis2screen
+# 仍跳过（不在容器需求清单）
 #
 # --makeflags="-j4"：install-difx 的 MAKEcommand 默认是裸的 "make "，各组件都单线程
 # 编译（该脚本 --help 第 84 行正是为这个用途留的开关，值会追加到每次 make 调用上）。
@@ -56,7 +68,7 @@ COPY . /src
 # 各组件内部的 make，而 autoreconf、每组件的 configure、以及 install-difx 逐个遍历
 # 三十多个组件这三段本来就是串行的（实测 CPU 利用率 -j4 仅 203%、-j8 仅 252%）。
 # 固定 4 的另一层好处：给构建机留出余量，且不受容器里 nproc 口径变化的影响。
-RUN python3 install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen \
+RUN python3 install-difx --noipp --nodoc --skip=difx2profile,vis2screen \
         --makeflags="-j4"
 
 # ---------- stage 2：runtime ----------
@@ -68,7 +80,8 @@ LABEL maintainer="wukaichao@gmail.com" \
       version="${VERSION}"
 
 # 运行时依赖：libgcc/libstdc++/fftw/expat/zlib 供 fxcorr 链路；
-# gsl/gslcblas/gfortran 供 difxcalc，cfitsio 供 difx2fits（DiFX 生态 .so 由下方 COPY 提供）
+# gsl/gslcblas/gfortran 供 difxcalc，cfitsio 供 difx2fits（DiFX 生态 .so 由下方 COPY 提供）；
+# openmpi-bin：mpifxcorr 的运行时（libmpi.so + 容器内可直接 mpirun；2026-10-14 起）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgcc-s1 \
         libstdc++6 \
@@ -84,6 +97,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openmpi-bin \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
 # vex2difx 等读 DIFX_VERSION 环境变量（缺失仅 warning，设上免扰）
 ENV DIFXROOT=/usr/local/difx \
     DIFX_VERSION=2.9.1 \
@@ -95,7 +113,8 @@ COPY --from=builder /usr/local/difx/lib/*.so* /usr/local/difx/lib/
 COPY --from=builder /usr/local/difx/share /usr/local/difx/share
 
 # 串行链路全部命令：前处理 vex2difx/difxcalc、造数 fxcorr-sim、
-# 运行 fxcorr-f/fxcorr-x（v8 链）与 fxcorr-fp/fxcorr-xp（v9 链）、后处理 difx2fits
+# 运行 fxcorr-f/fxcorr-x（v8 链）与 fxcorr-fp/fxcorr-xp（v9 链）、后处理 difx2fits、
+# mpifxcorr（MPI 一体化对照，2026-10-14 起；依赖 libmpi 由 runtime 的 openmpi-bin 提供）
 COPY --from=builder /usr/local/difx/bin/vex2difx /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difxcalc /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-sim /usr/local/difx/bin/
@@ -104,6 +123,8 @@ COPY --from=builder /usr/local/difx/bin/fxcorr-x /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-fp /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/fxcorr-xp /usr/local/difx/bin/
 COPY --from=builder /usr/local/difx/bin/difx2fits /usr/local/difx/bin/
+
+COPY --from=builder /usr/local/difx/bin/mpifxcorr /usr/local/difx/bin/
 
 # fxcorr 的规范适配脚本（V5 P5 Q15/Q16）：原 difx 程序（vex2difx / difxcalc /
 # difx2fits）不认识根变量，由这几个脚本转换路径后调用，所以必须与程序同在

@@ -73,8 +73,8 @@ V2 起编译与打包全部在容器内完成，测试机（Rocky 9.8）退化�
 
 | stage | 基础 | 内容 |
 |---|---|---|
-| stage 1 `builder` | debian:13 | 工具链+依赖，构建上下文=仓库根（Makefile `../..`），镜像内跑 `install-difx --noipp --nodoc --skip=mpifxcorr,difx2profile,vis2screen --makeflags="-j4"` 全量编译（后两者依赖 mpifxcorr 安装的 fxcorr.pc，须一并跳过）；构建期内容不进运行段 |
-| stage 2 `runtime` | debian:13-slim | 运行时依赖 + 从 builder COPY 的 `/usr/local/difx/lib/*.so*`、`/share`（difxcalc 星历）与 `bin/` 下六个可执行：vex2difx、difxcalc、fxcorr-sim、fxcorr-f、fxcorr-x、difx2fits |
+| stage 1 `builder` | debian:13 | 工具链+依赖（含 **OpenMPI**，`MPICXX=mpicxx`），构建上下文=仓库根（Makefile `../..`），镜像内跑 `install-difx --noipp --nodoc --skip=difx2profile,vis2screen --makeflags="-j4"` 全量编译（**mpifxcorr 2026-10-14 起进镜像**；difx2profile/vis2screen 不在容器需求清单、仍跳过）；构建期内容不进运行段 |
+| stage 2 `runtime` | debian:13-slim | 运行时依赖（含 `openmpi-bin` 供 libmpi + 容器内 mpirun）+ 从 builder COPY 的 `/usr/local/difx/lib/*.so*`、`/share`（difxcalc 星历）与 `bin/` 下可执行：vex2difx、difxcalc、fxcorr-sim、fxcorr-f、fxcorr-fp、fxcorr-x、fxcorr-xp、difx2fits、**mpifxcorr** |
 
 构建（在测试机执行，前置 `make sync`）：
 
@@ -107,7 +107,9 @@ docker run --rm -v <workdir>:<workdir> -w <workdir> fxcorr/fxcorr:latest difxcal
 
 ## 测试机构建工作流
 
-构建与验证在 Linux 测试机上做。**宿主集成构建仅用于 V1 回归与对拍**（mpifxcorr 需要宿主 MPI）；V2 常规构建走上面的容器构建节。
+构建与验证在 Linux 测试机上做。**宿主集成构建仅用于 V1 回归与对拍**（用宿主工具链与
+宿主 MPI 产出宿主版二进制）；V2 常规构建走上面的容器构建节（2026-10-14 起镜像亦含
+mpifxcorr，容器内 OpenMPI）。
 
 | 机器 | 登录 | 仓库 | 用途 |
 |---|---|---|---|

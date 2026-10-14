@@ -306,8 +306,11 @@ fi
 SAMPLEDIR="$WORKDIR/bench/.p5-sample.$$"
 rm -rf "$SAMPLEDIR"; mkdir -p "$SAMPLEDIR"
 # mpirun 失败时 set -e 会直接跳出，采样器与临时目录得由 trap 收——P4 那份内联采集器
-# 没有这条，mpirun 报错时它会一直挂到 6 小时兜底才走
-trap 'rm -f "${OUT:-}"; if [ -n "${SAMPID:-}" ]; then kill "$SAMPID" 2>/dev/null; fi; rm -rf "${SAMPLEDIR:-}"' EXIT
+# 没有这条，mpirun 报错时它会一直挂到 6 小时兜底才走。
+# `|| true`（2026-10-14）：正常路径第 323 行已 kill 过采样器，到这里它多半已死，
+# 裸 kill 的"no such process"返回 1，而 set -e 在 EXIT trap 里会把它带成脚本退出码
+# （并中止 trap 剩余部分、跳过下面的 rm -rf）——实测"脚本跑完却恒返回 1"的根因。
+trap 'rm -f "${OUT:-}"; if [ -n "${SAMPID:-}" ]; then kill "$SAMPID" 2>/dev/null || true; fi; rm -rf "${SAMPLEDIR:-}"' EXIT
 NNODES=${SLURM_JOB_NUM_NODES:-1}
 if [ "$NNODES" -gt 1 ] && command -v srun >/dev/null 2>&1; then
 	srun --nodes="$NNODES" --ntasks-per-node=1 --overlap \
