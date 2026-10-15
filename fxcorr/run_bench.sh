@@ -5,12 +5,15 @@
 # → ② 从 batch.json + .input 推导 EXECUTE TIME（整秒字段，取 floor(initsec + N*intTime)
 # + 1——多留一个整秒，mpifxcorr 才把 N 个积分都写完整，见下方 ② 的注释）
 # → ③ 复制 config .input → bench/，sed EXECUTE TIME / OUTPUT FILENAME → bench/<exp>.difx
+# → ③b（FXCORR_BENCH_NBATCH > 1）把 DATA TABLE 展开成连续多批的多 FILE 行
 # → ④ mpirun mpifxcorr 出基准 SWIN（含内存峰值采集）→ ④½ 截掉 EXECUTE TIME 多留出的第 N+1 个积分
 # → ⑤ 打印 cmp_swin.py 对拍提示。
 #
 # 用法：./run_bench.sh [workdir]
 #   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
 #   环境变量：NP（mpirun 进程数，默认 4）；FXCORR_WORKDIR（项目根目录，位置参数优先）
+#             FXCORR_BENCH_NBATCH 连续批数 M（默认 1）：基准段 = 软链批起向后 M 个连续批，
+#               DATA TABLE 每 ds 展开为 M 条 FILE 行、EXECUTE TIME 与截断组数随段长放大
 #             跨节点（V7 P5，见 v7-plan.md §16）：
 #               FXCORR_MPI_PPN   每节点 rank 数，节点列表由 Slurm 分配自动展开
 #               FXCORR_MPI_HOSTS 直接给 mpirun 的 -host 串（`a:17,b:17`），绕开自动展开
@@ -38,6 +41,7 @@ usage()
 用法：./run_bench.sh [workdir]
   workdir  项目根目录（默认 .，须含 make_testdata.sh 布局：config/ + batches/ + DATA TABLE 软链）
   环境变量：NP（mpirun 进程数，默认 4）；FXCORR_WORKDIR（项目根目录，位置参数优先）
+            FXCORR_BENCH_NBATCH 连续批数 M（默认 1，从软链批起向后取 M 个连续批）
             FXCORR_MPI_PPN   每节点 rank 数，节点从 Slurm 分配展开（跨节点，V7 P5）
             FXCORR_MPI_HOSTS 直接给 mpirun 的 -host 串，如 "n1:17,n2:17"
             FXCORR_MPI_MAPBY 给 mpirun 的 --map-by，如 node
@@ -65,6 +69,12 @@ if ! [[ ${NP:-4} =~ ^[1-9][0-9]*$ ]]; then
 	echo "run_bench.sh: NP must be a positive integer" >&2
 	exit 2
 fi
+# 连续批数（多批基准，见 ② 与 ③b）：1 = 原单批行为，逐字节不变
+NBATCH_BENCH="${FXCORR_BENCH_NBATCH:-1}"
+if ! [[ $NBATCH_BENCH =~ ^[1-9][0-9]*$ ]]; then
+	echo "run_bench.sh: FXCORR_BENCH_NBATCH must be a positive integer" >&2
+	exit 2
+fi
 # python3 必须是 3：目标集群的 /usr/bin/python3 是 RHEL 7 的 **2.7.5**，得先 source
 # env.sh 让 PATH 前置 miniforge（fxcorr/build.md 坑 1）。本脚本一直依赖 python3 解析
 # batch.json，但 P5 多了一个**后台**起的 mpi_sampler.py——它语法错会静默退出，外面只
@@ -78,11 +88,12 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' 2>/dev/n
 # python3：json 读取 + .input 解析 + 浮点（bash 无浮点算术）
 OUT=$(mktemp)
 trap 'rm -f "${OUT:-}"' EXIT
-python3 - "$WORKDIR" "$FXCORR_ROOT_RAW" <<'PYEOF' > "$OUT"
+python3 - "$WORKDIR" "$FXCORR_ROOT_RAW" "$NBATCH_BENCH" <<'PYEOF' > "$OUT"
 import glob, json, math, os, re, sys
 
 workdir = sys.argv[1]
 rawroot = sys.argv[2]
+nbatch = int(sys.argv[3])
 batchdir = os.path.join(workdir, 'batches')
 
 # ① batch 定位：优先从 DATA TABLE 软链 target 解析，与数据精确对应（-n 多 batch
@@ -172,12 +183,41 @@ nint = round(batchdur / inttime)
 if abs(nint * inttime - batchdur) > 1e-6:
     sys.exit('run_bench.sh: batch duration %g is not an integer multiple of INT TIME %g '
              '(integrals would not line up for comparison)' % (batchdur, inttime))
-exec_ = int(math.floor(initsec + nint * inttime)) + 1
+
+# 多批（FXCORR_BENCH_NBATCH > 1）：基准段 = 软链批起向后 M 个连续批。批号跳号、
+# 时间不连续、subint/积分参数不一致都在这里挡掉——不挡的话 mpifxcorr 会拿着排错
+# 的 FILE 行静默读错段（数据时间戳与 START 对不上正是 R10 那类慢速空转的成因）。
+if nbatch > 1:
+    if not bid.isdigit():
+        sys.exit('run_bench.sh: batch id %r is not numeric; multi-batch needs '
+                 'sequential numeric ids' % bid)
+    prev_mjd = bj['start_mjd']
+    for k in range(1, nbatch):
+        nbid = '%08d' % (int(bid) + k)
+        npath = os.path.join(batchdir, nbid + '.json')
+        if not os.path.exists(npath):
+            sys.exit('run_bench.sh: FXCORR_BENCH_NBATCH=%d needs batch %s, not found'
+                     % (nbatch, nbid))
+        nb = json.load(open(npath))
+        if (int(nb['n_subints']) != nsub or int(nb['subint_ns']) != subint
+                or abs(float(nb['integration_sec']) - inttime) > 1e-9):
+            sys.exit('run_bench.sh: batch %s has different subint/integration '
+                     'parameters than %s' % (nbid, bid))
+        # 相邻差 = 批长。容差 1e-4 s：start_mjd 是 MJD 天数的 f64，两个 ~61037 的
+        # 数相减有 ~2 µs 的表示误差；真正的错位（跳批/断段）差一个批长（≥0.128 s）。
+        dt = (nb['start_mjd'] - prev_mjd) * 86400.0 - batchdur
+        if abs(dt) > 1e-4:
+            sys.exit('run_bench.sh: batch %s start_mjd is not continuous with the '
+                     'previous batch (off by %.6f s)' % (nbid, dt))
+        prev_mjd = nb['start_mjd']
+
+nint_total = nbatch * nint
+exec_ = int(math.floor(initsec + nint_total * inttime)) + 1
 
 print('BID=%s' % bid)
 print('CFGIN=%s' % cfgrel)
 print('EXEC=%d' % exec_)
-print('NINT=%d' % nint)
+print('NINT=%d' % nint_total)
 print('EXP=%s' % exp)
 print('OUTDIR=%s/bench/%s.difx' % (workdir, exp))
 print('NCHAN=%d' % int(bj['n_channels']))
@@ -236,6 +276,60 @@ sed -e "s|^IM FILENAME:[[:space:]]*\([^/[:space:]].*\)$|IM FILENAME:        $CFG
     "$CFGDIR/$CALCBASE" > "$WORKDIR/bench/$CALCBASE"
 rm -rf "$OUTDIR"    # 幂等重跑
 mkdir -p "$OUTDIR"
+
+# ---- ③b 多批展开（FXCORR_BENCH_NBATCH > 1） ----
+# 每个 ds 的 DATA TABLE 从 1 条 FILE 行展开成 M 条：第 0 条保留原（软链）路径，
+# 追加批 k 的真实文件路径。命名模板从软链 target 取（make_testdata.sh 规则：
+# raw/<station>/<station>_<batch_id>[_ds<N>].vdif，链接与目标同在 raw/ 树内、
+# target 是相对路径），逐条校验存在。批号连续性与参数一致性已在 ② 挡过。
+# 顺序即批序：mpifxcorr 按 FILE 行下标顺序推进读（fileindex >= confignumfiles
+# 才停），所以数组次序必须与时间次序一致。
+if [ "$NBATCH_BENCH" -gt 1 ]; then
+	python3 - "$WORKDIR/bench/$(basename "$CFGIN")" "$BID" "$NBATCH_BENCH" <<'PYEOF'
+import os, re, sys
+
+path, bid, nbatch = sys.argv[1], sys.argv[2], int(sys.argv[3])
+out = []
+nseen = 0
+for line in open(path).read().split('\n'):
+    m = re.match(r'^D/STREAM (\d+) FILES:\s*(\d+)\s*$', line)
+    if m:
+        if int(m.group(2)) != 1:
+            sys.exit('run_bench.sh: D/STREAM %s FILES is %s, expected 1 as the '
+                     'multi-batch expansion template' % (m.group(1), m.group(2)))
+        out.append('%s%d' % (line[:m.start(2)], nbatch))
+        continue
+    m = re.match(r'^FILE (\d+)/(\d+):\s*(\S+)\s*$', line)
+    if m:
+        i, j, fn = int(m.group(1)), int(m.group(2)), m.group(3)
+        if j != 0:
+            sys.exit('run_bench.sh: unexpected FILE index %d/%d before expansion'
+                     % (i, j))
+        out.append(line)
+        if not os.path.islink(fn):
+            sys.exit('run_bench.sh: FILE %s is not a symlink (make_testdata.sh '
+                     'layout expected)' % fn)
+        rel = os.readlink(fn)
+        if not os.path.isabs(rel):
+            rel = os.path.join(os.path.dirname(fn), rel)
+        base = os.path.basename(rel)
+        mm = re.match(r'^(.*)_\d{8}((_ds\d+)?\.vdif)$', base)
+        if not mm:
+            sys.exit('run_bench.sh: cannot derive the batch pattern from %s' % base)
+        for k in range(1, nbatch):
+            nfn = os.path.join(os.path.dirname(rel), '%s_%08d%s'
+                               % (mm.group(1), int(bid) + k, mm.group(2)))
+            if not os.path.exists(nfn):
+                sys.exit('run_bench.sh: multi-batch file %s not found' % nfn)
+            out.append('%-20s%s' % ('FILE %d/%d:' % (i, k), nfn))
+        nseen += 1
+        continue
+    out.append(line)
+if nseen == 0:
+    sys.exit('run_bench.sh: no FILE lines to expand (not a DATA TABLE?)')
+open(path, 'w').write('\n'.join(out))
+PYEOF
+fi
 
 # ---- ④ mpirun mpifxcorr（含内存峰值与跨节点流量采集） ----
 # DATA TABLE 文件名为相对路径（软链在 workdir 根），故 cwd 在 workdir 内跑。
@@ -369,6 +463,7 @@ rm -rf "$SAMPLEDIR"
 # ② 多留一个整秒的代价：mpifxcorr 会多写一个积分（起终点都在 batch 窗口之外，fxcorr
 # 侧不产出）。按 sec 分组保留前 NINT 组、把尾部多余记录从基准文件里截掉，使两侧记录数
 # 一致，cmp_swin.py 无需 maxrecords 参数。无多写时不动文件。
+# NINT = 单批 nint（M=1）或 M×nint（多批，② 输出）——分组数即积分数，天然按批扩展。
 python3 - "$OUTDIR" "$NINT" "$NCHAN" <<'PYEOF'
 import glob, os, struct, sys
 
