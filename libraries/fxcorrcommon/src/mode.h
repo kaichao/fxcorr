@@ -23,6 +23,12 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#include <atomic>
 
 using namespace std;
 
@@ -98,6 +104,18 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   * @param subloopindex The "subloop" index to put the output in
   */
   void process(int index, int subloopindex);
+
+ /**
+  * Optional intra-Mode band parallelism (fxcorr-xpp).  With nthreads > 1,
+  * process() spreads the recorded-frequency loop over nthreads threads, each
+  * using a private copy of the per-band scratch buffers.  Each band's
+  * arithmetic is unchanged, so results are bit-identical to the serial path.
+  * Default 0 (off): every other tool keeps the serial code and memory use.
+  * Disabled for zoom configurations (bands can share a parent band).
+  */
+  void setBandParallel(int nthreads);
+  bool bandParallelEnabled() const { return bandthreads > 1; }
+  int bandParallelThreads() const { return bandthreads; }
 
  /**
   * Sets the autocorrelation arrays to contain 0's
@@ -187,6 +205,23 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
   * @return Pointer to the FFT'd data (complex 32 bit float)
   */
   inline const cf32* getFreqs(int outputband, int subloopindex) const { return fftoutputs[outputband][subloopindex]; };
+
+  /**
+   * Number of buffered spectrum slots (fftoutputs / dataweight rows).
+   * Normally the .input NUM BUFFERED FFTS; the block-parallel form raises it
+   * to blockspersend so a whole subint can be processed without per-fftloop
+   * recycling (see setSubloopCapacity).
+   */
+  inline int subloopCapacity() const { return fftslots; }
+
+  /**
+   * Raises the spectrum slot count to nslots (never lowers it).  Only
+   * supported when the Mode owns every slot (no zoom bands) and the per-band
+   * weights are not in use; returns false otherwise, and the caller must
+   * fall back to the normal buffered path.  The extra slots hold global block
+   * indices, so process(i, i) writes block i to slot i.
+   */
+  bool setSubloopCapacity(int nslots);
 
  /**
   * Returns a pointer to the FFT'd and conjugated data of the specified product
@@ -367,6 +402,7 @@ protected:
   double recordedbandwidth, blockclock, sampletime; //MHz, microseconds
   double a0, b0, c0, a, b, c, quadadd1, quadadd2;
   double fftstartmicrosec, fftdurationmicrosec, intclockseconds;
+  int fftslots;	// spectrum slots; >= NUM BUFFERED FFTS in block mode
   f32 * dataweight;
   f32 ** perbandweights;
   int samplesperblock, samplesperlookup, numlookups, flaglength, autocorrwidth;
@@ -499,6 +535,38 @@ protected:
   cf32 * tmpvec; 
 
 private:
+  ///Per-thread copy of the band-loop scratch buffers (band parallel mode).
+  struct BandScratch
+  {
+    f64 *subphase;
+    f32 *subarg, *subsin, *subcos;
+    f64 *stepphase;
+    f32 *steparg, *stepsin, *stepcos;
+    cf32 *stepcplx;
+    cf32 *complexunpacked, *complexrotator, *fftd;
+    cf32 *fracsamprotatorA, *fracsamprotatorB;
+    f32 *subfracsamparg, *subfracsampsin, *subfracsampcos;
+    f32 *stepfracsamparg, *stepfracsampsin, *stepfracsampcos;
+    cf32 *stepfracsampcplx;
+    cf32 *piecewiserotator, *quadpiecerotator;
+    f64 *subquadphase;
+    f32 *subquadarg, *subquadsin, *subquadcos;
+    f32 *kscratch;
+    cf32 *tmpvec;
+    vecFFTSpecR_f32 *fftspecR;
+    vecFFTSpecC_cf32 *fftspecC;
+    vecDFTSpecR_f32 *dftspecR;
+    vecDFTSpecC_cf32 *dftspecC;
+    u8 *fftbuffer;
+    BandScratch();
+  };
+  int bandthreads;
+  std::vector<BandScratch> bandscratch;
+  struct BandPool;	// persistent worker threads (mode.cpp)
+  BandPool *bandpool;
+  void allocBandScratch(BandScratch &bs);
+  void freeBandScratch(BandScratch &bs);
+
   ///Array containing decorrelation percentages for a given number of bits
   static const float decorrelationpercentage[];
 };
