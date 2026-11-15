@@ -329,6 +329,11 @@ Mode(Configuration * conf, int confindex, int dsindex, int recordedbandchan, int
  /** True when every band's pcal extractor supports the per-block interface. */
  bool blockPcalCapable() const;
 
+ /** Enables only the per-block pcal parking, leaving autocorrelations and
+  *  weights on the direct path.  Default callers (fxcorr-xp/f) keep using
+  *  enableBlockAccumulators(), so their behaviour is unchanged. */
+ void enableBlockPcal(int slotcount = 0);
+
  /** True when the per-block pcal slots are on (the parallel pcal path). */
  inline bool hasBlockPcal() const { return blockpcal != 0; }
 
@@ -450,6 +455,7 @@ protected:
   cf32**** blockac;	// [crosspol][block][outputband] -> cf32*
   f32 **  blockweight;	// [crosspol][block][outputband]
   int     blockacblocks;	// slot count allocated; 0 = disabled
+  int     blockpcalslots;	// pcal slot count allocated; 0 = disabled
   int     currentblock;	// slot process() is accumulating into
   int     blockslotbase;	// slot = block index - blockslotbase
   // P3 (pcal): per-block pcal accumulation slots (see the interfaces above)

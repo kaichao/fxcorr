@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 
 using namespace std;
+
 
 XmacEngine::XmacEngine(Configuration *conf, int cindex, Model *m, int sc) :
 	config(conf), model(m), scan(sc), configindex(cindex),
@@ -299,6 +301,28 @@ void XmacEngine::zeroSubint()
 __attribute__((optimize("O3")))
 void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &readers, Polyco *currentpolyco)
 {
+	xmacBatchRange(fftloop, fftloop+1, readers, currentpolyco);
+}
+
+__attribute__((optimize("O3")))
+void XmacEngine::xmacBatchPeriod(int fftloop0, int fftloop1, const vector<vector<SpReader *> > &readers, Polyco *currentpolyco)
+{
+	xmacBatchRange(fftloop0, fftloop1, readers, currentpolyco);
+}
+
+__attribute__((optimize("O3")))
+void XmacEngine::xmacBatchRange(int fftloop0, int fftloop1, const vector<vector<SpReader *> > &readers, Polyco *currentpolyco)
+{
+	// Pulsar bins are one shared scratch array ([numBufferedFFTs][freq][chan]),
+	// so a multi-fftloop range falls back to one range per fftloop.  Without
+	// pulsar binning `bins` is unused and any range is safe.
+	if(pulsarbin && fftloop1 - fftloop0 > 1)
+	{
+		for(int fl=fftloop0; fl<fftloop1; fl++)
+			xmacBatchRange(fl, fl+1, readers, currentpolyco);
+		return;
+	}
+
 	// if necessary, work out the pulsar bins (core.cpp:803-812).  The FFT
 	// index i starts from 0 (no upstream startblock); offsetmins is in the
 	// subint-local minute base.
@@ -306,11 +330,13 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 	{
 		for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
 		{
-			int i = fftloop*numBufferedFFTs + fftsubloop;
+			int i = fftloop0*numBufferedFFTs + fftsubloop;
 			double offsetmins = ((double)i)*blockns/60000000000.0;
 			currentpolyco->getBins(offsetmins, bins[fftsubloop]);
 		}
 	}
+
+	auto dbg_t0 = std::chrono::steady_clock::now();
 
 	// core.cpp:867-982; resultindex accumulation mirrors
 	// Configuration::populateResultLengths() so threadcrosscorrs offsets agree
@@ -360,6 +386,98 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 		}
 	}
 
+	auto dbg_t1 = std::chrono::steady_clock::now();
+
+	// A single ds group has as many xMAC passes as its recorded frequencies
+	// (one for the mini configuration), so the pass loop cannot occupy more
+	// than one thread.  Split every pass into (baseline, pol product) tasks
+	// instead: each task owns a disjoint slice of threadcrosscorrs (the
+	// offset is precomputed by replaying the same resultindex accumulation)
+	// and still adds in (fftloop, fftsubloop) order, so every accumulator is
+	// bit-identical to the serial form.  conjbuf stays a per-thread copy.
+	// Pulsar binning keeps the pass-parallel loop below: its bins array is
+	// shared scratch.
+	struct FXTask { int fx, j, p; long long offset; };
+	std::vector<FXTask> fxtasks;
+	if(!pulsarbin)
+	{
+		for(int fx=0;fx<(int)fxpasses.size();fx++)
+		{
+			const FXPass &pass = fxpasses[fx];
+			long long ri = pass.baseoffset;
+			for(int j=0;j<numbaselines;j++)
+			{
+				int localfreqindex = config->getBLocalFreqIndex(configindex, j, pass.f);
+				if(localfreqindex >= 0)
+				{
+					int npp = config->getBNumPolProducts(configindex, j, localfreqindex);
+					if(baselineActive(j))
+					{
+						for(int p=0;p<npp;p++)
+						{
+							FXTask task = {fx, j, p, ri + (long long)p*xmacstridelength};
+							fxtasks.push_back(task);
+						}
+					}
+					ri += (long long)npp*xmacstridelength;
+				}
+			}
+		}
+	}
+
+	auto dbg_t2 = std::chrono::steady_clock::now();
+
+	if(!pulsarbin)
+	{
+		#pragma omp parallel for schedule(static)
+		for(int t=0;t<(int)fxtasks.size();t++)
+		{
+			const FXTask &task = fxtasks[t];
+			const FXPass &pass = fxpasses[task.fx];
+			int f = pass.f;
+			int xmacstart = pass.xmacstart;
+			int xmacstrideremain = pass.xmacstrideremain;
+			int j = task.j;
+			int p = task.p;
+			int localfreqindex = config->getBLocalFreqIndex(configindex, j, f);
+			int ds1index = config->getBOrderedDataStream1Index(configindex, j);
+			int ds2index = config->getBOrderedDataStream2Index(configindex, j);
+			int band1 = config->getBDataStream1BandIndex(configindex, j, localfreqindex, p);
+			int band2 = config->getBDataStream2BandIndex(configindex, j, localfreqindex, p);
+			const SpReader *r1 = readers[ds1index][band1];
+			const SpReader *r2 = readers[ds2index][band2];
+			cf32 *myconjbuf = conjbuf[omp_get_thread_num()];
+			// spectra()/numChannels() are virtual: hoist them out of the
+			// fftloop (they are constant for this task's readers)
+			const cf32 *sp1 = r1->spectra();
+			int nch1 = r1->numChannels();
+			const cf32 *sp2 = r2->spectra();
+			int nch2 = r2->numChannels();
+
+			for(int fftloop=fftloop0; fftloop<fftloop1; fftloop++)
+			{
+				for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
+				{
+					int i = fftloop*numBufferedFFTs + fftsubloop;
+					if(i >= blockspersend)
+						break; //may not have to fully complete last fftloop
+
+					const cf32 *vis1 = sp1 + (long long)i*nch1 + xmacstart;
+					const cf32 *vis2 = sp2 + (long long)i*nch2 + xmacstart;
+
+					int status = vectorConj_cf32(vis2, myconjbuf, xmacstrideremain);
+					if(status != vecNoErr)
+						cerr << "Error conjugating vis2, baseline " << j << ", status " << status << endl;
+
+					status = vectorAddProduct_cf32(vis1, myconjbuf, &(threadcrosscorrs[task.offset]), xmacstrideremain);
+					if(status != vecNoErr)
+						cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
+				}
+			}
+		}
+	}
+	else
+	{
 	#pragma omp parallel for schedule(static)
 	for(int fx=0;fx<(int)fxpasses.size();fx++)
 	{
@@ -369,115 +487,137 @@ void XmacEngine::xmacBatch(int fftloop, const vector<vector<SpReader *> > &reade
 		int xmacstart = pass.xmacstart;
 		int xmacstrideremain = pass.xmacstrideremain;
 		int freqchannels = config->getFNumChannels(f);
-		long long resultindex = pass.baseoffset;
 		int status;
 		int tid = omp_get_thread_num();
 		cf32 *myconjbuf = conjbuf[tid];
 		cf32 *mypulsarscratchspace = (pulsarbin) ? pulsarscratchspace[tid] : 0;
 
-		for(int j=0;j<numbaselines;j++)
+		// 2026-11-15 loop interchange: this thread keeps its pass and walks
+		// the period's fftloops in increasing order.  resultindex restarts at
+		// the pass base for every fftloop; the baseline/fftsubloop/pol order
+		// (and therefore every accumulator's addition order) is unchanged.
+		for(int fftloop=fftloop0; fftloop<fftloop1; fftloop++)
 		{
-			int localfreqindex = config->getBLocalFreqIndex(configindex, j, f);
-			if(localfreqindex >= 0)
+			long long resultindex = pass.baseoffset;
+			for(int j=0;j<numbaselines;j++)
 			{
-				if(!baselineActive(j))
+				int localfreqindex = config->getBLocalFreqIndex(configindex, j, f);
+				if(localfreqindex >= 0)
 				{
-					// Shard mode: this baseline is not ours, but its slice of
-					// threadcrosscorrs must still be stepped over - the
-					// offsets are a fixed function of the baseline number, so
-					// skipping the step would shift every later baseline onto
-					// the wrong data (this is what made a shard's baselines
-					// come out as zeros)
-					if(pulsarbin && !scrunchoutput)
-						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*numpulsarbins*xmacstridelength;
-					else
-						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
-					continue;
-				}
-				int ds1index = config->getBOrderedDataStream1Index(configindex, j);
-				int ds2index = config->getBOrderedDataStream2Index(configindex, j);
-
-				for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
-				{
-					int i = fftloop*numBufferedFFTs + fftsubloop;
-					if(i >= blockspersend)
-						break; //may not have to fully complete last fftloop
-
-					for(int p=0;p<config->getBNumPolProducts(configindex, j, localfreqindex);p++)
+					if(!baselineActive(j))
 					{
-						int band1 = config->getBDataStream1BandIndex(configindex, j, localfreqindex, p);
-						int band2 = config->getBDataStream2BandIndex(configindex, j, localfreqindex, p);
-						const SpReader *r1 = readers[ds1index][band1];
-						const SpReader *r2 = readers[ds2index][band2];
+						// Shard mode: this baseline is not ours, but its slice of
+						// threadcrosscorrs must still be stepped over - the
+						// offsets are a fixed function of the baseline number, so
+						// skipping the step would shift every later baseline onto
+						// the wrong data (this is what made a shard's baselines
+						// come out as zeros)
+						if(pulsarbin && !scrunchoutput)
+							resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*numpulsarbins*xmacstridelength;
+						else
+							resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
+						continue;
+					}
+					int ds1index = config->getBOrderedDataStream1Index(configindex, j);
+					int ds2index = config->getBOrderedDataStream2Index(configindex, j);
 
-						// vis1 = getFreqs(...)[xmacstart]; vis2 = conjugated counterpart
-						const cf32 *vis1 = r1->spectra() + (long long)i*r1->numChannels() + xmacstart;
-						const cf32 *vis2 = r2->spectra() + (long long)i*r2->numChannels() + xmacstart;
+					for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
+					{
+						int i = fftloop*numBufferedFFTs + fftsubloop;
+						if(i >= blockspersend)
+							break; //may not have to fully complete last fftloop
 
-						status = vectorConj_cf32(vis2, myconjbuf, xmacstrideremain);
-						if(status != vecNoErr)
-							cerr << "Error conjugating vis2, baseline " << j << ", status " << status << endl;
-
-						if(pulsarbin)
+						for(int p=0;p<config->getBNumPolProducts(configindex, j, localfreqindex);p++)
 						{
-							// core.cpp:914-957: multiply into scratch space, then bin
-							int ds1recordbandindex = config->getBDataStream1RecordBandIndex(configindex, j, localfreqindex, p);
-							int ds2recordbandindex = config->getBDataStream2RecordBandIndex(configindex, j, localfreqindex, p);
-							f32 weight1 = readers[ds1index][ds1recordbandindex]->weights()[i];
-							f32 weight2 = readers[ds2index][ds2recordbandindex]->weights()[i];
-							f32 bweight = weight1*weight2/freqchannels;
+							int band1 = config->getBDataStream1BandIndex(configindex, j, localfreqindex, p);
+							int band2 = config->getBDataStream2BandIndex(configindex, j, localfreqindex, p);
+							const SpReader *r1 = readers[ds1index][band1];
+							const SpReader *r2 = readers[ds2index][band2];
 
-							status = vectorMul_cf32(vis1, myconjbuf, mypulsarscratchspace, xmacstrideremain);
+							// vis1 = getFreqs(...)[xmacstart]; vis2 = conjugated counterpart
+							const cf32 *vis1 = r1->spectra() + (long long)i*r1->numChannels() + xmacstart;
+							const cf32 *vis2 = r2->spectra() + (long long)i*r2->numChannels() + xmacstart;
+
+							status = vectorConj_cf32(vis2, myconjbuf, xmacstrideremain);
 							if(status != vecNoErr)
-								cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
+								cerr << "Error conjugating vis2, baseline " << j << ", status " << status << endl;
 
-							// if scrunching, add into temp accumulate space, otherwise add into normal space
-							if(scrunchoutput)
+							if(pulsarbin)
 							{
-								f64 *binweights = currentpolyco->getBinWeights();
-								int destchan = xmacstart;
-								for(int l=0;l<xmacstrideremain;l++)
+								// core.cpp:914-957: multiply into scratch space, then bin
+								int ds1recordbandindex = config->getBDataStream1RecordBandIndex(configindex, j, localfreqindex, p);
+								int ds2recordbandindex = config->getBDataStream2RecordBandIndex(configindex, j, localfreqindex, p);
+								f32 weight1 = readers[ds1index][ds1recordbandindex]->weights()[i];
+								f32 weight2 = readers[ds2index][ds2recordbandindex]->weights()[i];
+								f32 bweight = weight1*weight2/freqchannels;
+
+								status = vectorMul_cf32(vis1, myconjbuf, mypulsarscratchspace, xmacstrideremain);
+								if(status != vecNoErr)
+									cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
+
+								// if scrunching, add into temp accumulate space, otherwise add into normal space
+								if(scrunchoutput)
 								{
-									// the first zero (the source slot) is because we are limiting to one pulsar ephemeris for now
-									int destbin = bins[fftsubloop][f][destchan];
-									pulsaraccumspace[f][x][j][0][p][destbin][l].re += mypulsarscratchspace[l].re;
-									pulsaraccumspace[f][x][j][0][p][destbin][l].im += mypulsarscratchspace[l].im;
-									// Negative bin weights are generally used when scrunching to estimate and
-									// remove slowly-time-varying signal; ignore them in the baseline weight
-									if(binweights[destbin] > 0.0)
-										baselineweight[f][0][j][p] += bweight*binweights[destbin];
-									destchan++;
+									f64 *binweights = currentpolyco->getBinWeights();
+									int destchan = xmacstart;
+									for(int l=0;l<xmacstrideremain;l++)
+									{
+										// the first zero (the source slot) is because we are limiting to one pulsar ephemeris for now
+										int destbin = bins[fftsubloop][f][destchan];
+										pulsaraccumspace[f][x][j][0][p][destbin][l].re += mypulsarscratchspace[l].re;
+										pulsaraccumspace[f][x][j][0][p][destbin][l].im += mypulsarscratchspace[l].im;
+										// Negative bin weights are generally used when scrunching to estimate and
+										// remove slowly-time-varying signal; ignore them in the baseline weight
+										if(binweights[destbin] > 0.0)
+											baselineweight[f][0][j][p] += bweight*binweights[destbin];
+										destchan++;
+									}
+								}
+								else
+								{
+									int destchan = xmacstart;
+									for(int l=0;l<xmacstrideremain;l++)
+									{
+										int destbin = bins[fftsubloop][f][destchan];
+										int cindex = resultindex + (destbin*config->getBNumPolProducts(configindex, j, localfreqindex) + p)*xmacstridelength + l;
+										threadcrosscorrs[cindex].re += mypulsarscratchspace[l].re;
+										threadcrosscorrs[cindex].im += mypulsarscratchspace[l].im;
+										baselineweight[f][destbin][j][p] += bweight;
+										destchan++;
+									}
 								}
 							}
 							else
 							{
-								int destchan = xmacstart;
-								for(int l=0;l<xmacstrideremain;l++)
-								{
-									int destbin = bins[fftsubloop][f][destchan];
-									int cindex = resultindex + (destbin*config->getBNumPolProducts(configindex, j, localfreqindex) + p)*xmacstridelength + l;
-									threadcrosscorrs[cindex].re += mypulsarscratchspace[l].re;
-									threadcrosscorrs[cindex].im += mypulsarscratchspace[l].im;
-									baselineweight[f][destbin][j][p] += bweight;
-									destchan++;
-								}
+								status = vectorAddProduct_cf32(vis1, myconjbuf, &(threadcrosscorrs[resultindex+p*xmacstridelength]), xmacstrideremain);
+								if(status != vecNoErr)
+									cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
 							}
 						}
-						else
-						{
-							status = vectorAddProduct_cf32(vis1, myconjbuf, &(threadcrosscorrs[resultindex+p*xmacstridelength]), xmacstrideremain);
-							if(status != vecNoErr)
-								cerr << "Error trying to xmac baseline " << j << " frequency " << localfreqindex << " polarisation product " << p << ", status " << status << endl;
-						}
 					}
+					// core.cpp:970-977: advance to next baseline's xmac slice
+					if(pulsarbin && !scrunchoutput)
+						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*numpulsarbins*xmacstridelength;
+					else
+						resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
 				}
-				// core.cpp:970-977: advance to next baseline's xmac slice
-				if(pulsarbin && !scrunchoutput)
-					resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*numpulsarbins*xmacstridelength;
-				else
-					resultindex += config->getBNumPolProducts(configindex, j, localfreqindex)*xmacstridelength;
 			}
 		}
+	}
+	}
+
+	auto dbg_t3 = std::chrono::steady_clock::now();
+	if(getenv("FXCORR_XPP_DEBUG"))
+	{
+		double pass_setup = std::chrono::duration<double>(dbg_t1 - dbg_t0).count();
+		double task_setup = std::chrono::duration<double>(dbg_t2 - dbg_t1).count();
+		double loop_time = std::chrono::duration<double>(dbg_t3 - dbg_t2).count();
+		cerr << "xmacdbg fftloops=" << (fftloop1 - fftloop0)
+		     << " tasks=" << fxtasks.size()
+		     << " threads=" << omp_get_max_threads()
+		     << " pass_setup=" << pass_setup
+		     << " task_setup=" << task_setup
+		     << " loop=" << loop_time << endl;
 	}
 }
 
@@ -488,47 +628,51 @@ void XmacEngine::accumulateWeights(int fftloop, const vector<vector<SpReader *> 
 	if(pulsarbin)
 		return; // weights are updated inside the XMAC pulsar branch (core.cpp:924/945/954)
 
-	// core.cpp:1005-1052, non-pulsar branch.  P3: baseline loop outermost and
-	// parallel; each baseline's accumulation sequence over (fftsubloop, f, p)
-	// is unchanged (the loop exchange only reorders across baselines), so
-	// baselineweight entries are bit-identical to the serial form.
-	#pragma omp parallel for schedule(static)
-	for(int j=0;j<numbaselines;j++)
+	// Precompute the (freq, baseline, pol) descriptors once: the config
+	// lookups used to run inside the per-block loop (96 baselines x 32 freqs
+	// x 10 buffered FFTs per call).  Parallelizing over descriptors gives
+	// many more tasks than the 96-baseline loop, and each accumulator
+	// (baselineweight[f][0][j][p]) still only sees additions in ascending
+	// fftsubloop order, so the sums are bit-identical.
+	if(wdescs.empty())
 	{
+		for(int j=0;j<numbaselines;j++)
+		{
+			int ds1index = config->getBOrderedDataStream1Index(configindex, j);
+			int ds2index = config->getBOrderedDataStream2Index(configindex, j);
+			for(int f=0;f<freqtablelength;f++)
+			{
+				if(!config->isFrequencyUsed(configindex, f))
+					continue;
+				int localfreqindex = localFreqIndex(j, f);
+				if(localfreqindex < 0)
+					continue;
+				int npp = config->getBNumPolProducts(configindex, j, localfreqindex);
+				for(int p=0;p<npp;p++)
+				{
+					int rb1 = config->getBDataStream1RecordBandIndex(configindex, j, localfreqindex, p);
+					int rb2 = config->getBDataStream2RecordBandIndex(configindex, j, localfreqindex, p);
+					if(rb1 < 0 || rb2 < 0)
+						continue;
+					WDesc wd = {f, j, p, ds1index, ds2index, rb1, rb2};
+					wdescs.push_back(wd);
+				}
+			}
+		}
+	}
+
+	#pragma omp parallel for schedule(static)
+	for(int t=0;t<(int)wdescs.size();t++)
+	{
+		const WDesc &wd = wdescs[t];
 		for(int fftsubloop=0;fftsubloop<numBufferedFFTs;fftsubloop++)
 		{
 			int i = fftloop*numBufferedFFTs + fftsubloop;
 			if(i >= blockspersend)
-				break; //may not have to fully complete last fftloop
-
-			for(int f=0;f<freqtablelength;f++)
-			{
-				if(config->isFrequencyUsed(configindex, f))
-				{
-					int localfreqindex = localFreqIndex(j, f);
-					if(localfreqindex >= 0)
-					{
-						int ds1index = config->getBOrderedDataStream1Index(configindex, j);
-						int ds2index = config->getBOrderedDataStream2Index(configindex, j);
-						for(int p=0;p<config->getBNumPolProducts(configindex, j, localfreqindex);p++)
-						{
-							int ds1recordbandindex = config->getBDataStream1RecordBandIndex(configindex, j, localfreqindex, p);
-							int ds2recordbandindex = config->getBDataStream2RecordBandIndex(configindex, j, localfreqindex, p);
-
-							if(ds1recordbandindex < 0 || ds2recordbandindex < 0)
-							{
-								cerr << "Error: one of the record band indices could not be found: ds1recordbandindex = " << ds1recordbandindex << " ds2recordbandindex = " << ds2recordbandindex << endl;
-							}
-							else
-							{
-								f32 weight1 = readers[ds1index][ds1recordbandindex]->weights()[i];
-								f32 weight2 = readers[ds2index][ds2recordbandindex]->weights()[i];
-								baselineweight[f][0][j][p] += weight1*weight2;
-							}
-						}
-					}
-				}
-			}
+				break;
+			f32 weight1 = readers[wd.ds1][wd.rb1]->weights()[i];
+			f32 weight2 = readers[wd.ds2][wd.rb2]->weights()[i];
+			baselineweight[wd.f][0][wd.j][wd.p] += weight1*weight2;
 		}
 	}
 }

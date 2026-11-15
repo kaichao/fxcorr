@@ -62,6 +62,14 @@ static bool g_timing_brief = false;
 static FILE *g_timing_out = 0;
 static double g_tt_station, g_tt_read, g_tt_zero, g_tt_xmac, g_tt_wacc,
               g_tt_uvshift, g_tt_cbw, g_tt_auto, g_tt_addsub, g_tt_start;
+// FXCORR_XPP_PROF=1: station 段内部拆分（setup / process / 归约 / collect / 尾部）
+static double g_prof_setup, g_prof_proc, g_prof_red, g_prof_collect, g_prof_tail;
+static bool g_prof = false;
+static inline void prof_add(double &dst, double v)
+{
+	#pragma omp atomic
+	dst += v;
+}
 
 static inline double nowsec()
 {
@@ -1281,6 +1289,7 @@ int main(int argc, char **argv)
 		g_timing = (timingenv != 0 && strcmp(timingenv, "1") == 0)
 		        || (fileenv != 0 && fileenv[0] != '\0')
 		        || g_timing_trace || g_timing_brief;
+		g_prof = getenv("FXCORR_XPP_PROF") != 0;
 		g_timing_out = stderr;
 		const char *outpath = 0;
 		if(g_timing_trace && trace_path)
@@ -1675,6 +1684,7 @@ int main(int argc, char **argv)
 
 	int numdatastreams = config.getNumDataStreams();
 	vector<Mode *> modes(numdatastreams, 0);
+	vector<char> blockac(numdatastreams, 0);
 	// block-parallel replica Modes per datastream (empty unless
 	// FXCORR_XPP_BLOCK_THREADS > 1); the primary Mode stays worker 0
 	vector<vector<Mode *> > modereplicas(numdatastreams);
@@ -1722,17 +1732,15 @@ int main(int argc, char **argv)
 		if(!streams[ds]->ok())
 			return fail(monitor, "fxcorr-xpp: cannot read " + sdir
 			            + "/stream.bin (missing or header mismatch - was this batch run with fxcorr-fp?)");
+		blockac[ds] = 0;	// set below when this datastream uses block accumulators
 
-		// per-block accumulators, exactly fxcorr-f's (its nthreads = 1 path):
-		// the per-fftloop reduction below replays the blocks in block order,
-		// so the per-band weights (getDataWeight) and the accumulation
-		// sequences are the values fxcorr-f produced.  slot = the global block
-		// index (blockslotbase = 0), so the whole subint fits.  The primary
-		// keeps that mapping even in block mode (the serial path must stay
-		// safe if the pcal capability check below falls back).
-		modes[ds]->enableBlockAccumulators(blockspersend);
-		modes[ds]->setBlockSlotBase(0);
-		if(blockthreads > 1)
+		// Serial path (blockthreads == 1) accumulates directly in Mode, in
+		// the same block order as fxcorr-f's nthreads = 1 path, so it needs
+		// neither per-block slots nor the reduction pass below.  Only the
+		// optional block-parallel mode enables them (slot = global block
+		// index, blockslotbase = 0).
+		bool useblock = (blockthreads > 1);
+		if(useblock)
 		{
 			// the parallel pcal reduction needs the extractors' raw
 			// accumulators; without them the replicas' shares cannot be
@@ -1741,6 +1749,7 @@ int main(int argc, char **argv)
 			{
 				cerr << "fxcorr-xpp: pcal extractor does not expose its raw accumulator; falling back to serial station processing" << endl;
 				blockthreads = 1;
+				useblock = false;
 			}
 			// whole-subint slots: the block form processes the subint without
 			// recycling per-fftloop slots, so every Mode needs blockspersend
@@ -1750,10 +1759,13 @@ int main(int argc, char **argv)
 			{
 				cerr << "fxcorr-xpp: cannot hold a whole subint of spectrum slots for datastream " << ds << "; falling back to serial station processing" << endl;
 				blockthreads = 1;
+				useblock = false;
 			}
 		}
-		if(blockthreads > 1)
+		if(useblock)
 		{
+			modes[ds]->enableBlockAccumulators(blockspersend);
+			modes[ds]->setBlockSlotBase(0);
 			for(int t=1;t<blockthreads;t++)
 			{
 				Mode *rm = config.getMode(configindex, ds);
@@ -1780,6 +1792,15 @@ int main(int argc, char **argv)
 		// (bands may alias a parent band) and single-band datastreams
 		else if(bandthreads > 1)
 			modes[ds]->setBandParallel(bandthreads);
+		if(!useblock)
+		{
+			// 串行路径：ac/权重直接累加，但 pcal 仍按块停放、按块序归约，
+			// 与 xp（启用完整块累加器）的 pcal.bin / PCAL 文本逐字节一致；
+			modes[ds]->setBlockSlotBase(0);
+			if(config.getDPhaseCalIntervalHz(configindex, ds) > 0)
+				modes[ds]->enableBlockPcal(blockspersend);
+		}
+		blockac[ds] = useblock ? 1 : 0;
 
 		// one spectrum view per (datastream, total band); zoom bands are the
 		// parent band's slice inside Mode, so every view reads the Mode
@@ -1981,6 +2002,8 @@ int main(int argc, char **argv)
 			{
 				if(!dsactive[ds])
 					return;
+				double p_setup=0, p_proc=0, p_red=0, p_collect=0, p_tail=0, p_r0=0;
+				double p_t0 = nowsec();
 				Mode *m = modes[ds];
 				StreamReader *sr = streams[ds];
 				int nrecordedbands = config.getDNumRecordedBands(configindex, ds);
@@ -2002,6 +2025,7 @@ int main(int argc, char **argv)
 				setupMode(m);
 				for(size_t rt=0;rt<modereplicas[ds].size();rt++)
 					setupMode(modereplicas[ds][rt]);
+				p_setup = nowsec() - p_t0;
 
 				int acblockcount = 0;
 				int acshiftcount = 0;
@@ -2154,13 +2178,16 @@ int main(int argc, char **argv)
 
 					// block-ordered processing; slot = the global block index
 					// (blockslotbase = 0, set where the Mode was built)
+					double p_p0 = nowsec();
 					for(int b=0;b<numffts;b++)
 						m->process(fftloop*numbufferedffts + b, b);
+					p_proc += nowsec() - p_p0;
 
 					// fxcorr-f's per-fftloop reduction at nthreads = 1: fold
 					// the per-block accumulators back in block order, so the
 					// autocorrelations and weights equal the serial sums
-					int crosspols = m->writeCrossAutoCorrs() ? 2 : 1;
+					p_r0 = nowsec();
+					int crosspols = blockac[ds] ? (m->writeCrossAutoCorrs() ? 2 : 1) : 0;
 					for(int cp=0;cp<crosspols;cp++)
 					{
 						for(int j=0;j<nrecordedbands;j++)
@@ -2200,11 +2227,14 @@ int main(int argc, char **argv)
 							}
 						}
 					}
+					p_red += nowsec() - p_r0;
 
 					// the spectrum views, taken before the slots are reused
 					// (the old writeSpectraBand position in the fftloop)
+					double p_c0 = nowsec();
 					for(size_t band=0;band<readers[ds].size();band++)
 						static_cast<MemReader *>(readers[ds][band])->collectBand(fftloop);
+					p_collect += nowsec() - p_c0;
 
 					// autocorrelation averaging batch boundary (core.cpp:993-1003)
 					acblockcount += numffts;
@@ -2239,6 +2269,7 @@ int main(int argc, char **argv)
 						acshiftcount++;
 					}
 				}
+				double p_tail0 = nowsec();
 				// trailing partial batch (fxcorr-f main, same as core.cpp)
 				if(acblockcount != 0)
 				{
@@ -2291,6 +2322,15 @@ int main(int argc, char **argv)
 						             blockspersend, config.getJobName());
 					}
 				}
+				p_tail += nowsec() - p_tail0;
+				if(g_prof)
+				{
+					prof_add(g_prof_setup, p_setup);
+					prof_add(g_prof_proc, p_proc);
+					prof_add(g_prof_red, p_red);
+					prof_add(g_prof_collect, p_collect);
+					prof_add(g_prof_tail, p_tail);
+				}
 			};
 			if(bandthreads > 1)
 			{
@@ -2301,9 +2341,20 @@ int main(int argc, char **argv)
 			}
 			else
 			{
-				#pragma omp parallel for schedule(dynamic)
+				// Compact the live datastreams before scheduling: in shard
+				// mode most entries are inactive, and dynamic scheduling over
+				// the full list lets one thread collect two live datastreams
+				// while others idle (OMP=16 on an 8-ds group measured 2.4x
+				// slower than OMP=8).  The live datastreams all cost the same,
+				// so a static split over them is balanced.
+				std::vector<int> activeds;
+				activeds.reserve(numdatastreams);
 				for(int ds=0;ds<numdatastreams;ds++)
-					stationDs(ds);
+					if(dsactive[ds])
+						activeds.push_back(ds);
+				#pragma omp parallel for schedule(static)
+				for(int k=0;k<(int)activeds.size();k++)
+					stationDs(activeds[k]);
 			}
 			g_tt_station += STAGE_LAP(ts, "station");
 		}
@@ -2315,39 +2366,45 @@ int main(int argc, char **argv)
 		vectorZero_cf32(subintresults, coreresultlength);
 		g_tt_zero += STAGE_LAP(tz, "zero");
 
-		// XMAC + uvshift/average, batched exactly like core.cpp:786-1057
+		// XMAC + uvshift/average, batched exactly like core.cpp:786-1057.
+		// 2026-11-15 loop interchange: one pass-outer parallel region per
+		// uvshift period (xmacBatchPeriod), then accumulateWeights for the
+		// period's fftloops in order.  Per-pass accumulator addition order
+		// is unchanged, so results stay bit-identical.
 		int xcblockcount = 0, xcshiftcount = 0;
+		int xcstart = 0;	// first fftloop of the current uvshift period
+		auto xmacPeriod = [&](int fl0, int fl1, int nblocks) {
+			{
+				StageTimer tx;
+				xmac.xmacBatchPeriod(fl0, fl1, readers, 0);
+				g_tt_xmac += STAGE_LAP(tx, "xmac");
+				for(int fl=fl0; fl<fl1; fl++)
+				{
+					xmac.accumulateWeights(fl, readers);
+					g_tt_wacc += STAGE_LAP(tx, "wacc");
+				}
+			}
+			double nsoffset = (xcshiftcount*maxxcblocks + ((double)nblocks)/2.0)*blockns;
+			StageTimer tu;
+			xmac.uvshiftAndAverage(offsetsec, nsoffset, nblocks*blockns, 0, subintresults);
+			g_tt_uvshift += STAGE_LAP(tu, "uvshift");
+		};
 		for(int fftloop=0;fftloop<fftloops;fftloop++)
 		{
 			int numffts = blockspersend - fftloop*numbufferedffts;
 			if(numffts > numbufferedffts)
 				numffts = numbufferedffts;
-
-			{
-				StageTimer tx;
-				xmac.xmacBatch(fftloop, readers, 0);
-				g_tt_xmac += STAGE_LAP(tx, "xmac");
-				xmac.accumulateWeights(fftloop, readers);
-				g_tt_wacc += STAGE_LAP(tx, "wacc");
-			}
 			xcblockcount += numffts;
 			if(xcblockcount == maxxcblocks)
 			{
-				double nsoffset = (xcshiftcount*maxxcblocks + ((double)maxxcblocks)/2.0)*blockns;
-				StageTimer tu;
-				xmac.uvshiftAndAverage(offsetsec, nsoffset, maxxcblocks*blockns, 0, subintresults);
-				g_tt_uvshift += STAGE_LAP(tu, "uvshift");
+				xmacPeriod(xcstart, fftloop+1, maxxcblocks);
+				xcstart = fftloop+1;
 				xcblockcount = 0;
 				xcshiftcount++;
 			}
 		}
 		if(xcblockcount != 0)
-		{
-			double nsoffset = (xcshiftcount*maxxcblocks + ((double)xcblockcount)/2.0)*blockns;
-			StageTimer tu;
-			xmac.uvshiftAndAverage(offsetsec, nsoffset, xcblockcount*blockns, 0, subintresults);
-			g_tt_uvshift += STAGE_LAP(tu, "uvshift");
-		}
+			xmacPeriod(xcstart, fftloops, xcblockcount);
 
 		// baseline weights -> floatresults section (core.cpp:1065-1107, no locks)
 		{
@@ -2477,6 +2534,10 @@ int main(int argc, char **argv)
 		}
 		timing_finish();	// brief rows / trace buffer
 	}
+	if(g_prof)
+		cerr << "STPROF setup=" << g_prof_setup << " process=" << g_prof_proc
+		     << " reduce=" << g_prof_red << " collect=" << g_prof_collect
+		     << " tail=" << g_prof_tail << endl;
 
 	return EXIT_SUCCESS;
 }

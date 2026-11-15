@@ -13,10 +13,17 @@
 #   -r N        重复次数（默认 1；每次清空 vis/vis-parts）
 #   -t TAG      run-id 前缀（默认 <workdir 基名>-<batch>-omp<N>[-g<G>]）
 #   --keep      不清空 vis/vis-parts（重复跑同一 batch 会触发 SWIN 互斥检查）
+#   --bind M    线程绑定：close（默认）| spread | none
+#   --cpuset S  docker cpuset：auto（默认，OMP<=96 用 0..N-1）| none | 显式
+#               如 0-7；只有 cpuset 生效时才同时加 --cpuset-mems
+#   --mems N    与 --cpuset 搭配的 NUMA 节点（默认 0）
+#   --no-bind   等价于 --bind none --cpuset none
 #
 # 环境变量:
 #   XP_OPT_ROOT     结果根（默认 /data/scalebox/mydata/fxcorr/xp-opt）
 #   XP_GIT_COMMIT   写进 manifest 的源码版本（可选；远端同步副本没有 .git）
+#   XP_OMP_PROC_BIND / XP_OMP_PLACES / XP_CPUSET / XP_MEMS 可覆盖对应默认值
+#   OMP_DISPLAY_AFFINITY 非空时透传进容器（调试线程落点）
 #   FXCORR_LOGLEVEL 等 FXCORR_* 由调用环境透传进容器（见 PASS_ENV）
 #
 # 每个 run 目录（app-fxcorr 的 run 规范）:
@@ -34,7 +41,7 @@ CONTAINER_PATH=/opt/xp-opt/bin
 IMAGE_PATH=/usr/local/difx/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 die() { echo "run_xpp.sh: $*" >&2; exit 1; }
-usage() { sed -n '2,31p' "$0" >&2; exit 2; }
+usage() { sed -n '2,35p' "$0" >&2; exit 2; }
 
 FORMAL=0
 OMP=1
@@ -43,6 +50,9 @@ REPEAT=1
 TAG=""
 BINDIR=""
 KEEP=0
+BIND=${XP_OMP_PROC_BIND:-close}
+CPUSET_SPEC=${XP_CPUSET:-auto}
+MEMS_SPEC=${XP_MEMS:-0}
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--formal) FORMAL=1; shift ;;
@@ -53,6 +63,10 @@ while [ $# -gt 0 ]; do
 		-r) REPEAT=${2:?}; shift 2 ;;
 		-t) TAG=${2:?}; shift 2 ;;
 		--keep) KEEP=1; shift ;;
+		--bind) BIND=${2:?}; shift 2 ;;
+		--cpuset) CPUSET_SPEC=${2:?}; shift 2 ;;
+		--mems) MEMS_SPEC=${2:?}; shift 2 ;;
+		--no-bind) BIND=none; CPUSET_SPEC=none; shift ;;
 		-h|--help) usage ;;
 		-*) die "未知选项: $1" ;;
 		*) break ;;
@@ -67,6 +81,43 @@ BATCH=$2
 case "$OMP" in ''|*[!0-9]*) die "-j 必须是正整数: $OMP" ;; esac
 case "$REPEAT" in ''|*[!0-9]*) die "-r 必须是正整数: $REPEAT" ;; esac
 [ "$OMP" -ge 1 ] && [ "$REPEAT" -ge 1 ] || die "-j/-r 必须 >= 1"
+case "$BIND" in close|spread|none) ;; *) die "--bind 只能是 close|spread|none: $BIND" ;; esac
+
+# ---------- 线程/内存绑定 ----------
+# 默认 close + cpuset auto：OMP<=节点0物理核数时把 CPU 和内存都钉在 node0
+# （2026-11-15 实测：同 OMP=4，全 node0 的 xmac 18.9 s，2+2 跨节点 34.6 s）。
+# cpuset 只在容器 cpuset 生效时才加 mems；OMP 超过单节点物理核数时退回只做
+# OMP 绑定，避免把内存强制到一个节点却把线程放到另一个节点。
+NODE_CORES=${XP_NODE_CORES:-96}
+CPUSET=""
+MEMS=""
+if [ "$BIND" = none ]; then
+	CPUSET_SPEC=none
+fi
+case "$CPUSET_SPEC" in
+	auto)
+		if [ "$OMP" -le "$NODE_CORES" ]; then
+			CPUSET="0-$((OMP-1))"
+			MEMS="$MEMS_SPEC"
+		fi
+		;;
+	none|'') ;;
+	*) CPUSET=$CPUSET_SPEC; MEMS=$MEMS_SPEC ;;
+esac
+if [ -n "$CPUSET" ] && [ -z "$MEMS" ]; then
+	die "--cpuset 需要同时给 --mems（或让 auto 使用默认 0）"
+fi
+BIND_ENV=()
+if [ "$BIND" != none ]; then
+	BIND_ENV=(-e "OMP_PROC_BIND=$BIND" -e "OMP_PLACES=${XP_OMP_PLACES:-cores}")
+fi
+DOCKER_BIND=()
+if [ -n "$CPUSET" ]; then
+	DOCKER_BIND=(--cpuset-cpus="$CPUSET" --cpuset-mems="$MEMS")
+fi
+if [ -n "${OMP_DISPLAY_AFFINITY:-}" ]; then
+	BIND_ENV+=(-e "OMP_DISPLAY_AFFINITY=$OMP_DISPLAY_AFFINITY")
+fi
 
 DATASET=$(basename "$WD")
 BASE_TAG=${TAG:-$DATASET-$BATCH-omp$OMP}
@@ -105,7 +156,7 @@ fi
 
 # ---------- 透传的 FXCORR_* ----------
 PASS_ENV=()
-for v in FXCORR_LOGLEVEL FXCORR_STA FXCORR_KURTOSIS FXCORR_X_ALLOW_EMPTY FXCORR_XPP_BAND_THREADS FXCORR_XPP_BLOCK_THREADS; do
+for v in FXCORR_LOGLEVEL FXCORR_STA FXCORR_KURTOSIS FXCORR_X_ALLOW_EMPTY FXCORR_XPP_BAND_THREADS FXCORR_XPP_BLOCK_THREADS FXCORR_XPP_DEBUG FXCORR_XPP_PROF; do
 	if [ -n "${!v:-}" ]; then PASS_ENV+=(-e "$v=${!v}"); fi
 done
 
@@ -174,11 +225,13 @@ PY
 	local t0 t1 host_wall rc
 	t0=$(date +%s.%N)
 	local CMD=(docker run --rm
+		"${DOCKER_BIND[@]}"
 		-w "$WD"
 		"${MOUNT_ARGS[@]}"
 		-v "$out/logs:/out"
 		-e "PATH=$PATH_VALUE"
 		-e "OMP_NUM_THREADS=$OMP"
+		"${BIND_ENV[@]}"
 		-e "FXCORR_TIMING_BRIEF=/out/timing-brief.tsv"
 		-e "BATCH=$BATCH" -e "WD=$WD" -e "DSGROUP=$GROUP"
 		"${PASS_ENV[@]}"
@@ -223,6 +276,8 @@ PY
 	# manifest / metrics / result
 	RUN_ID="$run_id" OUT="$out" WD="$WD" BATCH="$BATCH" DATASET="$DATASET" \
 	OMP="$OMP" GROUP="${GROUP:-full}" IMAGE="$IMAGE" IMAGE_ID="$IMAGE_ID" \
+	PROC_BIND="$BIND" PLACES="$([ "$BIND" = none ] && echo '' || echo "${XP_OMP_PLACES:-cores}")" \
+	CPUSET="$CPUSET" MEMS="$MEMS" \
 	HOST_NAME="$HOST_NAME" HOST_NPROC="$HOST_NPROC" HOST_MEM_GIB="$HOST_MEM_GIB" \
 	GIT_COMMIT="$GIT_COMMIT" SCRIPT_SHA="$SCRIPT_SHA" FORMAL="$FORMAL" SUMMARY="${SUMMARY:-}" \
 	WALL="${wall:-}" USER_T="${user:-}" SYS_T="${sys:-}" HOST_WALL="$host_wall" \
@@ -255,6 +310,10 @@ manifest = {
     'stations': stations,
     'n_stations': len(stations),
     'omp': int(env['OMP']),
+    'omp_proc_bind': env['PROC_BIND'],
+    'omp_places': env['PLACES'],
+    'cpuset_cpus': env['CPUSET'],
+    'cpuset_mems': env['MEMS'],
     'ds_group': env['GROUP'],
     'image': env['IMAGE'],
     'image_id': env['IMAGE_ID'],
@@ -289,6 +348,12 @@ metrics = {
     'mem_peak_mib': num(env['MEM_MIB']),
     'mem_peak_source': 'ru_maxrss (RUSAGE_CHILDREN)',
     'mem_cgroup_peak_mib': num(env['MEM_CGROUP_MIB']),
+    'binding': {
+        'omp_proc_bind': env['PROC_BIND'],
+        'omp_places': env['PLACES'],
+        'cpuset_cpus': env['CPUSET'],
+        'cpuset_mems': env['MEMS'],
+    },
     'swin': {
         'files': int(env['SWIN_FILES'] or 0),
         'bytes': int(env['SWIN_BYTES'] or 0),

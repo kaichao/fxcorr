@@ -14,7 +14,7 @@ Q2**："相对目标跨文件系统会断"的理由不成立（那是硬链接�
 `./<规范名>`、重定向根仍写绝对）、**比侧两侧先归一化再逐字比**（`FxcorrPath::checkRoots`
 与 `roots.sh` 的 `fxcorr_check_roots` 同规则；**旧式绝对记录经一次折叠即等价、不需要
 重写**）；检查能力不减——默认↔默认 在任意别名下一致，默认↔重定向 仍报错。规范条文见
-5.2.1，实物与样例见 `workdir-template/meta/README.md`）。**此前** 2026-10-03（**两处补录**：5.1 增"编号体系外的文件"（`threads` / `<base>-sim.input` / `.joblist`）与"各文件的消费者"（fxcorr/app-fxcorr 视角：三工具读什么、`.flag` 归谁、DATA TABLE 不用于定位）两条；5.2 增"`filelist` / DATA TABLE / 软链的现状"条——前处理必须保留 filelist、FILE 行无 fxcorr 消费者、软链唯一实际消费者是 mpifxcorr）；此前 **2026-10-02**（**数据定位重构定案**（V8 `v8-plan.md` §2）：`fxcorr-f` 不再读 `.input` 的 DATA TABLE 定位数据——任务 headers `real_path`（可选）> 命名规则推导两级，**DATA TABLE 软链机制退役**；5.2 增"数据定位"条、5.2.1 的 `FXCORR_RAW_ROOT` 接管描述与"两类路径的基准"表同步；**当日已实施**（`v8-plan.md` §2.3 判据 1–3、模块级全链实测通过）。**同日**（**任务标识去阶段后缀**：第 6 节表格的 `<batch>-merge`/`<exp>-merge` 修订为 `<batch>`/`<exp>`——同一标识在不同阶段对应不同计算任务，区分由编排层承担（投递目标模块 + headers `last_from_module`）；解析建议同步修订）。此前 2026-09-28（**V6 S4.1 已实施：两级 `merge` 落地**——batch 级 `merge <batch>` 只写 `vis-parts/<batch_id>/merged.part`、**新增**实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；5.9 末条的四条定则（实验的认定、缺 batch 判据取 `batches/*.json`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）与第 4/6/12 节的相应行同步去 ⚠。**`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义已核实**（2026-09-28，结论与原文不同——见第 12 节表格）。此前 2026-09-27（**V6 S2.5 已实施：D15 整体取消**——`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根、`fxcorr-sim common` 子命令全部删除；公共信号改为每个 `station` 任务在本地合成（算全部、只留自己那段），公共参数只剩 `seed`，随 `batch.json` 走；5.8 节重写为"参数"，第 2/3/4/9/10/12 节的 D15 相关行同步。判据是 raw 与旧路径**逐字节相同**。**注意：以下"未实施"标记指 V6 的其余各项**：5.9 补**两级 merge（形态 A）**——batch 级只写 `merged.part`、实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；第 6 节任务标识加 `<exp>-merge`；第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表同步；**第 12 节的"同实验 batch 串行约定"按多节点部署改写**——SWIN 由形态 A 解决，`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义列为待确认（见该节表格）。路线与验收见 `v6-plan.md`。**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
+5.2.1，实物与样例见 `workdir-template/meta/README.md`）。**此前** 2026-10-03（**两处补录**：5.1 增"编号体系外的文件"（`threads` / `<base>-sim.input` / `.joblist`）与"各文件的消费者"（fxcorr/app-fxcorr 视角：三工具读什么、`.flag` 归谁、DATA TABLE 不用于定位）两条；5.2 增"`filelist` / DATA TABLE / 软链的现状"条——前处理必须保留 filelist、FILE 行无 fxcorr 消费者、软链唯一实际消费者是 mpifxcorr）；此前 **2026-10-02**（**数据定位重构定案**（V8 `v8-plan.md` §2）：`fxcorr-f` 不再读 `.input` 的 DATA TABLE 定位数据——任务 headers `real_path`（可选）> 命名规则推导两级，**DATA TABLE 软链机制退役**；5.2 增"数据定位"条、5.2.1 的 `FXCORR_RAW_ROOT` 接管描述与"两类路径的基准"表同步；**当日已实施**（`v8-plan.md` §2.3 判据 1–3、模块级全链实测通过）。**同日**（**任务标识去阶段后缀**：第 6 节表格的 `<batch>-merge`/`<exp>-merge` 修订为 `<batch>`/`<exp>`——同一标识在不同阶段对应不同计算任务，区分由编排层承担（投递目标模块 + headers `last_from_module`，现名 `pre_router_from_module`）；解析建议同步修订）。此前 2026-09-28（**V6 S4.1 已实施：两级 `merge` 落地**——batch 级 `merge <batch>` 只写 `vis-parts/<batch_id>/merged.part`、**新增**实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；5.9 末条的四条定则（实验的认定、缺 batch 判据取 `batches/*.json`、按首记录时间定序 + 逐 batch 流式写出、根一致性检查）与第 4/6/12 节的相应行同步去 ⚠。**`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义已核实**（2026-09-28，结论与原文不同——见第 12 节表格）。此前 2026-09-27（**V6 S2.5 已实施：D15 整体取消**——`sim-common/` 目录、`FXCORR_SIM_COMMON_ROOT` 根、`fxcorr-sim common` 子命令全部删除；公共信号改为每个 `station` 任务在本地合成（算全部、只留自己那段），公共参数只剩 `seed`，随 `batch.json` 走；5.8 节重写为"参数"，第 2/3/4/9/10/12 节的 D15 相关行同步。判据是 raw 与旧路径**逐字节相同**。**注意：以下"未实施"标记指 V6 的其余各项**：5.9 补**两级 merge（形态 A）**——batch 级只写 `merged.part`、实验级 `merge --experiment` 才写 SWIN 且是唯一写入者；第 6 节任务标识加 `<exp>-merge`；第 4 节模块 I/O、第 9 节数据流图、第 12 节生命周期表同步；**第 12 节的"同实验 batch 串行约定"按多节点部署改写**——SWIN 由形态 A 解决，`PCAL_*`/`SWITCHEDPOWER_*` 的并发语义列为待确认（见该节表格）。路线与验收见 `v6-plan.md`。**分片架构落地**：D16 记录格式定稿（= SWIN 记录流原样，见 5.9）、`fxcorr-x` 的 `ds_group` 分片与 `merge` 子命令已实施、5.2 的 `_ds<N>` 后缀规则明确为"仅多 ds 站"。**第 6 节 batch_id 改为 8 位零填充顺序号**——名字不再承载时间信息，随之取消"batch 时长 ≥ 1 s"的人为约束；位数依据与"band 该不该进 batch"的取舍见 `data-volume.md` §7.6；第 12 节同步。09-26：新增 **D16 分片局部记录**与 5.9 节 `vis-parts/` 目录规范，配套 `data-volume.md` §7 的"计算单元按 ds 分片 + SWIN 合并"方案——合并实现为 **fxcorr-x 的 `merge` 子命令**；第 2 节目录表、第 3 节数据总表、第 4 节模块 I/O、第 9 节数据流、第 10 节命名汇总、第 12 节生命周期表同步）。
 **上一版更新**：2026-09-21（**第 11 节的体积公式移入 `data-volume.md` §1.3**，本节只留速查；V5 P6 讨论：第 12 节补六条——**时间层级表**（FFT 块 / Core 短积分 /
 Manager 最终积分 ↔ fxcorr 的 `.sp` 块 / subint / intTime）、batch 时长与起点约束（`intTime`
 整数倍、下限随配置而变而非固定秒数、**起点须落在积分边界**——并记下当前三层校验都只覆盖
@@ -545,8 +545,9 @@ SWIN、`pcal.bin` 与 PCAL 文本**逐字节一致**（实施与判据记录见
 > **2026-10-02 修订（去阶段后缀）**：任务标识是**数据标识（自然键）**，不含阶段
 > 后缀——`<batch>` 同时用于"不分片 x"、"批引导"、"batch 级归并"等任务，`<exp>`
 > 用于实验级归并。同一标识在不同阶段对应**不同计算任务**，区分由**编排层**承担：
-> 投递目标模块 + headers（`from_module` / `last_from_module` = 上一个非主路由模块；
-> 如 `fxcorr-x-merge` 的 batch 级/实验级两形态按 `last_from_module` ∈
+> 投递目标模块 + headers（`from_module` / `pre_router_from_module` = 越过连续主路由链
+> 后的真实上游模块；过渡期平台同时双写旧名 `last_from_module`，读取新名优先、回退旧名；
+> 如 `fxcorr-x-merge` 的 batch 级/实验级两形态按 `pre_router_from_module` ∈
 > {`fxcorr-x`, `vtask-tail`} 区分）。`<batch>-merge` / `<exp>-merge` 后缀形态为
 > 历史记录（见文首更新日志）。
 
@@ -560,7 +561,8 @@ SWIN、`pcal.bin` 与 PCAL 文本**逐字节一致**（实施与判据记录见
 **解析建议**：按**段数**分派，不要按位置硬编码——1 段（数字）= 整 batch 任务
 （不分片 x 或 batch 级归并，执行模块由编排层指定）；2 段且为数字 = x 分片；
 3 段 = f 分片。**任务标识不含阶段后缀**（2026-10-02 修订），模块侧的形态区分
-（如 `fxcorr-x-merge` 的两种归并）改用 headers `last_from_module`。
+（如 `fxcorr-x-merge` 的两种归并）改用 headers `pre_router_from_module`（过渡期
+回退旧名 `last_from_module`）。
 
 **f 与 x 的任务数不同**（这是"任务 ID 不能只有一种形状"的根因）：f 任务 = 站数 × 每站 ds 数（t25362 是 16），x 分片任务 = 频段组数（t25362 是 4）。**编排层要维护任务依赖**——一个 x 分片任务只等"该 batch 中属于该 ds 组的那些 f 任务"完成，不是等全部 f 任务。
 

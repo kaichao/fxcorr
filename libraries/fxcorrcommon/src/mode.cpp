@@ -43,6 +43,7 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
   blockac = 0;
   blockweight = 0;
   blockacblocks = 0;
+  blockpcalslots = 0;
   currentblock = 0;
   blockslotbase = 0;
   // P3 (pcal): per-block pcal slots (see mode.h); off by default as well
@@ -1922,6 +1923,7 @@ void Mode::enableBlockAccumulators(int slotcount)
   // serially (Mode::blockPcalCapable() tells it).
   if(extractor != 0 && blockPcalCapable())
   {
+    blockpcalslots = blockacblocks;
     blockpcallen = new int[numrecordedbands];
     blockpcal = new f32**[blockacblocks];
     blockpcalsamples = new uint64_t*[blockacblocks];
@@ -1937,6 +1939,34 @@ void Mode::enableBlockAccumulators(int slotcount)
     }
   }
   currentblock = 0;
+}
+
+// Pcal-only variant: park each block's pcal integration state without the
+// autocorrelation/weight slots.  The serial caller (fxcorr-xpp) accumulates
+// ac and weights directly, but must keep the pcal summation order identical
+// to fxcorr-xp (which enables the full block accumulators).
+void Mode::enableBlockPcal(int slotcount)
+{
+  if(blockpcal != 0)
+    return;
+  if(extractor == 0 || !blockPcalCapable())
+    return;
+  if(slotcount <= 0)
+    slotcount = blockspersend;
+  blockpcalslots = slotcount;
+  blockpcallen = new int[numrecordedbands];
+  blockpcal = new f32**[blockpcalslots];
+  blockpcalsamples = new uint64_t*[blockpcalslots];
+  for(int b=0;b<blockpcalslots;b++)
+  {
+    blockpcal[b] = new f32*[numrecordedbands];
+    blockpcalsamples[b] = new uint64_t[numrecordedbands];
+    for(int j=0;j<numrecordedbands;j++)
+    {
+      blockpcallen[j] = (int)extractor[j]->getAccumSize();
+      blockpcal[b][j] = vectorAlloc_f32(blockpcallen[j]);
+    }
+  }
 }
 
 void Mode::zeroAutocorrelations()
@@ -1966,17 +1996,17 @@ void Mode::zeroAutocorrelations()
 void Mode::clearBlockAccumulators(int index)
 {
   int block = index - blockslotbase;
-  if(blockacblocks <= 0 || block < 0 || block >= blockacblocks)
-    return;
-
-  for(int i=0;i<autocorrwidth;i++)
+  if(blockacblocks > 0 && block >= 0 && block < blockacblocks)
   {
-    for(int j=0;j<numrecordedbands;j++)
-      vectorZero_cf32(blockac[i][block][j], recordedbandchannels);
-    for(int j=0;j<numrecordedbands;j++)
-      blockweight[i][block*numrecordedbands + j] = 0.0f;
+    for(int i=0;i<autocorrwidth;i++)
+    {
+      for(int j=0;j<numrecordedbands;j++)
+        vectorZero_cf32(blockac[i][block][j], recordedbandchannels);
+      for(int j=0;j<numrecordedbands;j++)
+        blockweight[i][block*numrecordedbands + j] = 0.0f;
+    }
   }
-  if(blockpcal != 0)
+  if(blockpcal != 0 && block >= 0 && block < blockpcalslots)
   {
     // A block that never gets fed (invalid data returns early in process())
     // must contribute zeros, exactly like the serial form where nothing was

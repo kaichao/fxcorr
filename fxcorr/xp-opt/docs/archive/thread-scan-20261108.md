@@ -1,11 +1,14 @@
 # 2 站 1.024 s：OMP 线程扫描（2026-11-08）
 
+> **归档说明（2026-11-15）**：2 站全批口径的线程扫描，已被单任务标定
+> （`../log.md` 的 Step 1/Step 2）取代，仅作历史对照。
+
 **数据**：`workdir-2st-b1024ms-n3`，batch `00000001`，2 站 × 8 ds = 16 ds、4 组、
 128 通道、1.024 s。**模式**：全量（写 SWIN）。**镜像**：`fxcorr/fxcorr:latest`。
 
 ## 结果
 
-数据源：`results/20261108/`（正式 run，RSS 口径 `ru_maxrss`）。
+数据源：`results-detail/20261108/`（正式 run，RSS 口径 `ru_maxrss`）。
 
 | OMP | wall (s) | user (s) | sys (s) | 峰值 RSS (MiB) | station (s) | read (s) | xmac (s) | wacc (s) | 加速比 |
 |---|---|---|---|---|---|---|---|---|---|

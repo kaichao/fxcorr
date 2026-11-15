@@ -1,172 +1,421 @@
 # 运行台账
 
-按时间顺序记录每一次实验、失败与修复。正式结果索引在 `results/README.md`。
+按时间顺序记录**当前口径**（单任务：一个 (batch, ds 组)）相关的实验、失败与修复。
+正式结果索引在 `results/README.md`。
 
-## 2026-11-08 建立工作区与首轮基线
+**历史归档**（早期全批单进程口径，仅作对照）：
 
-### 1. 目录与脚本
+- [`archive/band-block-parallelism.md`](archive/band-block-parallelism.md) —— band 并行、
+  ds×block 并行（劣化/未验证，未采用）；
+- [`archive/full-batch-omp-scans.md`](archive/full-batch-omp-scans.md) —— 2 站/4 站全批
+  OMP 扫描、目录整理；
+- [`archive/thread-scan-20261108.md`](archive/thread-scan-20261108.md) —— 2 站全批线程
+  扫描（已被单任务标定取代）。
 
-- 新建 `fxcorr/xp-opt/`：`prepare_workdir.sh`（实验 workdir）、`run_xp.sh`
-  （docker 运行 + 计时）、`results.tsv`。
-- 实验 workdir：
-  `/data/scalebox/mydata/fxcorr/xp-opt/workdir/workdir-2st-b1024ms-n3`
-  ——`config/` `batches/` `fengine/` 软链到源 workdir，`meta/` `vis/` `product/`
-  `vis-parts/` `raw/` 新建。
-- 源 workdir：`/data/scalebox/mydata/fxcorr/workdir-2st-b1024ms-n3`
-  （2 站 × 8 ds = 16 ds、4 组、128 通道、1.024 s）。
+## 2026-11-15 xmac OMP 扩展性分析：线程落点/NUMA 是主因
 
-### 2. 失败 1：容器内缺 workdir 挂载
+### 1. 先排除任务不均与固定开销
 
-现象（rc=1，0.009 s）：
+- 32 个输出频率 × 1 个 xmac stride = **32 个 pass**；每个 pass 为 24 条有效
+  基线 × 1 个极化积 × 10 个 buffered FFT × 128 通道。用 `.input` 的
+  BASELINE 表统计：32 个频率的基线数、极化积数**逐项都是 24**，任务等成本；
+  OMP=2/4/8 分别 16/8/4 个 pass/线程，`schedule(static)` 无余数。
+- 每 subint 调 `xmacBatch` **128 次**（blockspersend=1280、numbufferedffts=10），
+  200 subint = **25,600 个并行区**。空 32 迭代并行区实测
+  2.68/4.66/10.19 µs（OMP=2/4/8），合计 0.07/0.12/0.26 s；
+  `fxpasses` 串行构造 25,600 次实测 0.171 s。均不足 xmac 的 2%。
 
-```text
-fxcorr-xp: cannot open .../xp-opt/workdir/workdir-2st-b1024ms-n3/batches/00000001.json
-```
+### 2. 落点实验（OMP=4，同数据、同镜像）
 
-根因：`run_xp.sh` 只挂了软链目标（源 workdir），没挂实验 workdir 本身；docker
-`-w <workdir>` 指向不存在路径时静默建了空目录。
-
-修复：挂载数组初始加入 `-v "$WD:$WD"`。修复后同一命令 rc=0（111.9 s）。
-
-### 3. 失败 2：root 产物宿主删不掉
-
-现象（OMP=8 首跑，rc=1）：清理 `vis/` 时大量
-
-```text
-rm: cannot remove '.../vis/test_1.difx/...': Permission denied
-```
-
-根因：容器以 root 运行，`vis/` 产物属 root；宿主用户对 `vis/test_1.difx/` 目录
-无写权限。清理失败后 SWIN 未删，xp 触发互斥检查退出。
-
-修复：`clean_outputs()` 改为在容器内执行 `rm -rf` + `mkdir -p`。
-
-### 4. 基线（OMP 1 / 8 / 16）
-
-条件：全量模式（16 ds、4 组）、`fxcorr/fxcorr:latest`、每次清空 `vis/`。
-
-| OMP | wall (s) | user (s) | sys (s) | 峰值 RSS (MiB) | station (s) | read (s) | xmac (s) | wacc (s) | 相对 OMP=1 |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | 119.8 | 117.3 | 2.0 | 783 | 111.1 | 0.96 | 6.12 | 0.75 | 1.00× |
-| 8 | 22.4 | 146.9 | 6.7 | 768 | 15.6 | 1.01 | 4.22 | 0.59 | 5.35× |
-| 16 | 14.6 | 175.0 | 5.2 | 765 | 9.23 | 1.22 | 2.61 | 0.56 | 8.20× |
-
-- 三次 SWIN md5 相同：`82eb2c23e93d4a843e5e719cea87b231`（281,088 B）——ds 级
-  并行位一致。
-- `station` 是主体（OMP=1 占 93%）；OMP≥8 后 `xmac` 串行段成为次瓶颈。
-- 首轮临时 runs（旧脚本）同一数据的 wall：111.9 / 20.6 / 14.7 s——与正式值相差
-  约 0–8%，属宿主负载/页缓存的正常波动；以 `results/` 为准。
-
-### 4.1 测量口径修正：内存峰值
-
-首轮 OMP=1 报 2826 MiB，重跑报 786 MiB。根因不是程序行为：旧脚本用容器
-cgroup v2 `memory.peak`，它**包含页缓存**（读 `stream.bin` 的缓存），随宿主
-缓存状态变化，跨运行不可比。正式脚本改为在容器内用 `python3` wrapper 取
-`RUSAGE_CHILDREN.ru_maxrss`（真实进程峰值 RSS），同时保留 cgroup 值作参考
-（`metrics.json` 的 `mem_cgroup_peak_mib`）。修正后 783/768/765 MiB，与
-`fxcorr-xp/CLAUDE.md` 的 ~55 MB/ds 量级一致。
-
-### 5. 目录重构（同日）
-
-参照 `app-fxcorr/experiments` + `scratch` + `scripts/exp` 的组织：
-
-- `scripts/`：正式脚本（`prepare_workdir.sh`、`run_xp.sh`、`sync_results.sh`）；
-- `scratch/`：临时脚本与临时结果；
-- `results/<日期>/<run-id>/`：正式 run 产物（manifest/result/metrics/command/logs）；
-- `calibration/`：线程、内存、I/O 标定；
-- `docs/`：环境、计划、台账（本文件）。
-
-`run_xp.sh` 升级：`--formal` 生成标准 run 产物；默认输出到 `scratch/results/`。
-
-### 6. 正式重跑（同日）
-
-用升级后的脚本、`--formal`、RSS 口径重跑三轮，结果在
-`results/20261108/<run-id>/`，汇总 `results/summary.tsv`：
-
-| run-id | OMP | wall (s) | 峰值 RSS (MiB) | SWIN md5 |
+| 绑定 | wall | station | xmac | wacc |
 |---|---|---|---|---|
-| `workdir-2st-b1024ms-n3-00000001-omp1` | 1 | 119.8 | 783.1 | `82eb2c23…` |
-| `workdir-2st-b1024ms-n3-00000001-omp8` | 8 | 22.4 | 768.0 | `82eb2c23…` |
-| `workdir-2st-b1024ms-n3-00000001-omp16` | 16 | 14.6 | 765.1 | `82eb2c23…` |
+| `close`（全在 node0） | 67.85 | 45.08 | **18.91** | 1.48 |
+| 默认（不绑核） | 82.41 | 50.63 | 24.93 | 2.26 |
+| `spread`（2+2 跨 NUMA） | 91.98 | 52.39 | **34.62** | 2.11 |
 
-每个 run 目录含 `manifest.json`（镜像 ID、主机、脚本 sha256、batch 元数据）、
-`result.tsv`、`metrics.json`（阶段耗时、RSS/cgroup 内存、SWIN 指纹）、
-`command.sh`、`logs/`。结果已用 `scripts/sync_results.sh` 拉回仓库。
+- libgomp 默认亲和性 `0-383`，不绑核；`spread` 时采样到线程在 CPU
+  0/48/96/144——node0 两个、node1 两个。
+- 同一份代码/数据，`spread` 对 `close`：xmac **1.83×**、wacc 1.43×、
+  station 1.16×、wall 1.36×。正式两轮的 T=4 xmac 31.1/36.9 s 与 `spread`
+  同量级；默认 T=2/T=8 的 probe 也出现 xmac 40.9/15.2 s 的极端值。
+- **`numactl ... docker run` 无效**：容器由 daemon 启动，实测容器内
+  `Cpus_allowed_list` 仍为 `0-383`、`Mems_allowed_list` 仍为 `0-1`；
+  要用 `OMP_PROC_BIND/PLACES` 或 docker `--cpuset-cpus/--cpuset-mems`。
 
-后续接续：`app-fxcorr/docs/experiments/difx.md` 的固定单元是 S=16、1.024 s、
-3 批；下一步先补该基线，再 profile `station` 内部与 `xmac` 串行段。
+### 3. 绑定后的真实曲线（docker cpuset 0..N-1 + mems=0）
 
-## 2026-11-08 xpp 分支与 band 并行
+| OMP | wall | station | xmac | wacc | wall 相对 T1 |
+|---|---|---|---|---|---|
+| 1 | 209.39 | 174.09 | 28.47 | 4.43 | 1.00× |
+| 2 | 116.70 | 89.65 | 21.51 | 2.97 | 1.79× |
+| 4 | 65.82 | 44.99 | 16.87 | 1.43 | 3.18× |
+| 8 | 36.04 | 22.91 | 9.82 | 0.78 | 5.81× |
 
-### 1. xpp 架子
+- xmac 变为**单调但次线性**：1.32× / 1.69× / 2.90×（OMP=2/4/8）；
+  station 为 1.94× / 3.87× / 7.60×，接近线性。
+- 与不绑核的正式值相比：T=4 wall 85.9/91.5 → 65.8（−23%～−28%），
+  T=8 50.7/55.8 → 36.0（−29%～−35%）。
+- 同内核微基准（taskset 单节点）：T=1/4/8 = 16.1/11.2/5.8 s（T=2 在
+  17.2–24.2 s 间波动，受宿主负载影响），T=8 也只有约 2.8×，与 app 的
+  2.90× 同量级——说明 xmac 还有**内核级**的带宽/延迟上限，绑核只能消除
+  落点波动，不能把它变成线性。
 
-- `applications/fxcorr-xpp` = `fxcorr-xp` 逐字复制（仅改名）；`install-difx` 4 处
-  注册、`fxcorr/docker/Dockerfile` COPY 行已加；镜像重建后容器内与 xp 并存。
-- **镜像内 xpp 默认路径与 xp 逐字节一致**：2 站 / 1.024 s / batch 00000001、
-  OMP=8，md5 均 `82eb2c23…`（281,088 B），wall 20.87 s vs 20.91 s。
+### 4. 结论与下一步
 
-### 2. band 并行实现
+- **扩展不单调的主因是线程/内存落点抽签**，不是任务不均、OpenMP 固定开销
+  或串行 `fxpasses` 构造；同 OMP 下不同落点可差 1.8×。
+- 所有 OMP 扫描与正式对比必须固定绑定（`OMP_PROC_BIND=close
+  OMP_PLACES=cores` 或 docker cpuset）并在结果中记录；现有未绑核的
+  OMP=4/8 正式数字不能直接用于扩展性判断。
+- xmac 自身在 8 线程仍只有 2.90×，是下一个优化对象：优先做**循环交换**
+  （pass 在最外层并行、fftloop 在内层，每线程只碰自己的 pass/累加器，
+  并行区从 25,600 个降到 200 个、改善 L2 复用）、**conj 与 mul-add 融合**
+  （去掉 `conjbuf` 的写回读）、预计算 pass/基线描述并把配置查找移出内层。
 
-- 落点 `libraries/fxcorrcommon`：`Mode::setBandParallel(n)`（默认关闭，其他工具
-  行为/内存不变），每线程私有 `BandScratch`（旋转/frac/FFT 工作区/FFT plan）。
-  zoom、linear2circular、单 band 数据流自动禁用。
-- `fxcorr-xpp` 用环境变量 `FXCORR_XPP_BAND_THREADS=N` 启用；band 模式下 station
-  的 ds 循环串行、band 循环作为顶层并行（`main.cpp` 已改为 lambda 双分支）。
-- **修复的构建坑**：`fxcorrcommon/configure.ac` 的 `AX_OPENMP` 原先在
-  `AC_LANG(C++)` 之前，只设置 `OPENMP_CFLAGS`，库从未带 `-fopenmp` 编译
-  （`libraries/CLAUDE.md` 有记录）。
-- 并行机制迭代：OpenMP 内层 `parallel for`（每 block 一次）在 GCC libgomp 下
-  嵌套死锁/极慢；外层改 static 仍死锁；最终改为**持久线程池 `BandPool`**
-  （每 Mode 一份 worker），运行时无嵌套 region。
+## 2026-11-15 xpp 绑核 + xmac 循环交换（实施与实测）
 
-### 3. 验证状态与局限
+### 1. 绑核（只改 xpp 启动脚本）
 
-- 正确性：串行 vs band=8 的完整产物已对齐，SWIN md5 均 `82eb2c23…`（281,088 B）。
-- 性能：band=8 墙钟 **413 s**（user 645 s、sys 695 s），比同批串行 **91.9 s** 慢
-  4.5×。任务粒度是"每 block 每 band"，2 站 1.024 s 下约十万级任务提交，
-  同步成本完全压过计算。band 路径保留为开关，不作为优化方向。
-- 后续方向：block 并行（每线程独立 Mode 状态）或归约段并行化；XMAC 展平并行
-  也在待办列表。
+- `run_xpp.sh` 新增 `--bind close|spread|none`（默认 `close`）、
+  `--cpuset auto|none|<显式>`（默认 `auto`；OMP ≤ 96 时
+  `--cpuset-cpus=0..N-1 --cpuset-mems=0`）、`--mems`、`--no-bind`。
+- `OMP_PROC_BIND` / `OMP_PLACES` / `OMP_DISPLAY_AFFINITY` 透传进容器；
+  `manifest.json` / `metrics.json` 记录 `omp_proc_bind`、`omp_places`、
+  `cpuset_cpus`、`cpuset_mems`。
+- `run_xp.sh` 未改：xp 保持参照原样（不绑核）。
 
-## 2026-11-08~10 方案 A：ds×block 组合并行（实验性，验证中）
+### 2. xmac 循环交换（只改 fxcorr-xpp）
 
-### 1. 结果回顾与一次验证事故
+- 新增 `XmacEngine::xmacBatchPeriod(fftloop0, fftloop1, ...)`：
+  `xmacBatch` 改为薄包装，共用 `xmacBatchRange`。
+- 非 pulsar 路径：`#pragma omp parallel for` 仍按 pass 分线程，但每个线程在
+  内层按 fftloop 升序处理整个 uvshift 周期；`resultindex` 每个 fftloop
+  从 `pass.baseoffset` 重置，所以每个累加器的加法顺序不变。
+- pulsar 路径：`bins` 是共享 scratch，多 fftloop 范围自动退回逐 fftloop
+  处理（行为与改动前相同）。
+- `main.cpp` 按 `maxxcblocks` 的 uvshift 周期组织：每周期先
+  `xmacBatchPeriod`，再逐 fftloop `accumulateWeights`，最后
+  `uvshiftAndAverage`；尾部不足一个周期同样处理。
 
-- band 并行（任务 = 每 block 每 band）实测比串行慢 4.5×（413 s vs 91.9 s），
-  每 block 一次提交的同步成本完全压过计算；保留为开关，不再作为优化方向。
-- 块并行先后试过三种形态：
-  1. 每 ds 一个 OpenMP 并行区、每 fftloop 归约（J1 B8 约 76 s，不能与 ds 并行叠加）；
-  2. 自管 `SegmentPool`（std::thread）支持 ds×block 组合，条件变量唤醒在本机
-     约 35 ms/次，wall 反而劣化；改自旋池后又引入确定性结果偏差；
-  3. 大粒度（当前）：`Mode` 的频谱槽扩到整个 subint（槽号 = 全局块索引，
-     `Mode::setSubloopCapacity`），每 subint 只处理一次、归约一次，去掉每
-     fftloop 的同步。
-- **验证事故（2026-11-10）**：`fxcorr/Makefile` 的 `make sync` 使用
-  `rsync -az`，按大小+时间戳判断；本地与远端 mtime 相同时跳过传输。一段时间内
-  远端 `main.cpp`/`mode.cpp` 一直是旧版本，多轮“回退/逐字节验证”实际都在旧
-  二进制上执行（SWIN md5 恒定不变即为信号）。**此前记录的“块并行逐字节一致”
-  结论不可靠，已作废**。`make sync` 已改为 `rsync -azc`（按内容比较），关键
-  文件已强制同步。教训：同步后必须用 `md5sum` 核对源文件，不能只看 make 成功。
+### 3. 实测（4 站 1.024 s，绑核 cpuset 单节点，SWIN md5 全同）
 
-### 2. 当前实现（大粒度，默认关闭）
+对照 = 同一 workdir/镜像下、未改 xpp 但用 cpuset 绑定的基线；
+新增 = 循环交换版二进制（`run_xpp.sh -b` 挂载），同样 cpuset 绑定。
 
-- `FXCORR_XPP_BLOCK_THREADS=N`（N>1）：
-  - 每 ds 构造 N-1 个 Mode 副本；
-  - 主 Mode 与副本的 `subloopCapacity` 扩到 `blockspersend`，`process(i, i)`
-    把块 i 写进槽 i，不再需要 `blockSlotBase` 映射；
-  - 每 subint 一次 `SegmentPool` 调度：每段处理 `blockspersend/N` 个连续块，
-    段>0 把谱/数据权重拷回主 Mode；随后一次按块序归约（ac/weight/pcal/
-    kurtosis）、一次 `collectBand(fftloop, true)`、一次 ac 批次；
-  - ds 由 `OMP_NUM_THREADS` 并行，池任务不嵌套 OpenMP。
-- 限制：`maxacblocks >= blockspersend`（否则回退串行）、无 zoom、pcal 提取器
-  需支持原始累加器、`perbandweights` 未启用。
-- 改动文件：`libraries/fxcorrcommon/src/mode.{h,cpp}`（`fftslots` /
-  `setSubloopCapacity`）、`applications/fxcorr-xpp/src/{main,memreader}.*`。
+| OMP | wall 基线→新 | Δwall | station 基线→新 | xmac 基线→新 | Δxmac | wacc 基线→新 |
+|---|---|---|---|---|---|---|
+| 1 | 209.39→204.52 | −2.3% | 174.09→173.96 | 28.47→24.68 | **−13.3%** | 4.43→3.39 |
+| 2 | 116.70→111.16 | −4.7% | 89.65→88.85 | 21.51→17.27 | **−19.7%** | 2.97→2.46 |
+| 4 | 65.82→64.21 | −2.4% | 44.99→44.51 | 16.87→15.72 | −6.8% | 1.43→1.40 |
+| 8 | 36.04→35.78 | −0.7% | 22.91→22.70 | 9.82→9.69 | −1.3% | 0.78→0.82 |
 
-### 3. 验证状态
+- 四次运行的 SWIN md5 均为 `49551190c5f3ef8d2da790dcdaa7367a`；
+  OMP=1/2/4/8 与 xp 逐字节一致。
+- 循环交换对 xmac 的收益集中在中低线程数（OMP=1/2 约 −13%/−20%）；
+  OMP=8 时 xmac 已只占 wall 27%，且本身接近带宽/延迟上限，收益约 −1%。
+- wall 的改善被 station（OMP=8 占 63%）稀释为 0.7%–4.7%。
+- 本次测试的二进制在 difx 宿主上构建后用 `-b` 挂载，**镜像
+  `fxcorr/fxcorr:latest` 尚未重建**；正式归档前需重建镜像并复跑。
 
-- 大粒度版已编译通过（fxcorrcommon + xpp）。
-- **尚未完成逐字节验证**：容器镜像内的 fxcorrcommon 缺少新符号，正在重建镜像；
-  重建后需核对 batch 1/2 的 SWIN、`pcal.bin`、`PCAL_*` 与 xp 逐字节一致，并测
-  OMP=1/16 × BLOCK=2/4/8。
-- 在验证通过前，不要用块模式产出正式结果；xp 仍是唯一稳定参照。
+### 4. 镜像重建
+
+- 2026-11-15 14:41（CST）重建 `fxcorr/fxcorr:latest`，镜像 ID
+  `sha256:fdd3e867…`（manifest list）。镜像内
+  `/usr/local/difx/bin/fxcorr-xpp` 已核对含 `xmacBatchPeriod` /
+  `xmacBatchRange` 符号（宿主 `nm`），不再是旧二进制。
+- 随后用该镜像、`run_xpp.sh --formal` 默认绑核跑正式 OMP=1/2/4/8 扫描，
+  run-id 带 `-bind`，结果落 `results/20261115/`。
+
+### 5. 正式绑核扫描（新镜像）
+
+条件：镜像 `sha256:fdd3e867…`；`run_xpp.sh --formal` 默认 `--bind close` +
+`--cpuset auto`（OMP=1/2/4/8 → cpuset 0-0/0-1/0-3/0-7，mems=0）；
+每档 1 次；四次 SWIN md5 全为 `49551190c5f3ef8d2da790dcdaa7367a`。
+
+| OMP | wall | station | xmac | wacc | 旧 cpuset 基线 xmac | Δxmac |
+|---|---|---|---|---|---|---|
+| 1 | 205.88 | 174.05 | 25.92 | 3.42 | 28.47 | −8.9% |
+| 2 | 115.27 | 88.53 | 21.54 | 2.68 | 21.51 | +0.1% |
+| 4 | 66.93 | 44.87 | 17.83 | 1.58 | 16.87 | +5.7% |
+| 8 | 35.18 | 22.49 | 9.22 | 0.90 | 9.82 | −6.1% |
+
+### 6. 编译器差异排查（同日，结论：不存在可复现的 g++14 劣化）
+
+同一份源码，difx 宿主 g++ 13.3 构建的 xpp（`-b` 挂载）为 xmac
+24.68/17.27/15.72/9.69；镜像内 Debian 13 g++ 14.2 构建的版本为
+25.92/21.54/17.83/9.22，OMP=2/4 上镜像版慢约 25%/13%，曾疑为代码生成问题。
+
+- **静态对比**：反汇编 `xmacBatchRange._omp_fn.0`（宿主 1085 行/镜像 1144 行）
+  显示两者均为 `-O2 -march=x86-64`、纯 SSE（无 ymm/zmm）、同一套
+  4×`mulps`+`addps` 复数乘结构，指令 mix 基本一致；`DW_AT_producer` 差异只有
+  宿主版多 Ubuntu 默认的 stack-protector/clash/CET、镜像版为 `-no-pie`。
+- **运行时 A/B**：同一新镜像、同绑核（cpuset 0..N-1、mems=0）下交替跑两种
+  二进制，OMP=2/4 各 2 轮（scratch 结果，非正式）：
+
+| OMP | host g++13 xmac r1/r2 | image g++14 xmac r1/r2 | station 四轮 |
+|---|---|---|---|
+| 2 | 21.93 / 19.85 | 18.61 / 18.17 | 88.31 / 88.03 / 88.09 / 88.13 |
+| 4 | 15.71 / 16.91 | 16.77 / 17.90 | 44.40 / 44.47 / 44.06 / 44.79 |
+
+- 两档方向相反（OMP=2 镜像快约 12%，OMP=4 镜像慢约 6%），差异幅度与轮间波动
+  同量级（OMP=2 的 xmac 单次波动约 2 s、约 10%；station 稳定）。运行期间机器上
+  另有 5 个容器、load 从 0.4 升到 4.3。
+- **结论**：此前的 25%/13% 是测量波动，不是编译器代码生成差异；正式表的 xmac
+  单档数据应视为 ±5–10% 的单次采样。八次运行 SWIN md5 全同（`49551190…`）。
+## 2026-11-15 单任务标定（Step 1）
+
+口径：单任务 = (batch `00000001`, ds 组 0) = 8 ds（4 站 × 2 极化）；
+`workdir-4st-b1024ms-n3`；分片模式写 `vis-parts/00000001/ds0.part`；
+xpp 用当时镜像内二进制（循环交换版），绑核 cpuset 0..P-1、mems=0；每档 1 次。
+
+| 实现 | P | wall | station | xmac | wacc | 相对 xp1 |
+|---|---|---|---|---|---|---|
+| xp | 1 | 50.13 | 40.75 | 6.76 | 1.52 | 1.00× |
+| xpp | 1 | 47.03 | 39.03 | 5.85 | 1.37 | 1.07× |
+| xpp | 2 | 27.79 | 20.15 | 5.85 | 1.01 | 1.80× |
+| xpp | 4 | 17.71 | 10.55 | 5.77 | 0.68 | 2.83× |
+| xpp | 8 | 12.68 | 6.47 | 4.90 | 0.46 | 3.95× |
+| xpp | 16 | 24.85 | 15.76 | 7.23 | 0.94 | 2.02× |
+
+- 全部 run 的 `.part` md5 为 `56039479bdd341ef3072118c82019748`（281,088 B），
+  与 xp 一致。
+- **xmac 在单任务内基本串行**：并行维度是"已用频率 × xmac stride"，该组只有
+  1 个 pass；P=2..8 的变化来自噪声/自旋（P=8 的 user 时间中约 35 s 是空闲线程
+  自旋），不是有效加速。
+- **station 在 P=8 达到 6.3×**（40.75→6.47 s）。
+- **P=16 反而变慢**（24.85 s）：`schedule(dynamic)` 在 32 个迭代（24 个立即
+  `continue`）上分配不均，有线程拿到两个真实 ds；用 cpuset 0-15 与 16-31 复现，
+  排除核区争用。
+
+## 2026-11-15 Step 2：xmac 任务并行 + station 紧凑调度
+
+改动（只改 fxcorr-xpp）：
+
+- `main.cpp`：station 阶段先构造 active ds 紧凑列表，再 `schedule(static)`；
+- `xmac.cpp`：非 pulsar 路径把每个 pass 拆成 (baseline, pol product) 任务，
+  预计算每个任务的 `threadcrosscorrs` 偏移；每个累加器的加法顺序不变；
+  pulsar 路径保留原 pass 并行（共享 `bins`）。
+
+实测（同 Step 1 条件，宿主 g++13 构建、`-b` 挂载；P=1/2/3/4/8 各 2 轮）：
+
+| P | wall（均值） | station | xmac（均值） | wacc | 相对 xp1 |
+|---|---|---|---|---|---|
+| 1 | 47.51 | 39.03 | 6.42 | 1.35 | 1.06× |
+| 2 | 27.37 | 19.80 | 5.96 | 0.86 | 1.83× |
+| 3 | 20.22 | 14.73 | 4.11 | — | 2.48× |
+| 4 | 14.53 | 9.90 | 3.37 | 0.52 | 3.45× |
+| 8 | 8.64 | 5.18 | 2.40 | 0.36 | 5.80× |
+| 16 | 9.71（1 次） | 5.87 | 2.22 | 0.77 | 5.16× |
+
+- 全部 `.part` md5 仍为 `56039479…`，逐字节一致。
+- station 修正生效：P=16 从 24.85→9.71 s；P=8 6.5→5.2 s。
+- xmac 串行 6.4 s → P=8 2.4 s（2.7×），但 P=2 只有 1.08×、P=4 1.9×，
+  扩展不足；任务数应为 24（6 基线 × 4 极化），下一步先诊断（任务数/串行前导/
+  内存或同步开销），再决定 AVX 与 wacc 的顺序。
+- 端到端：xpp P=8 8.64 s，相对 xp OMP=1 的 50.13 s 为 **5.80×**。
+
+## 2026-11-15 Step 3：xmac 内核诊断与 AVX2（已验证无效，已回滚）
+
+- 诊断（Step 2 的扩展不足）：`FXCORR_XPP_DEBUG=1` 打印出每次调用
+  `tasks=192`、`pass_setup≈0`、`task_setup≈0`，并行区耗时逐 subint 稳定
+  （P=1 中位数 31.97 ms、P=8 12.11 ms），排除任务数不足与串行前导。
+  机器频率实测 3.04–3.06 GHz（P=1 与 P=8 相同），排除降频；cpuset
+  0-7/0-63/96-103 结果一致，排除核区/缓存切片。
+- 单独 kernel 微基准（192 任务、200 subint、cpuset 0..P-1）：
+  SSE 5.75/3.91/2.53/1.48 s（P=1/2/4/8，8 线程 3.9×）；
+  AVX2 6.02/3.12/1.97/1.09 s（8 线程 5.5×，P=8 绝对时间 1.36×）。
+  **kernel 本身也撞内存墙。**
+- AVX2 实现检查：`target("avx2")` 克隆确实生成了 256 位代码
+  （反汇编 53 处 ymm、8 处 vmulps），且运行时确认选中（run.log 有
+  `xMAC kernel = avx2`）。整程序结果：P=1 xmac 7.45 s、P=8 2.37 s，
+  对 SSE 的 6.25/2.31 无收益且 P=1 慢 19%。
+- **排除实现问题**：把 `xmac.cpp` 整文件用 `-mavx2` 重编（不是 target
+  克隆）再测：P=1 xmac 7.23–7.26 s（仍比 SSE 慢），P=8 2.20–2.24 s
+  （约 4%，在波动内）。整程序口径下 AVX2 无效，不是克隆写法的锅。
+- **已回滚**：删除 `xmac_core_avx2`、`FXCORR_XPP_SIMD` 开关与分派；
+  保留 `spectra()`/`numChannels()` 的循环外提（默认路径 xmac
+  P=1 6.20 s、P=8 2.36 s，较回滚前 6.42/2.40 略好）。回滚后 P=1/P=8
+  的 `.part` md5 仍为 `56039479…`。
+- 结论：xmac 的下一步不是加宽 SIMD，而是减少访存冗余（任务粒度/数据复用）；
+  station 仍是 wall 主体（P=8 时 5.2/8.6 s）。
+
+## 2026-11-15 Step 4：station 段内部 profile
+
+- LD_PRELOAD 探针（容器内，P=1，g=0）：station 39.0 s 中
+  `fftwf_execute` 3.13 s（16.18M 次）、`mark5_unpack_with_offset` 2.62 s
+  （2.02M 次）、PCal 提取器 3.10 s（16.16M 次），合计 **22%**；
+  xmac 侧同口径另有 5.9 s。
+- `main.cpp` 的 STPROF（`FXCORR_XPP_PROF=1`，默认关）：P=1 时
+  process **33.29 s（85%）**、归约 3.84 s（10%）、collect 1.78 s（4.5%）、
+  setup/tail ≈0.05 s；P=8 时 CPU 总量相同（process 33.28 s）。
+- process 扣掉 FFT/unpack/pcal 后仍有约 24.5 s：per-band 的 FFT in/out
+  memcpy、frac 旋转、conj、autocorr 与标量簿记，没有单一的大头。
+- fxcorrcommon 用 `-O3` 重编（/tmp 试验，不改仓库构建）：process
+  33.3→31.1 s（−6.5%）、归约 3.84→2.67 s（−30%）、station 39.0→35.7 s
+  （−8.5%），`.part` md5 不变。**单靠编译优化不够。**
+- 结构结论：station 的代价分散在每 (block, band) 的若干 128 点小循环里；
+  进一步优化需要动共享库 `fxcorrcommon`（融合 conj+autocorr、减少
+  per-band 拷贝），这会影响 xp 参照的性能口径——待定。
+
+## 2026-11-15 Step 5：串行直累加 + pcal 单独停放（库新增接口）
+
+发现：旧 xpp 即使串行也启用 per-block 累加器，每个 block 清零 + 写块槽，
+每批约 2.05M block × 8 band，process 33.3 s；其中缩减（3.84 s）与清零/写槽
+（约 9.8 s）都是可以省掉的。
+
+实现（保持 xp 行为不变）：
+
+- `fxcorrcommon` 新增 **`Mode::enableBlockPcal(slotcount)`** 与
+  `blockpcalslots`：只分配 pcal 的每块停放槽；`clearBlockAccumulators`
+  改为 ac 与 pcal 各自按自己的槽数清零。默认路径（`enableBlockAccumulators`）
+  行为不变。
+- xpp 串行路径（`blockthreads==1`）：**不启用 ac/权重块累加器**，直接按块序
+  累加到 `autocorrelations`/`weights`（等价 f 的 nthreads=1）；pcal 仍按块停放
+  并按块序归约——因为 xp 本身启用了完整块累加器，pcal 的加法顺序必须保持一致。
+
+验证（4 站 1.024 s、g=0）：
+
+- `.part` md5 `56039479…`、`pcal.bin` 8 个文件、PCAL 文本 8 个文件，三者都与
+  `fxcorr-xp` **逐字节一致**。
+- P=1：station 38.99→31.76 s，process 33.29→27.90 s，归约 3.84→2.02 s；
+  P=8：station 5.25→4.12 s，wall 约 8.5→7.4 s（xmac 2.56、wacc 0.41）。
+- 内存峰值从 396 MiB 降到约 90 MiB（不再分配整 subint 的块累加器）。
+- 说明：更激进的"pcal 也直累加"版本（process 23.5 s、P=8 wall 6.65 s）
+  pcal.bin 与 xp 不一致，已放弃。
+
+## 2026-11-15 正式矩阵：4 站 1.024 s、g=0..3、P=1/2/4/8
+
+条件：镜像 `sha256:71decf5e…`（含 Step 5 的直累加 + pcal 停放）；
+`workdir-4st-b1024ms-n3`、batch `00000001`；每组单任务分片；
+xp OMP=1 参照；xpp P=1/2/4/8；每档 2 轮；run-id 前缀 `mt-`。
+每组 `.part` md5：g0 `56039479…`、g1 `16ea34aa…`、g2 `3b601e13…`、
+g3 `3ed2d79d…`，xp 与 xpp 全部一致。
+
+wall（s，两轮均值）：
+
+| g | xp1 | P=1 | P=2 | P=4 | P=8 |
+|---|---|---|---|---|---|
+| 0 | 49.37 | 40.22 | 23.42 | 12.98 | 7.38 |
+| 1 | 50.03 | 39.80 | 22.53 | 12.50 | 7.21 |
+| 2 | 47.50 | 39.77 | 22.47 | 12.42 | 7.18 |
+| 3 | 49.04 | 40.34 | 23.92 | 13.16 | 7.41 |
+| 均值 | 48.99 | 40.03 | 23.09 | 12.77 | 7.30 |
+
+- 相对 xp OMP=1：P=1 1.22×、P=2 2.12×、P=4 3.84×、P=8 **6.72×**。
+- P=8 阶段均值：station 4.04、xmac 2.33、wacc 0.39、read 0.21 s。
+- 说明：首次启动的矩阵在 g=3 r1 的 P=1 后被手动停止（怀疑镜像未更新，
+  实为运行镜像缺 `nm` 导致的误判），续跑补齐剩余 23 个 run；正式结果共
+  40 个 run，run-id 无重复。
+
+## 2026-11-15 Step 6：process 三合一融合（试过，已回滚）
+
+把每 band 的 frac 旋转、共轭、自相关合成一遍（新增
+`fusedRotConjAc`，`setFusedAc(true)` 只在 xpp 串行路径打开）。`.part` md5
+仍为 `56039479…`，但更慢：
+
+| 配置 | process | station |
+|---|---|---|
+| 原路径（P=1） | 27.90 s | 31.76 s |
+| 融合（P=1） | 31.70 s | 35.60 s |
+| 原路径（P=8） | — | 4.12 s |
+| 融合（P=8） | — | 4.71 s |
+
+融合循环在 `-O2` 库构建下没有拿到与 `genericMul/Conj/AddProduct` 同等的
+向量化，标量版本反而慢约 14%。**已回滚**（库与 xpp 均恢复），恢复后
+P=8 station 4.16 s、md5 不变。
+
+## 2026-11-15 Step 7：FFTW 直写目标数组（试过，已回滚）
+
+思路：`genFFT_*` 每次 FFT 有一次 in/out 拷贝（约 2M block × 8 band × 1 KB
+× 2），改用 FFTW new-array execute 直接算到 `fftoutputs`。
+
+- 先做位级验证：普通 plan 在新分配的数组上 `fftwf_execute_dft_r2c`
+  与 plan 数组结果 memcmp=0（含 1 float 偏移的错位数组也一致）；
+  但 `FFTW_UNALIGNED` plan 与原 plan 结果不同，故不能用它。
+- 实现 `Mode::setDirectFFT(true)`（默认 off，仅 xpp 串行路径），只替换
+  RtoC 路径。实测 `.part` md5 仍为 `56039479…`，但**更慢**：
+  process P=1 27.90→28.24 s、station 32.09 vs 31.76 s，
+  P=8 station 4.19 vs 4.12 s——原地 memcpy 本来就在缓存里，省不掉多少。
+- **已回滚**，库与 xpp 恢复。
+
+## 2026-11-15 Step 8：wacc 预计算描述符（采用）
+
+`accumulateWeights` 原实现把 config 查表放在每 block 的内层（96 baselines ×
+32 freqs × 10 buffered FFT，每次调用重算），32 线程下也只有 3.4×。
+改为一次性构造 (freq, baseline, pol) 描述符表（`WDesc`），预计算 ds/record-band
+索引，按描述符并行；每个 `baselineweight[f][0][j][p]` 仍只按 fftsubloop 升序
+累加，逐位不变。
+
+| 配置 | wacc 前 | wacc 后 |
+|---|---|---|
+| P=1 | 1.35 s | 0.22 s |
+| P=8 | 0.39 s | 0.16 s |
+
+`.part` md5 仍为 `56039479…`；P=1 wall 40.0→39.2 s。
+
+xmac 访存复用（按共享 band 合并极化积）暂不做：4 站每组只有 24 个任务，
+与 P=8 整除；按 2 个极化合并后变 12 个任务，粒度损失约 33%，会抵消约 25%
+的访存收益。仅在大站数（8/16 站，任务数 112/480）时才可能有利，待相应数据
+再评估。
+
+## 2026-11-15 正式矩阵（含 wacc 优化）
+
+镜像 `sha256:cdccaed4…`；其余条件同上一轮（4 站 1.024 s、g=0..3、
+xp OMP=1 + xpp P=1/2/4/8、每档 2 轮）。run-id 前缀 `mt3-`，共 40 个 run；
+各组 `.part` md5 与上一轮相同。wall 均值：
+
+| 配置 | wall (s) | 相对 xp1 |
+|---|---|---|
+| xp OMP=1 | 48.71 | 1.00× |
+| xpp P=1 | 38.73 | 1.26× |
+| xpp P=2 | 22.15 | 2.20× |
+| xpp P=4 | 12.25 | 3.98× |
+| xpp P=8 | 7.05 | 6.91× |
+
+阶段耗时（g=0..3、2 轮均值，s）：
+
+| 实现 | P | wall | station | read | xmac | wacc |
+|---|---|---|---|---|---|---|
+| xp | 1 | 48.71 | 39.74 | 0.29 | 6.54 | 1.50 |
+| xpp | 1 | 38.73 | 31.73 | 0.20 | 6.30 | 0.22 |
+| xpp | 2 | 22.14 | 16.02 | 0.19 | 5.44 | 0.18 |
+| xpp | 4 | 12.25 | 8.03 | 0.20 | 3.53 | 0.18 |
+| xpp | 8 | 7.05 | 4.04 | 0.20 | 2.32 | 0.17 |
+与上一轮（无 wacc）相比：P=8 7.30→7.05、P=4 12.77→12.25、P=2 23.09→22.15、
+P=1 40.03→38.73，wacc 从 0.35–0.43 降到 0.13–0.22。
+
+## 2026-11-16 p419-n0 复测（Hygon 30 核）
+
+环境：`ssh p419-n0`（login04）→ 空闲计算节点 `h04r4n03`（Hygon C86 7185，
+30 核 / 123 GiB）；该集群无 docker，用宿主二进制 + `env.sh`
+（`LD_LIBRARY_PATH` 含 fftw/GSL/install/lib）。
+
+准备：
+
+- p419 仓库原本没有 `fxcorr-xpp`，已同步
+  `applications/fxcorr-xpp`、`libraries/fxcorrcommon/src/{mode.*}`、
+  `install-difx`，并在 `build.sh` 的 `--doonly` 里加入 `fxcorr-xpp`；
+  构建产出 `~/fxcorr/install/bin/fxcorr-xpp`。
+- 数据：`/work2/cstu0036/mydata/fxcorr/workdir-b1024ms`（4 站 × 8 ds、
+  4 组、batch 00000001）。建实验 workdir
+  `~/p419-wd/workdir-4st-b1024ms`（config/batches/raw 软链，其余新建），
+  用 `fxcorr-fp` 并发生成 32 个 `stream.bin`（并发必须用后台作业，
+  `xargs` 写法会失败）。
+- sanity：xp OMP=1 g0 137.0 s，xpp P=8 g0 18.4 s，`.part` md5 相同
+  （`c6ee3ece…`）。
+
+矩阵（g=0..3、xp OMP=1 + xpp P=1/2/4/8、每档 2 轮，共 40 run）：
+
+| 实现 | P | wall | station | read | xmac | wacc | 相对 xp1 |
+|---|---|---|---|---|---|---|---|
+| xp | 1 | 139.81 | 104.12 | 2.46 | 27.73 | 4.44 | 1.00× |
+| xpp | 1 | 119.78 | 91.07 | 0.49 | 26.80 | 0.58 | 1.17× |
+| xpp | 2 | 61.59 | 46.05 | 0.29 | 14.59 | 0.32 | 2.27× |
+| xpp | 4 | 32.55 | 23.43 | 0.29 | 8.32 | 0.18 | 4.30× |
+| xpp | 8 | 18.57 | 12.10 | 0.29 | 5.69 | 0.16 | 7.53× |
+
+- 每组 10 次运行 `.part` md5 完全一致：g0 `c6ee3ece…`、g1 `7872b32c…`、
+  g2 `e78e011c…`、g3 `1437332…`。
+- 与 difx 相比：p419 单核更慢（xp1 139.8 vs 48.7 s），但 xmac 扩展更好
+  （27.7→5.7 s，4.9×；difx 为 6.5→2.3 s，2.8×），P=8 加速比 7.53× 略高于
+  difx 的 6.91×。

@@ -1,6 +1,7 @@
 # fxcorr-xpp 目录说明
 
-**最后更新**：2026-11-08（**新建：fxcorr-xp 的并行优化分支**——逐字复制
+**最后更新**：2026-11-15（**绑核 + xmac 循环交换已实测**，证据见下方
+「优化项与证据」；此前 **2026-11-08 新建：fxcorr-xp 的并行优化分支**——逐字复制
 `applications/fxcorr-xp`（仅改名），作为与 xp 的对照基线；同日加入**可选的站级
 band 并行**（`Mode::process` 的 recorded-frequency 循环），默认关闭，开启后产物
 与 xp 逐字节一致。实现落在 `libraries/fxcorrcommon`：新增
@@ -33,6 +34,27 @@ band 并行**（`Mode::process` 的 recorded-frequency 循环），默认关闭�
   并行（单层）。总线程数需自行控制在物理核预算内（384 逻辑核建议 ≤192）。
 - 对照入口：`fxcorr/xp-opt/scripts/run_xp.sh --exe fxcorr-xpp ...`（`run_xp.sh`
   已加 `--exe`，结果字段与 xp 完全一致，可直接对比）。
+
+## 优化项与证据（2026-11-15，4 站 1.024 s、batch 00000001）
+
+相对 xp，xpp 的增量按证据分三类（过程数据见 `fxcorr/xp-opt/docs/log.md`，
+正式结果见 `fxcorr/xp-opt/results/README.md`）：
+
+| 优化项 | 落点 | 结论 | 证据 |
+|---|---|---|---|
+| **绑核** | `run_xpp.sh` 默认 `--bind close --cpuset auto`（OMP≤96 → cpuset 0..N-1、mems=0） | **有效** | 同 OMP=4 的 xmac：不绑核 31–37 s → 绑核 16.9 s；`close` 18.9 s vs `spread` 34.6 s |
+| **xmac 循环交换** | `XmacEngine::xmacBatchPeriod`：pass 放外层、fftloop 放内层，每个 uvshift 周期只建一次并行区 | **有效（OMP≤2 明显，OMP≥4 持平）** | xmac 28.47→24.68（OMP=1，−13.3%）、21.51→17.27（OMP=2，−19.7%）、16.87→15.72（OMP=4）、9.82→9.69（OMP=8）；wacc 同档 −23%/−17% |
+| band 并行（`FXCORR_XPP_BAND_THREADS`） | `Mode::setBandParallel` | **无效（劣化）** | 413 s vs 串行 91.9 s（2 站 1.024 s） |
+| ds×block 并行（`FXCORR_XPP_BLOCK_THREADS`） | 大粒度版 | **未验证** | 默认关闭；逐字节验证与性能测试未完成 |
+| ds 级 / xmac pass 级 OMP | 继承自 xp，未改 | — | 不属于 xpp 增量 |
+
+注意：
+
+- 绑核是启动脚本层的行为，不改二进制；`run_xp.sh` 刻意不加绑定，保持参照原样。
+- 正式扫描的 xmac 单档有 ±5–10% 轮间波动（同镜像交替 A/B 实测）；OMP=1 的
+  −13% 最可靠，OMP=2 的 −20% 大于波动、可信，OMP≥4 的差异在波动内。
+- 循环交换后所有运行的 SWIN md5 与 xp 一致（`49551190c5f3ef8d2da790dcdaa7367a`），
+  累加顺序未变。
 
 以下为继承自 `fxcorr-xp` 的说明（2026-10-13 的 v9 阶段 0–3 记录），描述 xpp 与
 xp 共有的行为；后续优化进展记录在 `fxcorr/xp-opt/docs/`。

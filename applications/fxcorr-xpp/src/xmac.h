@@ -44,6 +44,16 @@ public:
 	 */
 	void xmacBatch(int fftloop, const std::vector<std::vector<SpReader *> > &readers, Polyco *currentpolyco);
 
+	/**
+	 * Same cross multiplication for a contiguous range of fftloops, with one
+	 * pass-outer parallel region (2026-11-15): each thread keeps its pass and
+	 * walks fftloop0..fftloop1-1 in increasing order, so every accumulator's
+	 * addition order is identical to repeated xmacBatch() calls.  Pulsar
+	 * binning falls back to one xmacBatch per fftloop because `bins` is
+	 * shared between threads.
+	 */
+	void xmacBatchPeriod(int fftloop0, int fftloop1, const std::vector<std::vector<SpReader *> > &readers, Polyco *currentpolyco);
+
 	/** Accumulate this batch's baseline weights (core.cpp:1005-1052, non-pulsar only). */
 	void accumulateWeights(int fftloop, const std::vector<std::vector<SpReader *> > &readers);
 
@@ -70,6 +80,14 @@ public:
 	void setActiveBaselines(const std::vector<char> &active);
 
 private:
+	// Precomputed weight descriptors: one entry per (freq, baseline, pol
+	// product).  The config lookups are hoisted out of the per-block loop
+	// (accumulateWeights used to redo them for every buffered FFT).
+	struct WDesc { int f, j, p, ds1, ds2, rb1, rb2; };
+	std::vector<WDesc> wdescs;
+	/** Shared implementation of xmacBatch()/xmacBatchPeriod(). */
+	void xmacBatchRange(int fftloop0, int fftloop1, const std::vector<std::vector<SpReader *> > &readers, Polyco *currentpolyco);
+
 	/**
 	 * getBLocalFreqIndex, but -1 for a baseline outside this shard.  All
 	 * baseline loops test ">= 0" to decide whether the baseline has data at

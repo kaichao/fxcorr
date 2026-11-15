@@ -1,75 +1,64 @@
-# xp-opt：fxcorr-xp 性能优化工作区
+# xp-opt：fxcorr-xpp 单任务性能优化
 
-**建立**：2026-11-08。优化实现侧的工作区：脚本、标定、正式结果与过程文档都在这里。
+**建立**：2026-11-08。**当前口径（2026-11-15 起）**：只优化**单任务**——
+一个 (batch, ds 组) 的一个 xpp 进程；多进程 × 多线程的组合由计算框架负责，
+不在本目录。
 
-## 与 app-fxcorr 的分工
+## 目标与边界
 
-| 位置 | 职责 |
-|---|---|
-| **本目录** | xp 优化的实现与实测：docker 运行、run 产物、脚本、标定、运行台账 |
-| `app-fxcorr/docs/experiments/difx.md` | difx 主线的决策口径：xp/xpp 定位、实验矩阵、门禁与指标 |
-| `app-fxcorr/experiments/difx/xp-opt/` | 平台侧正式产物入口（走 scalebox 正式 runner 时） |
-
-口径冲突时以 `app-fxcorr/docs/experiments/` 为准；本目录只记录实现与实测。
+- 指标：单任务 wall 相对 `fxcorr-xp OMP=1`（同 batch、同 ds 组）的加速比。
+- 线程数 P ≤ 16；一个进程绑一个 NUMA 节点的连续核。
+- 正确性：分片产物 `vis-parts/<batch>/ds<G>.part` 的 md5 与 xp 逐字节一致
+  （SWIN 由 merge 写出）。
+- 数据：4 站 `workdir-4st-b1024ms-n3`，每批 4 个 ds 组、每组 8 ds；
+  锚点 md5 `56039479bdd341ef3072118c82019748`。
+- 不做：band 并行（实测劣化）、单进程 P>16、多进程调度、block 模式（按需再评估）。
 
 ## 目录
 
 ```text
 xp-opt/
-├── README.md                  # 本页：入口与规则
+├── README.md
 ├── docs/
-│   ├── README.md              # 文档索引
-│   ├── environment.md         # 机器、数据、镜像、测量口径
-│   ├── plan.md                # 优化路线与实验矩阵
-│   └── log.md                 # 运行台账：已做过的每一步（含失败与修复）
-├── scripts/                   # 正式脚本（可复跑、被文档引用）
-│   ├── prepare_workdir.sh     # 构造实验 workdir
-│   ├── run_xp.sh              # docker 运行 + 标准 run 产物
-│   └── sync_results.sh        # 从 difx 拉正式结果回仓库
-├── results/                   # 正式结果
-│   ├── README.md              # 索引与判据
-│   ├── summary.tsv            # 跨 run 汇总表
-│   └── <YYYYMMDD>/<run-id>/   # manifest.json / result.tsv / metrics.json / command.sh / logs/
-├── calibration/               # 标定（线程、内存、I/O、NUMA）
-└── scratch/                   # 临时脚本与临时结果，可清理
-    ├── scripts/<YYYYMMDD>-<topic>/
-    └── results/
+│   ├── README.md        # 索引
+│   ├── environment.md   # 机器、数据、镜像、测量口径
+│   ├── plan.md          # 单任务优化路线（Step 1–5）
+│   ├── optimizations.md # 优化项与效果（相对单线程 xp）
+│   ├── parameters.md    # 单任务参数表（P、绑核、环境变量）
+│   ├── log.md           # 当前口径的运行台账
+│   └── archive/         # 历史口径与负结果（只作对照）
+├── scripts/
+│   ├── prepare_workdir.sh
+│   ├── run_xp.sh        # 参照程序
+│   ├── run_xpp.sh       # 优化版（默认 --bind close --cpuset auto）
+│   └── sync_results.sh
+├── results/             # 正式汇总（README + summary.tsv）
+└── results-detail/      # 详细 run 产物（gitignored）
 ```
 
-## 正式 / 临时规则
+仓库外临时区：`/Users/kaichao/WORK/fxcorr-scratch/xp-opt/{scripts,results}`；
+远端 `$XP_OPT_ROOT/scratch/`。
 
-- **正式脚本**：`scripts/`，可复跑，必须被 `docs/` 或本页引用。
-- **临时脚本**：`scratch/scripts/<YYYYMMDD>-<topic>/`，一次性探针，不进入正式流程。
-- **正式结果**：`scripts/run_xp.sh --formal` 产生，落 `results/<日期>/<run-id>/`，
-  含 `manifest.json`、`result.tsv`、`metrics.json`、`command.sh`、`logs/`。
-- **临时结果**：`run_xp.sh` 不带 `--formal`，落 `scratch/results/`。
-- 临时脚本稳定并被正式流程采用后，移入 `scripts/` 并在 `docs/log.md` 记一笔；
-  临时结果只有在正式 runner 下重跑并生成上述五个文件后，才进入 `results/`。
-- 大文件（fengine、SWIN、镜像）不入 git；`results/` 只保留元数据与日志。
+## 正式 / 临时 / 归档
 
-## 快速开始（新终端接续）
+- **正式**：`scripts/run_*.sh --formal`，落 `results/<日期>/<run-id>/` 与
+  `results/summary.tsv`。
+- **临时**：不带 `--formal` → 远端 `scratch/results/`，不同步进 git。
+- **归档**：`docs/archive/`，只是历史记录，不能作为当前结论的依据。
+
+## 快速开始（单任务）
 
 ```bash
 ssh difx
 cd ~/fxcorr/fxcorr/xp-opt
+WD=/data/scalebox/mydata/fxcorr/xp-opt/workdir/workdir-4st-b1024ms-n3
 
-# 1) 实验 workdir（一次）
-./scripts/prepare_workdir.sh /data/scalebox/mydata/fxcorr/workdir-2st-b1024ms-n3
-
-# 2) 临时实验
-./scripts/run_xp.sh -j 8 /data/scalebox/mydata/fxcorr/xp-opt/workdir/workdir-2st-b1024ms-n3 00000001
-
-# 3) 正式实验（生成标准 run 产物）
-./scripts/run_xp.sh --formal -j 8 /data/scalebox/mydata/fxcorr/xp-opt/workdir/workdir-2st-b1024ms-n3 00000001
-
-# 4) 优化版二进制（编译目录挂进容器，优先 PATH）
-./scripts/run_xp.sh --formal -j 8 -b /path/to/bin ... 00000001
-
-# 5) 拉正式结果回本地仓库
-#    本地执行（仓库根）：
-#    rsync -av difx:/data/scalebox/mydata/fxcorr/xp-opt/results/ fxcorr/xp-opt/results/
-#    或运行 fxcorr/xp-opt/scripts/sync_results.sh
+./scripts/run_xp.sh  -j 1 -g 0 "$WD" 00000001     # 参照：xp OMP=1
+./scripts/run_xpp.sh -j 8 -g 0 "$WD" 00000001     # 优化版，默认绑核
+# 宿主构建的二进制：加 -b /home/scalebox/fxcorr/applications/fxcorr-xpp/src
 ```
 
-运行前的数据、镜像与口径见 [`docs/environment.md`](docs/environment.md)；优化路线见
-[`docs/plan.md`](docs/plan.md)；已运行过程见 [`docs/log.md`](docs/log.md)。
+环境、数据与判据见 [`docs/environment.md`](docs/environment.md)；路线见
+[`docs/plan.md`](docs/plan.md)；**优化项与效果**见
+[`docs/optimizations.md`](docs/optimizations.md)；**单任务参数表**见
+[`docs/parameters.md`](docs/parameters.md)；实测见 [`docs/log.md`](docs/log.md)。

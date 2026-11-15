@@ -7,7 +7,11 @@
 # （无 tone：新路径，(batch, station, ds) 任务并行分发，公共信号各任务就地合成；带 tone：legacy 逐站）
 # → ⑤ 软链 <DATA TABLE 文件名> 到最后 batch 的 VDIF → ⑥ stdout 打印 batch_id。
 #
-# 用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]
+# --prep-only：只做 ①②③③b⑤（前处理 + batches/roots + 软链），跳过 ④ 的 fxcorr-sim
+# 生成、正常 exit 0。供"造数流水线"把 prep 与 sim 拆成两个编排任务（app-fxcorr 的
+# fxcorr-sim/ 流水线）；在此之前只能靠外部轮询 batches/ 齐了就 kill 进程（有 race）。
+#
+# 用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [--prep-only] [workdir] [tone_mhz ...]
 #
 #   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）
 #   -p P          station 任务本地并行度（默认 1 = 串行，P1：
@@ -79,10 +83,11 @@ fxc()
 usage()
 {
 	cat >&2 <<'EOF'
-用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [workdir] [tone_mhz ...]
+用法：./make_testdata.sh [-n N] [-p P] [--nodes "host:st1,st2 ..."] [--prep-only] [workdir] [tone_mhz ...]
   -n N          连续 N 个 batch（时间连续切分，验证 SWIN 跨 batch 追加）
   -p P          station 任务本地并行度（默认 1 = 串行）
   --nodes MAP   ssh 节点映射 host:st1,st2（多 entry 空格分隔；未列出站本地跑）
+  --prep-only   只做 ①②③③b⑤（前处理 + batches/roots + 软链），跳过 ④ 的 fxcorr-sim 生成
   workdir       项目根目录（默认 .）
   tone_mhz ...  fxcorr-sim 基带 tone（MHz）：0 个 = 无 tone；1 个 = 全 band 同频；nbands 个 = 逐 band
   环境变量：FXSIM_NOISE/SEED/ADAPTIVE/SPECRES/LINE/FLUX/SEFD 透传 fxcorr-sim；BATCH_NSUBINTS 覆盖每 batch subint 数；FXCORR_WORKDIR 定义项目根目录（位置参数优先）
@@ -90,12 +95,14 @@ EOF
 	exit "${1:-2}"
 }
 
-# --nodes 长选项先从参数序列摘出（任意位置；getopts 不支持长选项）
+# 长选项先从参数序列摘出（任意位置；getopts 不支持长选项）
 NODEMAP=""
+PREP_ONLY=0
 ARGS=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--nodes) shift; [ $# -gt 0 ] || usage; NODEMAP=$1; shift ;;
+		--prep-only) PREP_ONLY=1; shift ;;
 		--) shift; ARGS+=("$@"); break ;;
 		*) ARGS+=("$1"); shift ;;
 	esac
@@ -469,21 +476,28 @@ stationcmd()
 }
 
 TASKS=$(mktemp)
-for bid in "${BATCHES[@]}"; do
-	for i in "${!DSTATION[@]}"; do
-		st=${DSTATION[$i]}
-		rel=$(vdifrel "$st" "${DSDI[$i]}" "${DSNDS[$i]}" "$bid")
-		if [ -s "$FXCORR_ROOT_RAW/$rel" ]; then
-			echo "make_testdata.sh: skip existing raw/$rel" >&2
-		else
-			stationcmd "$bid" "$st" "${DSDI[$i]}" >> "$TASKS"
-		fi
+if [ "$PREP_ONLY" -eq 1 ]; then
+	# --prep-only：跳过 ④ 的 fxcorr-sim 生成（batches/roots 已就绪，软链仍要重指）。
+	# 造数编排（app-fxcorr 的 fxcorr-sim/ 流水线）由 sim 模块逐任务调 fxcorr-sim；
+	# 在此之前外部只能靠"轮询到 batches/roots 齐就 kill 本脚本"绕过（有 race）。
+	echo "make_testdata.sh: --prep-only，跳过 fxcorr-sim 生成" >&2
+else
+	for bid in "${BATCHES[@]}"; do
+		for i in "${!DSTATION[@]}"; do
+			st=${DSTATION[$i]}
+			rel=$(vdifrel "$st" "${DSDI[$i]}" "${DSNDS[$i]}" "$bid")
+			if [ -s "$FXCORR_ROOT_RAW/$rel" ]; then
+				echo "make_testdata.sh: skip existing raw/$rel" >&2
+			else
+				stationcmd "$bid" "$st" "${DSDI[$i]}" >> "$TASKS"
+			fi
+		done
 	done
-done
-# 任务并行执行；任一失败 xargs 退出 123 → set -e 终止脚本。
-# 空列表时跳过（GNU xargs 空输入仍会执行一次命令，BSD 不会，跨平台显式挡）
-if [ -s "$TASKS" ]; then
-	xargs -0 -P "$PAR" -n 1 bash -c < <(tr '\n' '\0' < "$TASKS")
+	# 任务并行执行；任一失败 xargs 退出 123 → set -e 终止脚本。
+	# 空列表时跳过（GNU xargs 空输入仍会执行一次命令，BSD 不会，跨平台显式挡）
+	if [ -s "$TASKS" ]; then
+		xargs -0 -P "$PAR" -n 1 bash -c < <(tr '\n' '\0' < "$TASKS")
+	fi
 fi
 
 # ---- ⑤ 软链 <DATA TABLE 文件名> → 最后 batch 的 VDIF ----
@@ -500,10 +514,22 @@ for i in "${!DSTATION[@]}"; do
 	# "相对目标跨文件系统会断"不成立（那是硬链接的限制；符号链接只是路径字符串）。
 	# 多 datastream 站的 DATA TABLE 每 ds 一行，各链到本 ds 的文件（data-spec 5.2）
 	rel=$(vdifrel "${DSTATION[$i]}" "${DSDI[$i]}" "${DSNDS[$i]}" "$last")
-	ln -sf "$rel" "$FXCORR_ROOT_RAW/${DSFILE[$i]}"
+	link="$FXCORR_ROOT_RAW/${DSFILE[$i]}"
+	# 已存在则不覆盖（2026-11-15）：DATA TABLE 的 FILE 名可能与某个批的规范名
+	# 同名（历史上 .v2d 派生出的 FILE 名就写成 <站>/<站>_<批号>_ds<N>.vdif），
+	# ln -sf 会**先删后建**——直接覆盖掉那批的真实数据（2026-11-14 事故：批 1
+	# 的 32 个 VDIF 被换成了指向批 1380 的软链）。而 mpifxcorr 基准另有铁律
+	# R10：软链批必须等于 .input 的 START 批（通常 = 批 1），已存在的软链正是
+	# 按该口径手工/前序建的，也不该被"最后一批"覆盖。
+	# 故：目标已存在（真实文件或软链）一律保留；`-e` 对悬空软链不成立，故加 -L。
+	if [ -e "$link" ] || [ -L "$link" ]; then
+		echo "make_testdata.sh: WARN: $link 已存在，保留不覆盖（避免删真实数据 / 保持 R10 软链批）" >&2
+		continue
+	fi
+	ln -sf "$rel" "$link"
 done
 if [ "${#BATCHES[@]}" -gt 1 ]; then
-	echo "make_testdata.sh: DATA TABLE links point at batch $last (last of ${#BATCHES[@]})" >&2
+	echo "make_testdata.sh: DATA TABLE links: existing kept as-is, newly created -> batch $last (last of ${#BATCHES[@]})" >&2
 fi
 
 # ---- ⑥ stdout 打印 batch_id ----

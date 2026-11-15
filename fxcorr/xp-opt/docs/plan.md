@@ -1,71 +1,56 @@
-# 优化路线（2026-11-08 初版）
+# 单任务优化路线（2026-11-15 重写）
 
-口径以 `app-fxcorr/docs/experiments/difx.md` 为准；本文件只写实现侧的执行计划。
+## 目标与口径
 
-## 目标与边界
+- **单任务** = 一个 (batch, ds 组)：一个 xpp 进程处理一个 ds 组，写 `.part`。
+- 指标：`T_xp(OMP=1, 同组) / T_xpp(P, 同组)`；P ≤ 16；绑核固定单 NUMA 节点。
+- 正确性：`.part` md5 与 xp 逐字节一致（SWIN 由 merge 写出后再核对）。
+- 多进程 × 多线程的组合与任务调度归**计算框架**；本目录只保证单任务在给定 P 下
+  尽可能快。
 
-- **`xp`（现役 `fxcorr-xp`）是稳定参照**，不改其行为；优化以**可替换实现**推进
-  （app-fxcorr 主线里的 `xpp` 命名），同一输入、同一 workdir、同一输出布局。
-- 先 profile 再定改动。候选方向（引自 `difx.md` §3.3）：
-  1. **任务粒度**：当前 4 组 × 批，评估按 ds / 频段继续拆分；
-  2. **串行段**：站级栈、XMAC、归约、I/O 拷贝；
-  3. **内存**：stream.bin 拷贝、NUMA、页缓存；
-  4. **绑核**：OMP 线程与 ds 读侧分离；
-  5. **调度**：XP_SLOTS / VTS / 批间流水（平台侧，见 app-fxcorr）。
-- 非目标：不在 difx 上重复 p419 的 A/B/C 全矩阵；不用端到端 B 的 wall 解释内核扩展性。
+## 已确认的结构事实（4 站 1.024 s）
 
-## 正确性判据（先过再谈性能）
+| 阶段 | 并行来源 | 单任务可并行度 | 备注 |
+|---|---|---|---|
+| station | 每个 datastream | 组内 ds 数（4 站 = 8） | P=8 实测约 7.5× |
+| xmac | 已用频率 × xmac stride | **1**（每组一个频段） | 旧实现单任务内串行；Step 2 改为 (baseline, pol) 任务 |
+| wacc | 每条 baseline | 6（4 站） | 待扩到 (baseline, freq) |
 
-- `xpp` vs `xp` 在同一批数据上的 SWIN/vis；
-- 记录数 `nb × (8S)²`（S = 站数）；
-- 优先做到**逐字节**一致；若并行归约改变顺序，用容差比较并**记录差异来源**，
-  不允许用容差换速度而不记录；
-- 每一轮正式结果必须记录 SWIN 的 md5（`metrics.json` / `summary.tsv`）。
+## 阶段
 
-## 实验矩阵
+1. **Step 1 标定**（完成）：xp OMP=1 与 xpp P=1/2/4/8/16 的单组基线。
+2. **Step 2 单任务并行**（进行中）：xmac 按 (baseline, pol) 任务并行；station
+   紧凑调度。P=8 的 wall 已从 12.7 s 降到 8.6 s（相对 xp1 5.80×）。
+3. **Step 3 xmac 内核**（完成）：诊断确认任务数 192、串行前导≈0、频率
+   3.0 GHz，扩展不足来自访存；AVX2 两种实现（target 克隆、整文件 -mavx2）
+   在整程序里都无收益（P=1 反而更慢），**已回滚**。保留 `spectra()`/
+   `numChannels()` 外提。下一步转向减少访存冗余（任务粒度/数据复用）。
+4. **Step 4 station 内部**（完成）：process 占 station 85%；FFT/unpack/pcal
+   22%，其余是每 (block, band) 的小循环。**Step 5**：库新增
+   `Mode::enableBlockPcal`（只停放 pcal），xpp 串行路径改为 ac/权重直累加、
+   pcal 仍按块序归约；`.part`/`pcal.bin`/PCAL 文本与 xp 逐字节一致，
+   station P=8 5.25→4.12 s、内存 396→90 MiB。
+5. **Step 5 参数表**（已完成）：`docs/parameters.md`——difx/p419 两套环境、
+   4 站 1.024 s 的 P 推荐与分阶段预期；其他站数/批长待补。
 
-| 轴 | 取值 | 说明 |
-|---|---|---|
-| 实现 | `xp` / 优化版 | 同输入、同任务数、同绑核 |
-| 站数 | 2 / 4 / 8 / 16 | 数据集 `workdir-<S>st-b<B>ms-n3` |
-| 批长 | 1.024 / 2.048 / 4.096 / 8.192 / 16.384 s | 当前已生成的数据集范围；更短批长视需要另造 |
-| OMP | 1 / 8 / 32（按需 2/4/16） | 先建立 2 站基线，再扩到 S=16 |
-| ds 组 | 全量 / 分片（`-g G`） | 分片用于任务粒度实验 |
+## 判据与纪律
 
-固定单元（建议，与 app-fxcorr 对齐）：
+- 每个变体：`.part` md5 必须等于 xp（4 站 1.024 s g0：
+  `56039479bdd341ef3072118c82019748`）。
+- xmac 单次波动约 ±5–10%，比较用 2 轮均值。
+- 正式结果用 `--formal`；一次性探针留仓库外临时区。
 
-- 内核曲线：**S=16、1.024 s、3 批**（12 个 xp 任务），最能暴露串行段；
-- 低负载对照：S=2/4/8 用于看任务粒度与开销；
-- 每轮先跑 `xp` 基线，再跑优化版；两者用同一 workdir、同一 batch、同一 OMP。
+## 环境覆盖
 
-## 指标
+- `ssh difx`：单任务优化与数据已完成（本文 Step 1–5）。
+- `ssh p419-n0`：**已完成**（h04r4n03，Hygon 30 核；宿主二进制 + `env.sh`，
+  fengine 由 fp 现场生成）。P=8 相对 xp1 为 7.53×，分阶段表见
+  `docs/log.md` 与 `results/README.md`。
 
-- 单任务 `wall_s`（p50/p95/max，多批重复时）、`user_s`/`sys_s`、峰值内存；
-- 强扩展效率 `E(p) = T(1) / (p × T(p))`；
-- 阶段耗时（station/read/xmac/wacc/…）用于定位串行段；
-- SWIN md5 与记录数用于正确性。
+## 当前状态
 
-## 工作流
-
-1. 探针/一次性脚本放 `scratch/scripts/<YYYYMMDD>-<topic>/`，结果放
-   `scratch/results/`；
-2. 稳定的测量用 `scripts/run_xp.sh`，临时实验不加 `--formal`；
-3. 进入正式台账的实验加 `--formal`，结果落 `results/<日期>/<run-id>/` 并追加
-   `results/summary.tsv`；
-4. 每轮跑完在 `docs/log.md` 记过程与结论，失败也记；
-5. 优化版二进制通过 `run_xp.sh -b DIR` 挂载，源码改动在 `applications/fxcorr-xp/`
-   （或新建的 `fxcorr-xpp`）里，构建与镜像重建按仓库 `build.md` / `fxcorr/docker/`。
-
-## 当前状态与下一步
-
-- 2026-11-08：2 站 1.024 s 基线完成（OMP 1/8/16），见 `results/` 与 `docs/log.md`；
-- 2026-11-08：`fxcorr-xpp` 建立，band 并行实测劣化（413 s vs 串行 91.9 s）；
-- 2026-11-10：**方案 A 大粒度版已实现**（槽 = 全局块索引、每 subint 一次归约，
-  `FXCORR_XPP_BLOCK_THREADS`，默认关闭），编译通过；**逐字节验证待完成**。
-  期间发现并修复 `make sync` 用 `rsync -az` 按时间戳跳过、导致远端长期跑旧
-  二进制的事故（改为 `-azc`，旧“逐字节一致”结论作废，见 `docs/log.md`）。
-- 下一步：
-  1. 重建镜像并完成大粒度版的 SWIN / pcal.bin / PCAL 文本逐字节验证，
-     再测 OMP=1/16 × BLOCK=2/4/8；
-  2. S=16、1.024 s、3 批的 xp 基线（对齐 app-fxcorr 的固定单元）；
-  3. profile：station 段内部（FFT/unpack/旋转/frac sample）与 xmac 串行段。
+- 4 站 1.024 s、g=0..3 正式矩阵（2 轮均值，含 wacc 优化）：xp1 48.71 s；
+  xpp P=1/2/4/8 为 38.73/22.15/12.25/7.05 s，相对 xp1
+  1.26×/2.20×/3.98×/6.91×。P=8 阶段：station 4.04、xmac 2.32、wacc 0.17 s。
+- 下一步：station 的 process 仍占 85%（per-band 拷贝/旋转/自相关的融合）；
+  其次 xmac 的访存复用与 wacc；p419-n0 的复测待补。
