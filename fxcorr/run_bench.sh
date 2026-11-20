@@ -473,7 +473,11 @@ fi
 # **P5 起每节点起一份**：内联那份只看得到启动节点，跨节点时其余节点的内存与流量
 # 全漏掉，而那两个数正是 P5 要的。Slurm 多节点分配下用 srun 分发（--overlap：与
 # mpirun 并存、不排队等资源），单节点直接后台跑——两条路走同一个脚本，口径不漂。
-SAMPLEDIR="$WORKDIR/bench/.p5-sample.$$"
+# 2026-11-18：目录名加主机名与随机后缀。批级 mpifxcorr 每节点 1 实例、多实例共享
+# 同一 workdir 的 bench/，而 $$ 是容器内 PID、跨节点会重号——撞上时报
+# "rm: cannot remove '.p5-sample.<pid>': Directory not empty"，进而 rc=1（C 32n
+# 实测 1/1481 还伴随 prterun rank 启动拉长到 800+ s）。
+SAMPLEDIR="$WORKDIR/bench/.p5-sample.$(hostname -s).$$.${RANDOM}"
 rm -rf "$SAMPLEDIR"; mkdir -p "$SAMPLEDIR"
 # mpirun 失败时 set -e 会直接跳出，采样器与临时目录得由 trap 收——P4 那份内联采集器
 # 没有这条，mpirun 报错时它会一直挂到 6 小时兜底才走。

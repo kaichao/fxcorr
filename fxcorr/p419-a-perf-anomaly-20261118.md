@@ -1,7 +1,11 @@
 # p419 方案 A 性能异常排查记录（2026-11-17 ~ 11-18）
 
-**状态**：未结案。首要嫌疑已定位到"wrapper 里的 `taskset` 覆盖 rankfile 逐 rank 绑定"，
-但**尚未做判别实验**。本文把现象、口径、已排查项、证据与反证完整记录，供后续分析接手。
+**状态**：**已结案（2026-11-18）**。根因确认 = wrapper 里的 `taskset` 覆盖 rankfile 的
+逐 rank 单核绑定；已改为"有 rankfile 时不 taskset"，**逐核钉扎成为方案 A 的标准配置**，
+方案 C 经核对本来就是这个口径、无需改动。P0（亲和性实证）与 P1（2n 全量 A/B/A）已完成，
+P2（8n 复测）按决定暂不执行。本文保留完整证据链，供后续引用。
+
+> 结案数据见 §5.5；未做的实验与理由见 §8。
 
 **读者**：接手本问题的人或模型。所有数字都可用 §9 的路径复算。
 
@@ -150,7 +154,25 @@
 全局性因素——最可能是**跨 NUMA 迁移**：节点 4 个 NUMA 域，rankfile 把 rank 钉在某个核
 （同时钉住了它的局部内存域），taskset 放开后线程被调度器来回迁移，远端内存访问比例上升。
 
-### 5.3 反证与它的问题
+**机制要写准**：rankfile 与 taskset 用的是**同一组 28 个核**（I/O `1-4` + 计算
+`5-22,24-29`），差别不是"范围变宽"，而是**逐 rank 的粒度从单核变成了整个集合**。
+所以受伤的不是"越界"，而是"钉扎失效"——I/O rank 不再独占 1-4、计算 rank 不再独占
+计算核，内核可以随时把任意 rank 挪到任意核。
+
+### 5.3 一条未被利用的强线索：每 rank 工作量分布
+
+mpifxcorr 收尾统计（同数据、同 NP、均值逐位相同）：
+
+| | min | mean | max |
+|---|---:|---:|---:|
+| 历史（无 taskset，11-09） | 415 | **500.49** | **520** |
+| 今天（有 taskset，11-17） | 426 | **500.49** | **580** |
+
+总工作量不变，但 **max 高 11.5%、min 只高 2.7%**。这是"**少数 rank 变慢、其余 rank 通过
+动态分配补位**"的直接证据：wall 由最慢的那批 rank 决定，所以整体变慢的幅度小于"所有
+rank 均匀变慢"的预期，也解释了为什么 8n 在 1:1 配比下仍然慢。
+
+### 5.4 反证与它的问题
 
 现役脚本里"taskset 必须加"的依据是一组 2026-11-06 的对照：
 
@@ -165,6 +187,35 @@ T5 （11-06，rankfile 无 taskset）：2612.3 s
 
 更直接的证据是 11-09 的同一脚本六档连跑：**无 taskset** 下 4n = 1364.7–1403.8 s、
 8n = 1362.2–1455.3 s，完全正常。因此"无 taskset 会 2 倍变慢"不成立。
+
+### 5.5 2026-11-18 实测验证（P0 + P1，结案依据）
+
+**P0：运行期逐 rank 采样**（2n `h01r1n15`/`i01r1n17`，8 批 × 2.048 s，每 5 s 采一次 `/proc`）
+
+| 臂 | `Cpus_allowed_list` | 迁移 / 75 s | core rank 等队列 | ds rank 等队列 | wall |
+|---|---|---|---:|---:|---:|---:|
+| wrapper taskset | 三类 rank **全部 `1-22,24-29`** | 32–104 | 28–36% | 29–35% | 291.9 s |
+| 无 taskset | core 各占**独立单核**（24 个不同核）、ds `1-4`、manager `1` | **0** | 10–13% | 75–80% | **187.1 s** |
+
+**P1：2n 2.048×60，A/B/A 同节点相邻时段**
+
+| 轮次 | 配置 | wall | 记录 | 相对历史 1341.4 s |
+|---|---|---:|---|---:|
+| A1 | taskset | 1904.1 s | 61440/61440 ✅ | +42.0% |
+| B1 | 无 taskset | **1355.7 s** | 61440/61440 ✅ | **+1.1%（恢复）** |
+| A2 | taskset | 1895.3 s | 61440/61440 ✅ | +41.3% |
+
+A1 与 A2 相差 0.5%（无时段漂移）；B1 与 11-06 历史同档只差 1.1%，且节点是全新的。
+**taskset 的代价 = 1.40×，去掉即完全恢复。**
+
+**机理归因**：wrapper 是 **mpirun 的子进程**，mpirun 先按 rankfile 给每个 rank 设了
+单核亲和，wrapper 随后执行 `taskset` 把这层掩码**替换**成 28 核；此后内核可自由迁移
+（实测 32–104 次/75 s），I/O rank 与计算 rank 的核隔离消失，core rank 的等队列时间
+从 10% 升到 30%+。方案 C 不受影响，因为它的 `taskset` 作用在 **mpirun 本身**（父进程），
+逐 rank 绑定在其后由 mpirun 施加。
+
+**修复**：`a-side.sh` 改为"**有 rankfile 时不 taskset**"，`-host` 路径（无 rankfile、
+mpirun 不绑核）仍保留 taskset。逐核钉扎成为方案 A 的标准配置。
 
 ---
 
@@ -194,14 +245,27 @@ T5 （11-06，rankfile 无 taskset）：2612.3 s
 而 11:22 那次的报错是第三种形态：
 `The map-by directive contains an unrecognized qualifier: file=…; Valid qualifiers:
 pe=,span,oversubscribe,nooversubscribe,nolocal,hwtcpus,corecpus,inherit,noinherit,file=,ordered`
-——既不是 5.0.7 的接受行为，也不是 4.1.4 的 `unrecognized modifier`。**结论：原镜像里的
-OpenMPI 是第三个构建（很可能是早期 5.0.x），版本号无从复核（原 sif 无备份）。**
+——既不是 5.0.7 的接受行为，也不是 4.1.4 的 `unrecognized modifier`。当时的结论是
+「原镜像里的 OpenMPI 是第三个构建（很可能是早期 5.0.x）」。
+
+> **2026-11-18 订正：上面这条「第三个构建」的结论作废。**同一报错在**当前 5.0.7
+> 镜像**上稳定复现，根因是 **rankfile 路径含连字符 `-`**——5.0.7 解析
+> `--map-by rankfile:file=<path>` 时遇到 `-` 就报这一条；`--rankfile` 会被内部
+> 转成同一形式，同样中招。已逐项排除：路径长度（60 字符的
+> `$HOME/a/b/c/d/e/f/rf.deep` 正常）、文件系统（同一 ParaStor 挂载内
+> `fxcorr/zz/rf` 正常、`a-logs/rf` 失败）、rankfile 内容（2 行与 57 行同结论）、
+> 主机名写法（`localhost` / `h03r4n01`）、`--oversubscribe` 与 `--bind-to`
+> 的组合。11-17 11:22 那次之所以失败，是因为当天把 rankfile 从 `/tmp/rf` 搬到了
+> `…/a-logs/rankfiles/`，路径第一次带上连字符——与镜像版本无关。修复在 app-fxcorr
+> 仓库 `scripts/exp/lib/a-side.sh`：单节点分支先拷到 `$HOME/fxcorr_rf/`（无连字符）
+> 再传。
 
 ### 6.3 影响面界定
 
 - **A 的多节点正式口径完全不受影响**：rankfile 由宿主 HPC-X `mpirun` 4.1.4rc1 解析，
   容器内 mpirun 从不执行。
-- 只有 **1n inproc 诊断路径**会踩到；且 5.0.7 下该路径本可用。
+- 只有 **1n inproc 诊断路径**会踩到；5.0.7 下路径**不含 `-`** 时该路径可用，
+  含 `-` 必失败（见上方订正）。
 - 因此"容器 OpenMPI 支不支持 rankfile"**不可能**是 A 性能异常的原因；
   把它当原因去换镜像，属于把诊断路径的问题误扩到正式口径。
 
@@ -211,48 +275,115 @@ OpenMPI 是第三个构建（很可能是早期 5.0.x），版本号无从复核
 
 | 候选 | 状态 | 证据强度 |
 |---|---|---|
-| wrapper `taskset` 覆盖 rankfile 绑定 | **未验证，首要嫌疑** | 中—强（时间同步、8n 同节点、1n/4n 定量吻合） |
-| 跨 NUMA 迁移（taskset 放开后） | 未验证，与上一条同源 | 中（用于解释 8n 的 +19%） |
+| wrapper `taskset` 破坏 rankfile 的逐核钉扎 | **未验证，首要嫌疑** | 中—强（时间同步、8n 同节点、1n/4n 定量吻合） |
+| 跨 NUMA 迁移（钉扎失效后） | 未验证，与上一条同源 | 中（解释 8n 的 +19%）；**注意**：迁移不必然导致远端访存，需实测，不能由推断代替 |
+| L3/缓存局部性下降 | 未验证 | 中（与 NUMA 并列，二者需同时测量才能区分） |
+| I/O rank 与计算 rank 的隔离消失 | 未验证 | 中（原设计 4 I/O 核 + 24 计算核，现全部混用） |
+| rank 间负载不均衡放大 | **有间接证据** | 中（`max subints` 520→580，见 §5.3） |
 | `env -u OPAL_PREFIX -u OMPI_HOME` | 已量化，影响 ≤1.2% | 弱（已回滚） |
 | 4n 换 1 台节点 | 未量化 | 弱 |
-| 数据 / I/O / CPU / 镜像 / 脚本其余部分 | **已排除** | 强 |
+| 容器内运行时库（`libmpi`/glibc）与历史镜像的差异 | 无法复核（原 sif 无备份） | 未知；若去掉 taskset 仍慢则须重查 |
+| 数据 / I/O / CPU / 镜像可执行文件 / 脚本其余部分 | **已排除** | 强 |
 
 ---
 
-## 8. 建议的判别实验（按优先级）
+## 8. 后续实验方案
 
-### E1（决定性，约 28 min）4n 0.256 + `A_NO_TASKSET=1`
+> **执行状态（2026-11-18）**：P0、P1 **已完成并结案**（数据见 §5.5）；P4 的修复
+> **已实施**（`a-side.sh`：有 rankfile 时不 taskset）。**P2（8n 复测）按决定暂停**，
+> P3 不再需要（P1 已给出定案）。下表保留原始设计，供以后要补测时参考。
+
+原则：**观测内建在每一轮里**，不把"采集指标"单列成一个阶段；每一阶段先给判据，
+判据不满足才进入下一阶段。
+
+### 前置：消掉第二个变量
+
+本地 `scripts/exp/lib/a-side.sh` 已回滚（去掉 `env -u OPAL_PREFIX -u OMPI_HOME`），
+但运行根 `~/app-fxcorr-xpp` 仍是带 `env -u` 的旧副本。先同步，保证 A 臂与 B 臂
+只差 `taskset` 一个变量：
 
 ```sh
-# 在 p419-n1（cstu0036），其余参数与 2026-11-17 08:31 那轮完全一致
-NODES="h03r3n11 h04r1n07 h04r2n05 h04r4n03" N=4 \
-W=/work2/cstu0036/mydata/fxcorr/workdir-b0256ms SSH_PORT=50022 \
-A_NO_TASKSET=1 bash scripts/exp/run-a.sh 960 0.256 4n-a-0256-notaskset
+rsync -av scripts/exp/lib/a-side.sh p419-n1:app-fxcorr-xpp/scripts/exp/lib/
 ```
 
-- **判定**：≈1390–1450 s → taskset 是主因，结案；
-  ≈1600 s → taskset 无关，转 E2。
+### P0（约 15 min）亲和性与调度实证
 
-### E2（NUMA 证据，与 E1 同时或事后）运行中采计数器
+不跑完整基准：用**小批数短跑**（4n + 2.048 × 20 批，约 3–4 min）让进程活起来，
+期间采样，跑完自动收尾。两个脚本（app-fxcorr 仓库，待同步到运行根）：
 
 ```sh
-numastat -p $(pgrep -x mpifxcorr | head -1)     # 每个 rank 的本地/远端内存比
-perf stat -e node-load-misses,node-loads -p <pid>  # 跨 NUMA 访存比例
+# 一体化驱动（推荐）：起短跑 + 采样 + 汇总，一臂约 6 min
+bash scripts/exp/p0-affinity.sh taskset      # A 臂
+bash scripts/exp/p0-affinity.sh notaskset    # B 臂
+# 采样器也可单独用于 P1/P2 的完整轮次：
+NODES="..." FXCORR_MPI_RANKFILE=... bash scripts/exp/lib/probe-affinity.sh 90 10 <outdir>
+bash scripts/exp/lib/probe-affinity.sh summary <outdir>
 ```
-两种绑定各采一次，比较远端命中率。
 
-### E3（灵敏度对照，约 25 min）1n 2.048 + `A_NO_TASKSET=1`
+对三类 rank（manager=rank 0 / ds=rank 1–32 / core=rank 33+）各取样本，检查：
 
-1n 的差异最大（1.95×），信噪比最高；**但注意 1n 默认走 inproc 路径**，
-需要 `A_MPI_LAUNCH=host` 才与历史 1343.0 s 同口径。
+| 指标 | 来源 | 期望（无 taskset） | 期望（有 taskset） |
+|---|---|---|---|
+| `Cpus_allowed_list` | `/proc/<pid>/status` | 单核，与 rankfile 一致 | 全部 `1-22,24-29` |
+| `nr_migrations` | `/proc/<pid>/sched` | ≈0 且不增长 | 持续增长 |
+| run-queue 等待 | `/proc/<pid>/schedstat` 第 2 字段 | 占比低 | 明显上升 |
+| 页分布 | `/proc/<pid>/numa_maps` | 集中在本地域 | 分散 |
 
-### E4（复核历史脚本）直接用 `~/fxcorr/fxcorr/p419/a-side.sh` 重跑 4n 0.256
+**判据**：有 taskset 时三类 rank 的 `Cpus_allowed_list` 全部等于 28 核集合、
+且 `nr_migrations` 显著增长 → "taskset 覆盖 rankfile"从推断变成实测证据。
 
-验证历史基线在今天的环境里仍能复现 ~1394 s。若不能，说明环境也变了，
-需要重新审视 §4 的结论。
+### P1（3 × 28 min）4n A/B/A
 
-**注意**：E4 会把 wrapper 写进 `$BENCHWRAP`（默认 `~/bench-wrap-26/bin`），
-与现役脚本共用同一目录，跑之前用 `A_BENCHWRAP=` 指到独立目录，避免互相覆盖。
+```sh
+# A1 → B → A2，同一批节点、同一时段连续跑
+NODES="..." N=4 W=/work2/cstu0036/mydata/fxcorr/workdir-b0256ms SSH_PORT=50022 \
+  bash scripts/exp/run-a.sh 960 0.256 4n-a-A1
+… A_NO_TASKSET=1 … 4n-a-B1
+… （A2 同 A1）
+```
+
+每轮都挂 `probe-affinity.sh`（10 s 间隔），另存 `/proc/stat` 逐核快照。
+
+**判据**：`B ≈ 1390–1450` **且** `A1 ≈ A2 ≈ 1615` → taskset 是主因，转 P4。
+`B ≈ 1600` → taskset 无罪，转 P3。
+
+### P2（2 × 30 min）8n A/B（关键，且必须同批长）
+
+统一用 2.048（此前把 2.048 的 +27.5% 与 4.096 的 +19.4% 混作一个数，需重测）。
+8n 每节点 28 rank / 28 核，超订为零，是唯一能把"CPU 竞争"剥离出去的一组。
+
+额外采集：每 rank 的完成时间与处理量（验证 §5.3 的 max 580 现象）。
+
+**判据**：`B ≈ 1360–1400` → affinity 策略解释全部损失；`B ≈ 1600` → 存在第二种因素。
+
+### P3（仅当 P2 有残余差距）机理分解，单变量递进
+
+1. **隔离恢复**：保留 taskset，但按 rank 类型分掩码（base rank → `1-4`，
+   core rank → `5-22,24-29`）。回到 B 水平 ⇒ 主因是"隔离被破坏"；仍慢 ⇒ 主因是迁移/访存。
+2. **迁移 vs 缓存**：`nr_migrations`、逐核 `/proc/stat` 不均衡、`/proc/<pid>/schedstat`
+   的等队列时长；有 `perf` 时再加 `cpu-migrations` / `cache-misses` / 远端 DRAM 计数。
+3. **运行时库**：容器内 `ldd /usr/local/difx/bin/mpifxcorr`、`mpirun --version` 留档
+   （仅当 B 臂恢复不了时才有意义——原 sif 无备份，历史运行时库已不可复现）。
+4. **MPI 同步/不均衡**：从收尾统计的 `min/mean/max subints` 与各 rank 完成时间
+   看离散度是否随配置变化。
+
+### P4 修复与回归
+
+- wrapper：**存在 rankfile 时不 taskset**（`-host` 路径保留 taskset——那才是它当初的理由）
+- 启动后自检：跑前打印各 rank 的 `Cpus_allowed_list`，与 rankfile 比对
+- 重跑受影响的 A 档（1n 2 档 + 4n 4 档 + 8n 2 档），更新主表并标注新口径
+
+### 成本与止损点
+
+P0 15 min → P1 1.5 h → P2 1 h ≈ **3 h 机时**（不含排队）。
+机时紧张时可用**短探针**替代完整轮：每臂只跑 5 min，比较 mpifxcorr 的
+`mjd/seconds` 推进速率（今天 1577–1596 s 的几轮内部墙钟很稳定，速率区分度足够），
+10 min 拿到方向性结论，再决定是否跑满。
+
+### 待定事项（需要拍板）
+
+1. 旧的 Slurm 作业数组 `23219412_[1-10]` 是否 `scancel`；
+2. 重申请节点时是否沿用原 4 台（保证"同节点"对照），还是用当前 idle 节点（更快）。
 
 ---
 

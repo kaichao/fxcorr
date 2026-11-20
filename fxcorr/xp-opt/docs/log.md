@@ -419,3 +419,62 @@ P=1 40.03→38.73，wacc 从 0.35–0.43 降到 0.13–0.22。
 - 与 difx 相比：p419 单核更慢（xp1 139.8 vs 48.7 s），但 xmac 扩展更好
   （27.7→5.7 s，4.9×；difx 为 6.5→2.3 s，2.8×），P=8 加速比 7.53× 略高于
   difx 的 6.91×。
+
+## 2026-11-19 p419-n1 全 OMP 扫描（补 xp 的 P=2/4/8）
+
+目的：此前 xp 只有 OMP=1 参照，xpp 的优势在 P≥2 时没有同节点对照。本轮
+在同一节点把 xp 与 xpp 的 P=1/2/4/8 全部测一遍，两侧统一绑核。
+
+环境：`ssh p419-n1` → `ssh -p 50022 h04r1n07`（Hygon C86 7185，32 核
+4 NUMA × 8、`nproc` 30，123 GiB；无 docker，宿主二进制 + `env.sh`）。
+与 11-16 的 p419-n0（h04r4n03）同型。
+
+准备（p419 源码/构建补齐）：
+
+- 原树停在 10 月：无 `applications/fxcorr-xpp`，`install-difx` 无
+  fp/xp/xpp 注册，`fxcorr-f` 仍在调用旧 API（`enableBlockAccumulators`
+  签名变化、`addPcal` → `addPcalBlock`），与新 `fxcorrcommon` 不匹配，
+  第一次构建在 fxcorr-f 处失败（退出码 1）。同步
+  `applications/fxcorr-{f,x,sim,fp,xp,xpp}`、`libraries/fxcorrcommon`、
+  `install-difx`，并把 `build.sh` 的 `--doonly=` 改为只含
+  `fxcorrcommon,fxcorr-f,fxcorr-x,fxcorr-sim,fxcorr-fp,fxcorr-xp,fxcorr-xpp`
+  后重建（退出码 0；`fxcorr-fp` 12:34、`fxcorr-xp` 12:35、
+  `fxcorr-xpp` 12:35）。
+- 数据：`/work2/cstu0036/mydata/fxcorr/workdir-b1024ms`（4 站 × 8 ds、
+  4 组、batch 00000001）；实验 workdir `~/p419-wd/workdir-4st-b1024ms`
+  （config/batches/raw 软链、fengine 空）；`fxcorr-fp` 每 8 个一批、
+  后台作业生成 32 个 `stream.bin`。
+- 坑：`env.sh` 在 `set -u` 下报 `PKG_CONFIG_PATH: unbound variable`——
+  脚本先 `PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-}` 再 source。
+- sanity：xp OMP=1 g0 与 xpp P=8 g0，`.part` md5 `c6ee3ece…`（与 n0 相同）。
+
+矩阵（g=0..3、xp/xpp 各 P=1/2/4/8、每档 2 轮，共 64 run；两侧统一
+`taskset 0..P-1` + `OMP_PROC_BIND=close OMP_PLACES=cores`——xp 原脚本
+不绑核，但 OMP>1 不绑会跨 NUMA 抽签，故本次两侧同口径）：
+
+| 实现 | P | wall | station | read | xmac | wacc | 相对 xp1 |
+|---|---|---|---|---|---|---|---|
+| xp | 1 | 139.37 | 105.69 | 0.79 | 27.70 | 4.41 | 1.00× |
+| xp | 2 | 85.00 | 52.75 | 1.73 | 27.58 | 2.26 | 1.64× |
+| xp | 4 | 58.16 | 26.88 | 1.74 | 27.55 | 1.34 | 2.40× |
+| xp | 8 | 32.86 | 14.10 | 1.50 | 15.75 | 0.91 | 4.24× |
+| xpp | 1 | 122.66 | 93.07 | 1.66 | 26.79 | 0.59 | 1.14× |
+| xpp | 2 | 63.97 | 46.80 | 1.71 | 14.56 | 0.32 | 2.18× |
+| xpp | 4 | 34.38 | 23.72 | 1.72 | 8.21 | 0.18 | 4.05× |
+| xpp | 8 | 20.00 | 12.21 | 1.46 | 5.67 | 0.15 | 6.97× |
+
+- 64 次运行 `.part` md5 全部一致（g0 `c6ee3ece…`、g1 `7872b32c…`、
+  g2 `e78e011c…`、g3 `1437332…`），且与 p419-n0 的 11-16 结果逐位相同。
+- **xp 的 xmac 不随线程扩展**：27.70/27.58/27.55 s（P=1/2/4），P=8 才
+  15.75 s；xp 的 wall 扩展主要来自 station（105.7→14.1，7.5×）。xpp 的
+  xmac 近线性（26.8→14.6→8.2→5.7 s）。同 P 的 xpp/xp 比：
+  1.14×/1.33×/1.69×/1.64×——xpp 优势随线程数放大。
+- 内存：峰值 RSS xp 398 MiB、xpp 234 MiB（−41%）；P=8 的 user 时间
+  xp 206.2 s、xpp 131.1 s。
+- 与 p419-n0 对比：xp1 139.37 vs 139.81（−0.3%）；xpp P=1/2/4/8
+  122.66/63.97/34.38/20.00 vs 119.78/61.59/32.55/18.57（+2.4%/+3.9%/
+  +5.6%/+7.7%；P=8 两轮 21.4/19.4 s，在 xmac ±5–10% 的已知单次波动内）。
+- 产物：远端 `~/p419-matrix-20261119/matrix.tsv`，已同步
+  `results-detail/20261119-p419n1/`；矩阵脚本
+  `~/p419-wd/{gen_streams,sanity,matrix_p419v2}.sh`（本地副本
+  `fxcorr-scratch/xp-opt/scripts/20261119-p419/`）。
